@@ -1,12 +1,11 @@
 # fluxel-rhi
 
-`fluxel-rhi` is Fluxel's native-device bootstrap crate. It opens one headless
-Direct3D 12 or Vulkan device on Windows, owns it safely, and reports adapter
-facts for a later renderer.
+`fluxel-rhi` opens one headless Direct3D 12 or Vulkan device on Windows and
+creates opaque owned buffers and 2D textures through a safe portable contract.
 
-It is deliberately a narrow A1 milestone, not a general graphics API. It does
-**not** allocate resources, record commands, submit work, acquire or present a
-surface, compile shaders, or implement
+It is deliberately a narrow 0.1.1 milestone, not a general graphics API. It
+does **not** record commands, submit work, map/read back memory, acquire or
+present a surface, compile shaders, or implement
 `fluxel_rendergraph::ExecutionBackend`. The render-graph crate's CPU-only
 `TestRhi` remains the executable backend used by the numbered graph examples.
 
@@ -15,7 +14,7 @@ surface, compile shaders, or implement
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.0"
+tag = "v0.1.1"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -27,7 +26,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.0"
+tag = "v0.1.1"
 default-features = false
 features = ["dx12"]
 ```
@@ -65,9 +64,11 @@ cargo run -p fluxel-rhi --example 01_open_device -- dx12
 cargo run -p fluxel-rhi --example 01_open_device -- vulkan
 ```
 
-`Device` retains the queue, device, adapter, and instance for its lifetime.
-Dropping it closes the headless native device. There are intentionally no raw
-native handles to extract and no submission methods to call.
+`Device::create_buffer` and `Device::create_texture` validate RenderGraph's
+typed descriptors and usage sets before entering the native boundary. Returned
+resources expose only descriptor, actual allowed usage, opaque identity and a
+cloneable lease. The final resource or lease destroys the native object once;
+it also retains the owning device. There are no raw handles or submission APIs.
 
 ## Core concepts
 
@@ -116,8 +117,8 @@ establish the requested facility, opening fails with
 `OpenError::ValidationUnavailable` rather than continuing with a weaker
 configuration.
 
-Validation only covers the device-open path today. It cannot validate resource
-states or command synchronization until those operations exist in this crate.
+Validation covers device opening and native resource creation today. It cannot
+validate command states or synchronization until those operations exist.
 
 ## Platform compatibility
 
@@ -136,10 +137,10 @@ makes no frame-time, throughput, allocation, synchronization, or
 GPU-performance claim. It keeps native objects in a private backend module to
 establish a safe ownership boundary for later vertical slices.
 
-The current scope ends after successful device bootstrap and fact reporting.
-Native GPU conformance needs real resource allocation with creation usage,
-transition/barrier emission, command recording, submission/completion, and
-readback first.
+The current scope ends after owned resource creation, actual-usage reporting,
+and lease-backed destruction. Native execution conformance still needs
+transition/barrier emission, command recording, submission/completion and
+readback.
 
 ## Testing and development
 

@@ -1,11 +1,11 @@
 # Fluxel RHI Design
 
-**Status: 0.1.0 migration baseline**
+**Status: 0.1.1 owned-resource baseline**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
-not a promise of a complete RHI. In 0.1.0 the crate safely opens one headless
-DX12 or Vulkan device on Windows and reports native adapter facts. It does not
-implement `ExecutionBackend`, resource allocation, command encoding,
+not a promise of a complete RHI. In 0.1.1 the crate safely opens one headless
+DX12 or Vulkan device on Windows and creates lease-backed owned buffers and
+textures with verified actual usage. It does not implement `ExecutionBackend`, command encoding,
 submission, completion, readback, surfaces, or presentation.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
@@ -40,7 +40,7 @@ makes native failures local to a small crate. It also avoids exposing
 `wgpu-hal` types as public API: applications receive Fluxel domain values
 rather than borrowing an unstable internal HAL representation.
 
-## A1 lifecycle and ownership
+## Device and owned-resource lifecycle
 
 `Device::open(backend, options)` is deliberately explicit. It chooses no
 fallback backend, enumerates the requested API's adapters, selects the given
@@ -58,12 +58,20 @@ Device::open
   -> public Device { private native ownership, copied facts }
 ```
 
-The public `Device` deliberately has no handle getter. Internally it owns the
+The public `Device` deliberately has no handle getter. Internally it shares the
 queue, device, adapter, and instance in declaration order. Rust drops fields in
 declaration order, so the private representation orders them queue, device,
 adapter, instance: dependents disappear before the factory/instance state they
-use. This establishes a simple safe shutdown rule before command resources are
-introduced.
+use. Each opaque resource and its cloneable lease retain that native owner;
+the final owner destroys the resource exactly once before the device can be
+destroyed.
+
+Creation reuses RenderGraph's typed descriptors and usage sets. Malformed
+shapes, incompatible format/usage combinations, and `Present` on an ordinary
+owned texture fail before creation. Reported allowed usage is the conservative
+portable projection of the successful HAL creation descriptor and format
+facts. It is an authorization upper bound, not an exhaustive claim about every
+operation a physical API might technically permit (notably DX12 buffers).
 
 All HAL calls and all `unsafe` are contained in `src/imp.rs`. Each unsafe block
 documents the validity and lifetime condition it relies on. The safe public
@@ -128,15 +136,17 @@ and clear validation semantics.
 
 ## CI and test evidence
 
-The normal test suite verifies error behavior without opening a driver where
+The normal test suite verifies descriptor rejection and lowering projections without opening a driver where
 possible. Windows CI builds and tests each DX12/Vulkan feature combination, so
 it is a native compile/link gate. Actual device-open and required-validation
 tests are `#[ignore]`, because a hosted runner's installed driver and validation
 layers are environmental facts, not reproducible source-level prerequisites.
 
-Developers run ignored tests explicitly on provisioned hardware. Results from
-those runs are hardware evidence for bootstrap only; they do not establish
-resource, barrier, command, or presentation conformance.
+Developers run ignored tests explicitly on provisioned hardware. The 0.1.1
+fixture creates buffers and textures on both backends with required native
+validation, verifies exact projected usage and rejection recovery, and exercises
+lease teardown. It establishes resource creation only, not barrier, command, or
+presentation conformance.
 
 ## Evolution constraints
 
