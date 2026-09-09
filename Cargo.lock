@@ -300,7 +300,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fluxel-renderer"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "fluxel-rendergraph",
  "fluxel-rhi",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "fluxel-rendergraph"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "criterion",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "fluxel-rhi"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ash",
  "fluxel-rendergraph",

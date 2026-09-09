@@ -55,6 +55,13 @@ fn caps() -> DeviceCapabilities {
                 .build(),
         )
         .texture_format(
+            TextureFormatCapabilities::builder(TextureFormat::Rgba8UnormSrgb)
+                .sampled(true, true)
+                .storage(true, true)
+                .copies(true, true)
+                .build(),
+        )
+        .texture_format(
             TextureFormatCapabilities::builder(TextureFormat::Rgba16Float)
                 .storage(true, true)
                 .copies(true, true)
@@ -511,9 +518,74 @@ fn texture_copy_rejects_out_of_bounds_and_unsupported_shapes() {
 
 #[test]
 fn texture_copy_rejects_incompatible_formats() {
+    for destination_format in [TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba16Float] {
+        let mut graph = RenderGraph::new();
+        let source = graph.create_texture("source", texture(TextureFormat::Rgba8Unorm));
+        let destination = graph.create_texture("destination", texture(destination_format));
+        let initialized = graph.add_compute_pass(
+            "init",
+            |pass| {
+                let (source, _) = pass.write_texture(
+                    source,
+                    TextureWriteUse::Storage,
+                    TextureRange::whole(),
+                    WriteCoverage::Full,
+                );
+                let (destination, _) = pass.write_texture(
+                    destination,
+                    TextureWriteUse::Storage,
+                    TextureRange::whole(),
+                    WriteCoverage::Full,
+                );
+                ((source, destination), ())
+            },
+            |_, _, _, _| Ok(()),
+        );
+        let copy = graph.add_copy_pass(
+            "copy",
+            |pass| {
+                let source = pass.read_texture(&initialized.output.0, TextureRange::whole());
+                let (output, destination) = pass.write_texture(
+                    initialized.output.1,
+                    TextureRange::whole(),
+                    WriteCoverage::Full,
+                );
+                (output, (source, destination))
+            },
+            |commands, _, handles, _| {
+                commands.copy_texture(
+                    &handles.0,
+                    &handles.1,
+                    TextureCopyRegion {
+                        source_origin: [0; 3],
+                        destination_origin: [0; 3],
+                        extent: [1, 1, 1],
+                        source_mip_level: 0,
+                        destination_mip_level: 0,
+                    },
+                )
+            },
+        );
+        graph.export_texture(
+            copy.output,
+            ExportTextureContract {
+                final_state: ResourceAccessState::CopyDestination,
+            },
+        );
+        let compiled = graph.compile(&caps()).unwrap().graph;
+        let registry = TestRegistry::new(device());
+        assert!(matches!(
+            executor().execute(&compiled, compiled.instantiate_local(FrameInputs::new(())), &registry, &registry),
+            Err(ExecutionError::Recording(error)) if error.kind == RecordingErrorKind::InvalidCommandArgument
+        ));
+    }
+}
+
+#[test]
+fn texture_copy_accepts_matching_srgb_formats() {
     let mut graph = RenderGraph::new();
-    let source = graph.create_texture("source", texture(TextureFormat::Rgba8Unorm));
-    let destination = graph.create_texture("destination", texture(TextureFormat::Rgba16Float));
+    let source = graph.create_texture("source", texture(TextureFormat::Rgba8UnormSrgb));
+    let destination = graph.create_texture("destination", texture(TextureFormat::Rgba8UnormSrgb));
     let initialized = graph.add_compute_pass(
         "init",
         |pass| {
@@ -566,10 +638,23 @@ fn texture_copy_rejects_incompatible_formats() {
     );
     let compiled = graph.compile(&caps()).unwrap().graph;
     let registry = TestRegistry::new(device());
-    assert!(matches!(
-        executor().execute(&compiled, compiled.instantiate_local(FrameInputs::new(())), &registry, &registry),
-        Err(ExecutionError::Recording(error)) if error.kind == RecordingErrorKind::InvalidCommandArgument
-    ));
+    let executor = executor();
+    executor
+        .execute(
+            &compiled,
+            compiled.instantiate_local(FrameInputs::new(())),
+            &registry,
+            &registry,
+        )
+        .expect("matching sRGB copies are legal");
+    assert!(
+        executor
+            .try_backend()
+            .unwrap()
+            .trace()
+            .iter()
+            .any(|event| matches!(event, TestTraceEvent::CopyTexture { .. }))
+    );
 }
 
 #[test]

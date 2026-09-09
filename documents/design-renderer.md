@@ -1,6 +1,6 @@
 # Fluxel Renderer design
 
-**Status: 0.2.5 fixed headless explicit-UV linear-clamp draw**
+**Status: 0.2.6 fixed headless sRGB decode draw**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
@@ -159,9 +159,17 @@ not report an invalid command or state. The exception is deliberately matched
 on severity, category, id, and text; any other DX12 or Vulkan diagnostic still
 fails the fixture.
 
+0.2.6 keeps every linear-UNORM path unchanged and adds a type-separated
+`Rgba8UnormSrgb` base-color generation. Upload copies the encoded RGBA8 bytes
+unchanged. The new closed draw uses the same explicit-UV, explicit-level-zero,
+private linear-clamp sampler policy, but the native sRGB view decodes each RGB
+texel before filtering; alpha stays linear and the target remains linear
+`Rgba8Unorm`. UNORM and sRGB filterability are queried and fingerprinted as
+independent adapter facts. The renderer never guesses one from the other.
+
 This is evidence for one fixed textured snapshot-to-plan-to-native path, not a
-claim that model transforms, `DrawList` lowering, configurable samplers, further UV attributes,
-mips/LOD, sRGB, PBR, depth, blending, batching, general bindings, Surface, or
+claim that model transforms, `DrawList` lowering, configurable samplers or color spaces, further UV attributes,
+mips/LOD, lighting/PBR, depth, blending, batching, general bindings, Surface, or
 Present are implemented.
 
 ## Evolution gates

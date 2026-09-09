@@ -19,20 +19,21 @@ multiple queues, or transient aliasing.
 
 `Device::upload_immutable_buffer` and the closed
 `Device::upload_immutable_texture` are the production upload primitives. They
-atomically creates a device-local destination and returns an owning pending
+atomically create a device-local destination and return an owning pending
 operation. Only proven completion can yield `UploadedBuffer`; accepted-unknown
 work retains its target, staging allocation, command objects, and device rather
 than publishing guessed contents or state. The finalized incoming state is
 exactly `CopyDestination`. Texture upload accepts only a whole tight
-single-mip/layer/sample D2 `Rgba8Unorm` image with CopyDestination and Sampled
-usage; its private staging rows are padded to the native 256-byte requirement.
+single-mip/layer/sample D2 linear `Rgba8Unorm` or encoded `Rgba8UnormSrgb`
+image with CopyDestination and Sampled usage; its private staging rows are
+padded to the native 256-byte requirement.
 
 ## Installation
 
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.5"
+tag = "v0.2.6"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -44,7 +45,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.5"
+tag = "v0.2.6"
 default-features = false
 features = ["dx12"]
 ```
@@ -133,6 +134,12 @@ sampler through terminal completion; it is neither a public descriptor nor a
 RenderGraph resource. Adapter `SAMPLED_LINEAR` support is reported as a raw
 fact, propagated into the graph fingerprint, and rechecked before native
 creation.
+
+The 0.5.0 RHI API adds a type-distinct `Rgba8UnormSrgb` variant of that closed
+artifact. Encoded upload bytes are preserved, the sampled native view performs
+per-texel sRGB decode before filtering, alpha remains linear, and the color
+target remains `Rgba8Unorm`. sRGB linear-filter support is queried as its own
+raw adapter fact and is never inferred from the UNORM format.
 
 For reproducible DX12 validation the workspace carries the upstream
 gfx-rs/wgpu#10221 fix on its vendored `wgpu-hal` 30.0.1 source. See

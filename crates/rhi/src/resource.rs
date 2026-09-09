@@ -166,7 +166,7 @@ pub enum InvalidBufferUploadReason {
 pub enum InvalidTextureUploadReason {
     /// Only a two-dimensional image is accepted.
     DimensionUnsupported,
-    /// Only `Rgba8Unorm` is accepted.
+    /// Only `Rgba8Unorm` or `Rgba8UnormSrgb` is accepted.
     FormatUnsupported,
     /// The closed upload has exactly one mip level.
     MipLevelsUnsupported,
@@ -687,6 +687,10 @@ pub enum RasterKernel {
     /// An indexed camera/material mesh with explicit UV streams and a fixed
     /// filtering linear-clamp sampler at explicit mip level zero.
     IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp,
+    /// An indexed camera/material mesh with explicit UV streams, fixed
+    /// linear-clamp sampling at explicit mip level zero, and an sRGB
+    /// base-color texture decoded by the native sampling operation.
+    IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
 }
 
 /// The non-configurable vertex layout selected by a fixed raster artifact.
@@ -916,6 +920,9 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => {
                 "camera_material_texture_uv_linear_clamp_vertex"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
+                "camera_material_texture_uv_linear_clamp_srgb_vertex"
+            }
         }
     }
 
@@ -926,6 +933,9 @@ impl RasterKernel {
             | Self::IndexedPositionFloat32x3CameraMaterialTextureUv => "texture_color_fragment",
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => {
                 "linear_clamp_texture_color_fragment"
+            }
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
+                "linear_clamp_srgb_texture_color_fragment"
             }
             _ => "color_fragment",
         }
@@ -946,6 +956,7 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTexture => 12,
             Self::IndexedPositionFloat32x3CameraMaterialTextureUv => 12,
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => 12,
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => 12,
         }
     }
 
@@ -959,6 +970,9 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTexture => Some(IndexFormat::Uint32),
             Self::IndexedPositionFloat32x3CameraMaterialTextureUv => Some(IndexFormat::Uint32),
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => {
+                Some(IndexFormat::Uint32)
+            }
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
                 Some(IndexFormat::Uint32)
             }
         }
@@ -980,6 +994,9 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => {
                 RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2
             }
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
+                RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2
+            }
         }
     }
 
@@ -997,6 +1014,7 @@ impl RasterKernel {
                 if matches!(
                     self,
                     Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                        | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
                 ) {
                     3
                 } else if matches!(
@@ -1028,6 +1046,7 @@ impl RasterKernel {
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 1
             } else {
@@ -1038,6 +1057,7 @@ impl RasterKernel {
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(1)
             } else {
@@ -1048,26 +1068,29 @@ impl RasterKernel {
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(TextureDimension::D2)
             } else {
                 None
             },
-            texture_format: if matches!(
-                self,
+            texture_format: match self {
+                Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
+                    Some(TextureFormat::Rgba8UnormSrgb)
+                }
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
-                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
-                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
-            ) {
-                Some(TextureFormat::Rgba8Unorm)
-            } else {
-                None
+                | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
+                | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => {
+                    Some(TextureFormat::Rgba8Unorm)
+                }
+                _ => None,
             },
             texture_visibility: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterBindingVisibility::Fragment)
             } else {
@@ -1078,6 +1101,7 @@ impl RasterKernel {
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterTextureSampleType::Float)
             } else {
@@ -1097,11 +1121,13 @@ impl RasterKernel {
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 if matches!(
                     self,
                     Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                         | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                        | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
                 ) {
                     2
                 } else {
@@ -1114,6 +1140,7 @@ impl RasterKernel {
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2)
             } else {
@@ -1123,6 +1150,7 @@ impl RasterKernel {
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(8)
             } else {
@@ -1132,6 +1160,7 @@ impl RasterKernel {
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(1)
             } else {
@@ -1140,6 +1169,7 @@ impl RasterKernel {
             sampler_binding: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(2)
             } else {
@@ -1148,6 +1178,7 @@ impl RasterKernel {
             sampler_binding_recipe_version: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 1
             } else {
@@ -1156,6 +1187,7 @@ impl RasterKernel {
             sampler_binding_type: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterSamplerBindingType::Filtering)
             } else {
@@ -1164,6 +1196,7 @@ impl RasterKernel {
             sampler_min_filter: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterSamplerFilter::Linear)
             } else {
@@ -1172,6 +1205,7 @@ impl RasterKernel {
             sampler_mag_filter: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterSamplerFilter::Linear)
             } else {
@@ -1180,6 +1214,7 @@ impl RasterKernel {
             sampler_mipmap_filter: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterSamplerFilter::Nearest)
             } else {
@@ -1188,6 +1223,7 @@ impl RasterKernel {
             sampler_address_mode_u: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterSamplerAddressMode::ClampToEdge)
             } else {
@@ -1196,6 +1232,7 @@ impl RasterKernel {
             sampler_address_mode_v: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterSamplerAddressMode::ClampToEdge)
             } else {
@@ -1204,6 +1241,7 @@ impl RasterKernel {
             sampler_address_mode_w: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(RasterSamplerAddressMode::ClampToEdge)
             } else {
@@ -1212,6 +1250,7 @@ impl RasterKernel {
             sampler_explicit_mip_level: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 Some(0)
             } else {
@@ -1311,6 +1350,16 @@ impl RasterKernel {
          @vertex fn camera_material_texture_uv_linear_clamp_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.uv); }\n\
          @fragment fn linear_clamp_texture_color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { return frame.base_color * textureSampleLevel(tex, linear_clamp_sampler, input.uv, 0.0); }"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
+                "struct FrameUniforms { view_projection: mat4x4<f32>, base_color: vec4<f32>, };\n\
+         @group(0) @binding(0) var<uniform> frame: FrameUniforms;\n\
+         @group(0) @binding(1) var tex: texture_2d<f32>;\n\
+         @group(0) @binding(2) var linear_clamp_sampler: sampler;\n\
+         struct VertexInput { @location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, };\n\
+         struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) @interpolate(perspective, center) uv: vec2<f32>, };\n\
+         @vertex fn camera_material_texture_uv_linear_clamp_srgb_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.uv); }\n\
+         @fragment fn linear_clamp_srgb_texture_color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { return frame.base_color * textureSampleLevel(tex, linear_clamp_sampler, input.uv, 0.0); }"
+            }
         }
     }
 
@@ -1321,6 +1370,7 @@ impl RasterKernel {
                 | Self::IndexedPositionFloat32x3CameraMaterialTexture
                 | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
         )
     }
 }
@@ -2388,6 +2438,13 @@ impl Device {
                 format: TextureFormat::Rgba8Unorm,
             });
         }
+        if kernel == RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+            && !self.capabilities().rgba8_unorm_srgb_filterable
+        {
+            return Err(RasterCreateError::TextureFormatNotFilterable {
+                format: TextureFormat::Rgba8UnormSrgb,
+            });
+        }
         #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
         let native = crate::imp::create_raster_pipeline(
             &self.inner,
@@ -2649,6 +2706,94 @@ impl Device {
             },
         )))
     }
+
+    /// Creates the closed explicit-UV linear-clamp sRGB base-color binding.
+    ///
+    /// The encoded source bytes remain in the sRGB texture. Its conversion to
+    /// linear happens in fixed native sampling, before filtering and material
+    /// modulation; this API never performs a CPU-side conversion.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the closed recipe has independent uniform, texture, and two vertex role inputs"
+    )]
+    pub fn create_raster_uv_linear_clamp_srgb_texture_bindings(
+        &self,
+        pipeline: &RasterPipeline,
+        uniform: &Buffer,
+        texture: &Texture,
+        positions: &Buffer,
+        texture_coordinates: &Buffer,
+        vertex_count: u32,
+    ) -> Result<RasterUvLinearClampTextureBindings, RasterCreateError> {
+        if !self.capabilities().rgba8_unorm_srgb_filterable {
+            return Err(RasterCreateError::TextureFormatNotFilterable {
+                format: TextureFormat::Rgba8UnormSrgb,
+            });
+        }
+        if pipeline.kernel()
+            != RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+        {
+            return Err(RasterCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity
+            || uniform.device_identity() != self.identity
+            || texture.device_identity() != self.identity
+            || positions.device_identity() != self.identity
+            || texture_coordinates.device_identity() != self.identity
+        {
+            return Err(RasterCreateError::ForeignDevice);
+        }
+        validate_raster_uniform_contract(
+            RasterKernel::IndexedPositionFloat32x3CameraMaterial,
+            uniform.descriptor().buffer.size,
+            uniform.allowed_usage(),
+        )?;
+        validate_raster_srgb_texture_desc(texture.descriptor().texture, texture.allowed_usage())?;
+        let position_size = u64::from(vertex_count)
+            .checked_mul(12)
+            .ok_or(RasterCreateError::VertexStreamCountMismatch)?;
+        let uv_size = u64::from(vertex_count)
+            .checked_mul(8)
+            .ok_or(RasterCreateError::VertexStreamCountMismatch)?;
+        if vertex_count == 0 || positions.descriptor().buffer.size != position_size {
+            return Err(RasterCreateError::InvalidPositionStreamRange);
+        }
+        if texture_coordinates.descriptor().buffer.size != uv_size {
+            return Err(RasterCreateError::InvalidTextureCoordinateStreamRange);
+        }
+        if !positions.allowed_usage().contains(BufferUsageKind::Vertex)
+            || !texture_coordinates
+                .allowed_usage()
+                .contains(BufferUsageKind::Vertex)
+        {
+            return Err(RasterCreateError::VertexUsageRequired);
+        }
+        let native = crate::imp::create_raster_uv_linear_clamp_srgb_texture_bindings(
+            &self.inner,
+            pipeline.native(),
+            uniform.native(),
+            texture.native(),
+            positions.identity(),
+            position_size,
+            texture_coordinates.identity(),
+            uv_size,
+        )
+        .map_err(RasterCreateError::NativeFailure)?;
+        Ok(RasterUvLinearClampTextureBindings(Arc::new(
+            RasterUvLinearClampTextureBindingsShared {
+                _native: native,
+                pipeline: pipeline.clone(),
+                _uniform: uniform.lease(),
+                _texture: texture.lease(),
+                _positions: positions.lease(),
+                _texture_coordinates: texture_coordinates.lease(),
+                position_identity: positions.identity(),
+                texture_coordinate_identity: texture_coordinates.identity(),
+                vertex_count,
+                device: self.identity,
+            },
+        )))
+    }
     /// Creates a native buffer after validating and lowering its portable contract.
     pub fn create_buffer(
         &self,
@@ -2750,7 +2895,10 @@ fn validate_immutable_texture_upload_descriptor(
     if image.dimension != TextureDimension::D2 {
         return invalid(InvalidTextureUploadReason::DimensionUnsupported);
     }
-    if image.format != TextureFormat::Rgba8Unorm {
+    if !matches!(
+        image.format,
+        TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb
+    ) {
         return invalid(InvalidTextureUploadReason::FormatUnsupported);
     }
     if image.mip_levels != 1 {
@@ -2867,6 +3015,26 @@ fn validate_texture_pack_texture_desc(
         || !allowed_usage.contains(TextureUsageKind::Sampled)
     {
         return Err(ComputeCreateError::BindingRecipeMismatch);
+    }
+    Ok(())
+}
+
+/// Validates the sRGB sampled-texture facts the fixed base-color recipe
+/// cannot generalize.  Keeping it distinct from the UNORM compute helper
+/// prevents accidentally normalizing an sRGB resource into an UNORM one.
+fn validate_raster_srgb_texture_desc(
+    image: TextureDesc,
+    allowed_usage: TextureUsage,
+) -> Result<(), RasterCreateError> {
+    if image.dimension != TextureDimension::D2
+        || image.format != TextureFormat::Rgba8UnormSrgb
+        || image.extent.depth != 1
+        || image.mip_levels != 1
+        || image.array_layers != 1
+        || image.sample_count != 1
+        || !allowed_usage.contains(TextureUsageKind::Sampled)
+    {
+        return Err(RasterCreateError::BindingRecipeMismatch);
     }
     Ok(())
 }
@@ -3712,6 +3880,82 @@ mod tests {
             !RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                 .wgsl_source()
                 .contains("textureSample(tex,")
+        );
+    }
+
+    #[test]
+    fn srgb_linear_clamp_identity_is_distinct_and_preserves_encoded_upload_contract() {
+        let srgb = RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+            .portable_identity();
+        let unorm = RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+            .portable_identity();
+        assert_eq!(srgb.texture_format, Some(TextureFormat::Rgba8UnormSrgb));
+        assert_eq!(srgb.binding_count, 3);
+        assert_eq!(srgb.texture_mapping_recipe_version, 2);
+        assert_eq!(
+            srgb.texture_coordinate_vertex_layout,
+            Some(RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2)
+        );
+        assert_eq!(srgb.texture_coordinate_vertex_stride, Some(8));
+        assert_eq!(srgb.texture_coordinate_shader_location, Some(1));
+        assert_eq!(srgb.sampler_binding, Some(2));
+        assert_eq!(srgb.sampler_binding_recipe_version, 1);
+        assert_eq!(
+            srgb.sampler_binding_type,
+            Some(RasterSamplerBindingType::Filtering)
+        );
+        assert_eq!(srgb.sampler_min_filter, Some(RasterSamplerFilter::Linear));
+        assert_eq!(srgb.sampler_mag_filter, Some(RasterSamplerFilter::Linear));
+        assert_eq!(
+            srgb.sampler_mipmap_filter,
+            Some(RasterSamplerFilter::Nearest)
+        );
+        assert_eq!(
+            srgb.sampler_address_mode_u,
+            Some(RasterSamplerAddressMode::ClampToEdge)
+        );
+        assert_eq!(
+            srgb.sampler_address_mode_v,
+            Some(RasterSamplerAddressMode::ClampToEdge)
+        );
+        assert_eq!(
+            srgb.sampler_address_mode_w,
+            Some(RasterSamplerAddressMode::ClampToEdge)
+        );
+        assert_eq!(srgb.sampler_explicit_mip_level, Some(0));
+        assert_ne!(srgb.module_source_hash, unorm.module_source_hash);
+        assert!(
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+                .wgsl_source()
+                .contains("textureSampleLevel(tex, linear_clamp_sampler, input.uv, 0.0)")
+        );
+
+        let descriptor = TextureDescriptor {
+            texture: TextureDesc {
+                dimension: TextureDimension::D2,
+                extent: Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                mip_levels: 1,
+                array_layers: 1,
+                sample_count: 1,
+                format: TextureFormat::Rgba8UnormSrgb,
+            },
+            usage: TextureUsage::from_kinds([
+                TextureUsageKind::CopyDestination,
+                TextureUsageKind::Sampled,
+            ]),
+            memory: MemoryPolicy::DeviceOnly,
+        };
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(descriptor, &[7, 8, 9, 10]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raster_srgb_texture_desc(descriptor.texture, descriptor.usage),
+            Ok(())
         );
     }
 

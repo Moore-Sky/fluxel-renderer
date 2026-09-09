@@ -354,6 +354,51 @@ fn compute_buffer_texture_and_surface_capabilities_are_checked() {
     );
 }
 
+#[test]
+fn srgb_format_requires_its_own_capability_entry() {
+    let mut graph = RenderGraph::<()>::new();
+    let mut descriptor = texture();
+    descriptor.format = TextureFormat::Rgba8UnormSrgb;
+    let image = graph.import_texture_slot(
+        "encoded base color",
+        ImportTextureContract {
+            descriptor,
+            initial_state: ResourceAccessState::ShaderSampledRead,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let sampled = graph.add_compute_pass(
+        "sample encoded base color",
+        |pass| {
+            let image = pass.read_texture(
+                &image.version,
+                TextureReadUse::Sampled,
+                TextureRange::whole(),
+            );
+            ((), image)
+        },
+        |_commands, _resolver, _data, _frame| Ok(()),
+    );
+    graph.mark_side_effect(sampled.id, SideEffectReason::Diagnostic("retain".into()));
+
+    let mut caps = capabilities(true, true, true, true);
+    assert_error(
+        graph.compile(&caps),
+        CompileErrorKind::UnsupportedSemanticRequirement,
+    );
+
+    caps.texture_formats.push(
+        TextureFormatCapabilities::builder(TextureFormat::Rgba8UnormSrgb)
+            .sampled(true, true)
+            .copies(true, true)
+            .build(),
+    );
+    graph
+        .compile(&caps)
+        .expect("sRGB must use its own advertised format facts");
+}
+
 fn color_ops(
     load: LoadOp<[f32; 4]>,
     store: StoreOp,

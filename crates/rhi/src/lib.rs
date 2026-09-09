@@ -108,6 +108,11 @@ pub struct HardwareCapabilities {
     /// artifact rejects creation when it is false rather than assuming that
     /// a sampled `Rgba8Unorm` texture is filterable.
     pub rgba8_unorm_filterable: bool,
+    /// Whether `Rgba8UnormSrgb` supports filtering linear texture samples.
+    ///
+    /// This is a separate, unmodified adapter fact. In particular, Fluxel
+    /// never infers sRGB filterability from the corresponding UNORM fact.
+    pub rgba8_unorm_srgb_filterable: bool,
     /// Maximum two-dimensional texture extent reported by the backend.
     pub max_texture_dimension_2d: u32,
     /// Maximum bind groups reported by the backend.
@@ -864,6 +869,22 @@ mod imp {
     ) -> Result<NativeRasterTextureBindings, String> {
         Err("native raster is only supported on Windows".into())
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the closed native sRGB linear-clamp UV recipe passes all independently validated role facts"
+    )]
+    pub(super) fn create_raster_uv_linear_clamp_srgb_texture_bindings(
+        _: &Arc<OpenedDevice>,
+        _: &NativeRasterPipeline,
+        _: &OwnedBuffer,
+        _: &OwnedTexture,
+        _: fluxel_rendergraph::PhysicalResourceIdentity,
+        _: u64,
+        _: fluxel_rendergraph::PhysicalResourceIdentity,
+        _: u64,
+    ) -> Result<NativeRasterTextureBindings, String> {
+        Err("native raster is only supported on Windows".into())
+    }
     pub(super) fn transition_texture(
         _: &mut CopyEncoder,
         _: &OwnedTexture,
@@ -945,6 +966,12 @@ mod imp {
         Err("native raster is only supported on Windows".into())
     }
     pub(super) fn set_raster_uv_linear_clamp_texture_bindings(
+        _: &mut CopyEncoder,
+        _: &NativeRasterTextureBindings,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn set_raster_uv_linear_clamp_srgb_texture_bindings(
         _: &mut CopyEncoder,
         _: &NativeRasterTextureBindings,
     ) -> Result<(), String> {

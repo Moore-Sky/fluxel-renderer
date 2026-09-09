@@ -2,10 +2,10 @@
 //!
 //! This crate models cameras, geometry, meshes, basic materials, and ordered
 //! draw lists. Its opt-in `gpu-upload` feature publishes immutable indexed-mesh
-//! and RGBA8 texture snapshots after native completion. Its opt-in fixed-frame
-//! slice lowers closed constant-color, mip-zero `textureLoad`, or fixed
-//! linear-clamp `textureSampleLevel` indexed draws without exposing native
-//! resources or a configurable sampler.
+//! and RGBA8 (linear or sRGB-encoded) texture snapshots after native completion.
+//! Its opt-in fixed-frame slice lowers closed constant-color, mip-zero
+//! `textureLoad`, or fixed linear-clamp `textureSampleLevel` indexed draws
+//! without exposing native resources or a configurable sampler.
 
 #![deny(missing_docs)]
 
@@ -40,8 +40,11 @@ pub use upload::{
     BaseColorTextureSnapshot, BaseColorTextureUpload, BaseColorTextureUploadFailure,
     BaseColorTextureUploadStartError, BaseColorTextureUploadStatus, IndexedMeshSnapshot,
     IndexedMeshUpload, IndexedMeshUploadFailure, IndexedMeshUploadStartError,
-    IndexedMeshUploadStatus, Rgba8Image, Rgba8ImageError, TexturedBasicMaterial, TexturedGeometry,
-    TexturedGeometryError, TexturedGeometryStream, TexturedIndexedMeshSnapshot,
+    IndexedMeshUploadStatus, Rgba8Image, Rgba8ImageError, SrgbBaseColorTextureSnapshot,
+    SrgbBaseColorTextureUpload, SrgbBaseColorTextureUploadFailure,
+    SrgbBaseColorTextureUploadStartError, SrgbBaseColorTextureUploadStatus,
+    SrgbTexturedBasicMaterial, Srgba8Image, Srgba8ImageError, TexturedBasicMaterial,
+    TexturedGeometry, TexturedGeometryError, TexturedGeometryStream, TexturedIndexedMeshSnapshot,
     TexturedIndexedMeshUpload, TexturedIndexedMeshUploadFailure,
     TexturedIndexedMeshUploadStartError, TexturedIndexedMeshUploadStatus,
 };

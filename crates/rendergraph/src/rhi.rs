@@ -247,9 +247,10 @@ fn compare_texture_format_capabilities(
 fn texture_format_rank(_format: TextureFormat) -> u8 {
     match _format {
         TextureFormat::Rgba8Unorm => 0,
-        TextureFormat::Bgra8Unorm => 1,
-        TextureFormat::Rgba16Float => 2,
-        TextureFormat::Depth32Float => 3,
+        TextureFormat::Rgba8UnormSrgb => 1,
+        TextureFormat::Bgra8Unorm => 2,
+        TextureFormat::Rgba16Float => 3,
+        TextureFormat::Depth32Float => 4,
     }
 }
 
@@ -551,6 +552,11 @@ pub enum TextureDimension {
 pub enum TextureFormat {
     /// An unsigned-normalized RGBA format with eight bits per component.
     Rgba8Unorm,
+    /// An sRGB-encoded RGBA format with eight bits per component.
+    ///
+    /// Copies preserve encoded bytes. Sampling performs the format's sRGB
+    /// decode; this format is intentionally distinct from [`Self::Rgba8Unorm`].
+    Rgba8UnormSrgb,
     /// An unsigned-normalized BGRA format with eight bits per component.
     Bgra8Unorm,
     /// A floating-point RGBA format with sixteen bits per component.
@@ -715,5 +721,27 @@ mod tests {
             DeviceLimits::new(0, 1).with_max_compute_workgroups_per_dimension([65_535, 65_535, 64]);
 
         assert_ne!(capabilities.fingerprint(), different_limit.fingerprint());
+    }
+
+    #[test]
+    fn capability_fingerprint_keeps_srgb_format_and_facts_distinct_from_unorm() {
+        let unorm = DeviceCapabilities::builder()
+            .texture_format(
+                TextureFormatCapabilities::builder(TextureFormat::Rgba8Unorm)
+                    .sampled(true, true)
+                    .copies(true, true)
+                    .build(),
+            )
+            .build();
+        let srgb = DeviceCapabilities::builder()
+            .texture_format(
+                TextureFormatCapabilities::builder(TextureFormat::Rgba8UnormSrgb)
+                    .sampled(true, true)
+                    .copies(true, true)
+                    .build(),
+            )
+            .build();
+
+        assert_ne!(unorm.fingerprint(), srgb.fingerprint());
     }
 }

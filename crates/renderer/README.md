@@ -7,7 +7,8 @@ immutable GPU-ready snapshot without blocking the frame-building thread.
 The same feature can consume a ready snapshot, a `Camera`, and a
 `BasicMaterial` in one deliberately closed headless `f32x3/u32` indexed draw
 and return opaque offscreen image metadata. It can also upload one immutable
-tight `Rgba8Unorm` image and use its opaque snapshot in a closed textured draw.
+tight linear `Rgba8Unorm` or encoded `Rgba8UnormSrgb` image and use its opaque
+snapshot in a closed textured draw.
 
 It is intentionally not a complete GPU renderer: it does not lower draw lists,
 compile general material shaders, expose configurable samplers/PBR or a general
@@ -18,7 +19,7 @@ pipeline/bind-group API, or present pixels.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.5"
+tag = "v0.2.6"
 features = ["gpu-upload"]
 ```
 
@@ -50,9 +51,13 @@ derived from model-space `position.xy`. `TexturedGeometry` and
 generation; `draw_textured_uv` consumes its explicit finite `f32x2` coordinates
 through a closed second vertex slot. `draw_textured_uv_linear_clamp` adds a
 separate fixed `textureSampleLevel(..., 0.0)` path with private linear filtering
-and clamp-to-edge state. It exposes no configurable sampler, mip/LOD, sRGB, or
-general binding contract. The textured paths accept only finite, positive-w triangles wholly inside the clip volume, and
-mesh/texture generations share one atomic draw reservation outcome.
+and clamp-to-edge state. `Srgba8Image` and its separate upload/snapshot/material
+types retain encoded base-color bytes; `draw_textured_uv_linear_clamp_srgb`
+uses a true sRGB source view so decode occurs per texel before filtering, while
+the target stays linear `Rgba8Unorm`. These APIs expose no configurable sampler,
+color space, mip/LOD, or general binding contract. The textured paths accept
+only finite, positive-w triangles wholly inside the clip volume, and mesh/texture
+generations share one atomic draw reservation outcome.
 
 ## Use today
 
@@ -96,6 +101,8 @@ The 0.2.4 U05 fixtures separately prove explicit UV perspective interpolation
 against position-derived and linear CPU counter-oracles on both backends.
 The 0.2.5 U06 fixtures additionally prove fixed linear filtering and independently
 observable U/V clamp behavior on DX12 and Vulkan.
+The 0.2.6 U07 fixtures distinguish decode-before-filter from encoded-space
+filtering, nearest/repeat, and affine UV counter-oracles on both backends.
 
 The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend

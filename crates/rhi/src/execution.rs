@@ -209,6 +209,7 @@ pub struct CopyEncoder {
 enum RasterUvBindings {
     Texture(RasterUvTextureBindings),
     LinearClamp(RasterUvLinearClampTextureBindings),
+    LinearClampSrgb(RasterUvLinearClampTextureBindings),
 }
 
 impl RasterUvBindings {
@@ -216,6 +217,7 @@ impl RasterUvBindings {
         match self {
             Self::Texture(value) => value.position_identity(),
             Self::LinearClamp(value) => value.position_identity(),
+            Self::LinearClampSrgb(value) => value.position_identity(),
         }
     }
 
@@ -223,6 +225,7 @@ impl RasterUvBindings {
         match self {
             Self::Texture(value) => value.texture_coordinate_identity(),
             Self::LinearClamp(value) => value.texture_coordinate_identity(),
+            Self::LinearClampSrgb(value) => value.texture_coordinate_identity(),
         }
     }
 
@@ -230,6 +233,7 @@ impl RasterUvBindings {
         match self {
             Self::Texture(value) => value.vertex_count(),
             Self::LinearClamp(value) => value.vertex_count(),
+            Self::LinearClampSrgb(value) => value.vertex_count(),
         }
     }
 
@@ -237,6 +241,7 @@ impl RasterUvBindings {
         match self {
             Self::Texture(value) => value.native(),
             Self::LinearClamp(value) => value.native(),
+            Self::LinearClampSrgb(value) => value.native(),
         }
     }
 }
@@ -3579,6 +3584,9 @@ pub enum RasterBindings {
     RasterUvTexture(RasterUvTextureBindings),
     /// The closed UV-textured raster binding with RHI-owned linear clamp sampler.
     RasterUvLinearClampTexture(RasterUvLinearClampTextureBindings),
+    /// The closed UV-textured sRGB base-color binding with RHI-owned linear
+    /// clamp sampler.
+    RasterUvLinearClampSrgbTexture(RasterUvLinearClampTextureBindings),
 }
 
 /// A serial DX12/Vulkan backend for the fixed Raster→Compute→Copy slice.
@@ -3623,6 +3631,16 @@ pub struct RasterObjectProvider {
             u32,
         ),
     >,
+    raster_uv_linear_clamp_srgb_bindings: HashMap<
+        fluxel_rendergraph::BindingSetId,
+        (
+            fluxel_rendergraph::RasterPipelineId,
+            RasterPipeline,
+            Buffer,
+            Buffer,
+            u32,
+        ),
+    >,
 }
 
 impl RasterObjectProvider {
@@ -3637,6 +3655,7 @@ impl RasterObjectProvider {
             raster_bindings: HashMap::new(),
             raster_uv_bindings: HashMap::new(),
             raster_uv_linear_clamp_bindings: HashMap::new(),
+            raster_uv_linear_clamp_srgb_bindings: HashMap::new(),
         }
     }
 
@@ -3803,6 +3822,47 @@ impl RasterObjectProvider {
         );
         Ok(())
     }
+
+    /// Registers the closed explicit-UV linear-clamp sRGB base-color recipe.
+    pub fn register_raster_uv_linear_clamp_srgb_textured_bindings(
+        &mut self,
+        id: fluxel_rendergraph::BindingSetId,
+        expected_pipeline: fluxel_rendergraph::RasterPipelineId,
+        positions: &Buffer,
+        texture_coordinates: &Buffer,
+        vertex_count: u32,
+    ) -> Result<(), NativeExecutionError> {
+        let pipeline = self
+            .raster
+            .get(&expected_pipeline)
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        if pipeline.kernel()
+            != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        require_device(
+            positions.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        require_device(
+            texture_coordinates.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        self.raster_uv_linear_clamp_srgb_bindings.insert(
+            id,
+            (
+                expected_pipeline,
+                pipeline.clone(),
+                positions.clone(),
+                texture_coordinates.clone(),
+                vertex_count,
+            ),
+        );
+        Ok(())
+    }
 }
 
 impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectProvider {
@@ -3872,6 +3932,55 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
                 fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
                 "fixed bindings do not accept dynamic offsets",
             ));
+        }
+        if let Some((_, pipeline, positions, texture_coordinates, vertex_count)) =
+            self.raster_uv_linear_clamp_srgb_bindings.get(&id)
+        {
+            let [
+                fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                    physical: uniform,
+                    range: BufferRange::Whole,
+                    semantic:
+                        fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                            fluxel_rendergraph::BufferReadUse::Uniform,
+                        ),
+                },
+                fluxel_rendergraph::ResolvedBindingResource::Texture {
+                    physical: texture,
+                    range: fluxel_rendergraph::TextureRange::Whole,
+                    semantic:
+                        fluxel_rendergraph::BindingResourceSemantic::TextureRead(
+                            fluxel_rendergraph::TextureReadUse::Sampled,
+                        ),
+                },
+            ] = resources
+            else {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "UV linear-clamp sRGB raster binding requires whole Uniform then whole Sampled texture",
+                ));
+            };
+            let value = self
+                .owner
+                .create_raster_uv_linear_clamp_srgb_texture_bindings(
+                    pipeline,
+                    uniform,
+                    texture,
+                    positions,
+                    texture_coordinates,
+                    *vertex_count,
+                )
+                .map_err(|error| {
+                    provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        error.to_string(),
+                    )
+                })?;
+            return Ok(fluxel_rendergraph::BoundBindings {
+                device: self.device,
+                lease: value.lease().into(),
+                physical: RasterBindings::RasterUvLinearClampSrgbTexture(value),
+            });
         }
         if let Some((_, pipeline, positions, texture_coordinates, vertex_count)) =
             self.raster_uv_linear_clamp_bindings.get(&id)
@@ -4150,6 +4259,7 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
             RasterBindings::RasterTexture(value) => value.lease().into(),
             RasterBindings::RasterUvTexture(value) => value.lease().into(),
             RasterBindings::RasterUvLinearClampTexture(value) => value.lease().into(),
+            RasterBindings::RasterUvLinearClampSrgbTexture(value) => value.lease().into(),
         };
         Ok(fluxel_rendergraph::BoundBindings {
             device: self.device,
@@ -4929,6 +5039,7 @@ impl RasterBackend {
             kernel,
             crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
         )
     }
 
@@ -4986,18 +5097,20 @@ fn raster_capabilities(device: &Device) -> DeviceCapabilities {
     raster_capabilities_from_limit_and_filterability(
         facts.max_compute_workgroups_per_dimension,
         facts.rgba8_unorm_filterable,
+        facts.rgba8_unorm_srgb_filterable,
     )
 }
 
 fn raster_capabilities_from_limit(maximum: [u32; 3]) -> DeviceCapabilities {
     // The portable profile preserves prior fixed fixtures: it is an abstract
     // compile target, not a claim about a particular adapter's sampler fact.
-    raster_capabilities_from_limit_and_filterability(maximum, true)
+    raster_capabilities_from_limit_and_filterability(maximum, true, true)
 }
 
 fn raster_capabilities_from_limit_and_filterability(
     maximum: [u32; 3],
     rgba8_unorm_filterable: bool,
+    rgba8_unorm_srgb_filterable: bool,
 ) -> DeviceCapabilities {
     DeviceCapabilities::builder()
         .queue(QueueDescriptor::new(
@@ -5018,6 +5131,12 @@ fn raster_capabilities_from_limit_and_filterability(
             TextureFormatCapabilities::builder(TextureFormat::Rgba8Unorm)
                 .sampled(true, rgba8_unorm_filterable)
                 .attachments(true, false, vec![1])
+                .copies(true, true)
+                .build(),
+        )
+        .texture_format(
+            TextureFormatCapabilities::builder(TextureFormat::Rgba8UnormSrgb)
+                .sampled(true, rgba8_unorm_srgb_filterable)
                 .copies(true, true)
                 .build(),
         )
@@ -5336,6 +5455,26 @@ impl ExecutionBackend for RasterBackend {
                     .map_err(NativeExecutionError::Recording)?;
                     encoder.bound_raster_uv_texture =
                         Some(RasterUvBindings::LinearClamp(value.clone()));
+                    encoder.raster_uv_binding_epoch = Some(encoder.raster_uv_epoch);
+                    encoder.leases.push(value.lease().into());
+                    return Ok(());
+                }
+                RasterBindings::RasterUvLinearClampSrgbTexture(value)
+                    if pipeline.kernel()
+                        == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+                        && value.device_identity() == self.device.identity()
+                        && value.pipeline().same_object(pipeline) =>
+                {
+                    if encoder.raster_uv_binding_epoch == Some(encoder.raster_uv_epoch) {
+                        return Err(NativeExecutionError::RasterBindingsAlreadySet);
+                    }
+                    crate::imp::set_raster_uv_linear_clamp_srgb_texture_bindings(
+                        &mut encoder.native,
+                        value.native(),
+                    )
+                    .map_err(NativeExecutionError::Recording)?;
+                    encoder.bound_raster_uv_texture =
+                        Some(RasterUvBindings::LinearClampSrgb(value.clone()));
                     encoder.raster_uv_binding_epoch = Some(encoder.raster_uv_epoch);
                     encoder.leases.push(value.lease().into());
                     return Ok(());
@@ -5831,6 +5970,9 @@ impl RasterBackend {
             | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv)
             | Some(
                 crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp,
+            )
+            | Some(
+                crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
             ) => IndexFormat::Uint32,
             _ => return Err(NativeExecutionError::RasterStateMismatch),
         };
@@ -5921,6 +6063,7 @@ fn raster_recipe_allows_vertex_offset(kernel: crate::RasterKernel, offset: u64) 
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
     ) || offset == 0
 }
 
@@ -5933,6 +6076,7 @@ fn raster_recipe_allows_index_offset(kernel: crate::RasterKernel, offset: u64) -
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
     ) || offset == 0
 }
 
@@ -5947,6 +6091,7 @@ fn raster_recipe_allows_first_index(kernel: Option<crate::RasterKernel>, first_i
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
         )
     ) || first_index == 0
 }
@@ -6265,8 +6410,9 @@ mod contract_tests {
 
     #[test]
     fn raster_profile_propagates_actual_rgba8_filterability() {
-        let filterable = raster_capabilities_from_limit_and_filterability([1, 1, 1], true);
-        let not_filterable = raster_capabilities_from_limit_and_filterability([1, 1, 1], false);
+        let filterable = raster_capabilities_from_limit_and_filterability([1, 1, 1], true, true);
+        let not_filterable =
+            raster_capabilities_from_limit_and_filterability([1, 1, 1], false, false);
         let filterable_fact = filterable
             .texture_formats
             .iter()
@@ -6291,12 +6437,33 @@ mod contract_tests {
     }
 
     #[test]
+    fn raster_profile_keeps_unorm_and_srgb_filterability_independent() {
+        let capabilities = raster_capabilities_from_limit_and_filterability([1, 1, 1], true, false);
+        let unorm = capabilities
+            .texture_formats
+            .iter()
+            .find(|facts| facts.format == TextureFormat::Rgba8Unorm)
+            .expect("UNORM fixed raster format");
+        let srgb = capabilities
+            .texture_formats
+            .iter()
+            .find(|facts| facts.format == TextureFormat::Rgba8UnormSrgb)
+            .expect("sRGB fixed raster format");
+        assert!(unorm.filterable);
+        assert!(!srgb.filterable);
+        assert!(!srgb.color_attachment);
+    }
+
+    #[test]
     fn both_explicit_uv_kernels_share_the_epoch_family() {
         assert!(RasterBackend::is_uv_kernel(
             crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
         ));
         assert!(RasterBackend::is_uv_kernel(
             crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+        ));
+        assert!(RasterBackend::is_uv_kernel(
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
         ));
         assert!(!RasterBackend::is_uv_kernel(crate::RasterKernel::Triangle));
     }

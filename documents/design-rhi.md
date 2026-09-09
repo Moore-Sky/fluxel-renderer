@@ -1,6 +1,6 @@
 # Fluxel RHI Design
 
-**Status: 0.4.0 RHI with 0.2.5 fixed linear-clamp renderer support**
+**Status: 0.5.0 RHI with 0.2.6 fixed sRGB-decode renderer support**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
 not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
@@ -57,6 +57,12 @@ format capabilities and checked again before pipeline and binding creation.
 The opaque binding owns the sampler, view, bind group, pipeline and resource
 leases until terminal completion; sampler state is neither configurable nor a
 graph resource.
+
+0.5.0 adds a separate sRGB-source variant without changing either earlier UV
+kernel. `Rgba8UnormSrgb` upload preserves encoded bytes, its native sampled view
+performs RGB decode before the fixed linear-clamp operation, and the render
+target remains linear `Rgba8Unorm`. The adapter's sRGB `SAMPLED_LINEAR` fact is
+queried, stored, fingerprinted, and validated independently from UNORM.
 
 The workspace temporarily vendors `wgpu-hal` 30.0.1 with upstream
 gfx-rs/wgpu#10221 backported. The published 30.0.1 DX12 lowering maps an absent

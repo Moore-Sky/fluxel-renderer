@@ -731,10 +731,10 @@ impl Drop for NativeRasterTextureBindings {
                 // layout; ResourceLease keeps the group/view and their bound
                 // resources alive until terminal queue completion.
                 device.destroy_bind_group(group);
-                device.destroy_texture_view(view);
                 if let Some(sampler) = sampler {
                     device.destroy_sampler(sampler);
                 }
+                device.destroy_texture_view(view);
             },
             #[cfg(feature = "vulkan")]
             (
@@ -747,10 +747,10 @@ impl Drop for NativeRasterTextureBindings {
             ) => unsafe {
                 // SAFETY: same device/layout/lifetime proof as DX12.
                 device.destroy_bind_group(group);
-                device.destroy_texture_view(view);
                 if let Some(sampler) = sampler {
                     device.destroy_sampler(sampler);
                 }
+                device.destroy_texture_view(view);
             },
             _ => unreachable!("textured raster bindings and device backend always match"),
         }
@@ -1337,18 +1337,21 @@ pub(super) fn create_raster_pipeline(
             })]
         }
         crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
-        | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => vec![
-            Some(wgpu_hal::VertexBufferLayout {
-                array_stride: 12,
-                step_mode: wgt::VertexStepMode::Vertex,
-                attributes: &position_f32x3_attributes,
-            }),
-            Some(wgpu_hal::VertexBufferLayout {
-                array_stride: 8,
-                step_mode: wgt::VertexStepMode::Vertex,
-                attributes: &texture_coordinate_f32x2_attributes,
-            }),
-        ],
+        | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+        | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
+            vec![
+                Some(wgpu_hal::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgt::VertexStepMode::Vertex,
+                    attributes: &position_f32x3_attributes,
+                }),
+                Some(wgpu_hal::VertexBufferLayout {
+                    array_stride: 8,
+                    step_mode: wgt::VertexStepMode::Vertex,
+                    attributes: &texture_coordinate_f32x2_attributes,
+                }),
+            ]
+        }
     };
     let color_targets = [Some(wgt::ColorTargetState::from(
         wgt::TextureFormat::Rgba8Unorm,
@@ -1401,12 +1404,24 @@ pub(super) fn create_raster_pipeline(
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
     ) {
         &textured_frame_entries
-    } else if kernel
-        == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
-    {
-        if !owner.capabilities.rgba8_unorm_filterable {
+    } else if matches!(
+        kernel,
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+    ) {
+        let filterable = match kernel {
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => {
+                owner.capabilities.rgba8_unorm_filterable
+            }
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
+                owner.capabilities.rgba8_unorm_srgb_filterable
+            }
+            _ => unreachable!("linear clamp kernel already matched"),
+        };
+        if !filterable {
             return Err(RasterPipelineCreateError::NativeObjectCreation(
-                "Rgba8Unorm is not filterable on the selected adapter".into(),
+                "linear sampling is not supported for this texture format on the selected adapter"
+                    .into(),
             ));
         }
         &linear_clamp_textured_frame_entries
@@ -1456,6 +1471,7 @@ pub(super) fn create_raster_pipeline(
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 match unsafe {
                     // SAFETY: the static one-entry descriptor is valid and
@@ -1617,6 +1633,7 @@ pub(super) fn create_raster_pipeline(
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
             ) {
                 match unsafe {
                     // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.
@@ -2083,18 +2100,81 @@ pub(super) fn create_raster_uv_linear_clamp_texture_bindings(
     texture_coordinates: fluxel_rendergraph::PhysicalResourceIdentity,
     texture_coordinate_size: u64,
 ) -> Result<NativeRasterTextureBindings, String> {
-    if !owner.capabilities.rgba8_unorm_filterable {
-        return Err("Rgba8Unorm is not filterable on the selected adapter".into());
+    create_raster_uv_linear_clamp_texture_bindings_for_format(
+        owner,
+        pipeline,
+        uniform,
+        texture,
+        positions,
+        position_size,
+        texture_coordinates,
+        texture_coordinate_size,
+        TextureFormat::Rgba8Unorm,
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp,
+        owner.capabilities.rgba8_unorm_filterable,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private native boundary receives each fixed binding and both independently checked stream identity/range pairs"
+)]
+pub(super) fn create_raster_uv_linear_clamp_srgb_texture_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    uniform: &OwnedBuffer,
+    texture: &OwnedTexture,
+    positions: fluxel_rendergraph::PhysicalResourceIdentity,
+    position_size: u64,
+    texture_coordinates: fluxel_rendergraph::PhysicalResourceIdentity,
+    texture_coordinate_size: u64,
+) -> Result<NativeRasterTextureBindings, String> {
+    create_raster_uv_linear_clamp_texture_bindings_for_format(
+        owner,
+        pipeline,
+        uniform,
+        texture,
+        positions,
+        position_size,
+        texture_coordinates,
+        texture_coordinate_size,
+        TextureFormat::Rgba8UnormSrgb,
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
+        owner.capabilities.rgba8_unorm_srgb_filterable,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "private closed native ABI facts are deliberately explicit"
+)]
+fn create_raster_uv_linear_clamp_texture_bindings_for_format(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    uniform: &OwnedBuffer,
+    texture: &OwnedTexture,
+    positions: fluxel_rendergraph::PhysicalResourceIdentity,
+    position_size: u64,
+    texture_coordinates: fluxel_rendergraph::PhysicalResourceIdentity,
+    texture_coordinate_size: u64,
+    expected_format: TextureFormat,
+    expected_kernel: crate::RasterKernel,
+    format_filterable: bool,
+) -> Result<NativeRasterTextureBindings, String> {
+    if !format_filterable {
+        return Err(
+            "linear sampling is not supported for this texture format on the selected adapter"
+                .into(),
+        );
     }
-    if pipeline.0.kernel
-        != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+    if pipeline.0.kernel != expected_kernel
         || !Arc::ptr_eq(owner, &pipeline.0.owner)
         || !Arc::ptr_eq(owner, &uniform.owner)
         || !Arc::ptr_eq(owner, &texture.owner)
         || uniform.size != 80
         || !uniform.allowed_usage.contains(BufferUsageKind::Uniform)
         || texture.descriptor.dimension != TextureDimension::D2
-        || texture.descriptor.format != TextureFormat::Rgba8Unorm
+        || texture.descriptor.format != expected_format
         || texture.descriptor.extent.depth != 1
         || texture.descriptor.mip_levels != 1
         || texture.descriptor.array_layers != 1
@@ -2104,8 +2184,8 @@ pub(super) fn create_raster_uv_linear_clamp_texture_bindings(
         return Err("invalid linear-clamp textured raster binding".into());
     }
     let view_desc = wgpu_hal::TextureViewDescriptor {
-        label: Some("fluxel linear-clamp textured raster Rgba8 view"),
-        format: wgt::TextureFormat::Rgba8Unorm,
+        label: Some("fluxel linear-clamp textured raster view"),
+        format: lower_format(expected_format),
         dimension: wgt::TextureViewDimension::D2,
         usage: wgt::TextureUses::RESOURCE,
         range: wgt::ImageSubresourceRange {
@@ -2151,8 +2231,11 @@ pub(super) fn create_raster_uv_linear_clamp_texture_bindings(
             Some(NativeBuffer::Dx12(buffer)),
             Some(NativeTexture::Dx12(image)),
         ) => {
-            // SAFETY: the checked texture is whole D2 Rgba8Unorm with RESOURCE
-            // use, and this device owns both the image and resulting view.
+            // SAFETY: validation fixed this to a whole single-mip/layer D2
+            // `expected_format` view (Rgba8UnormSrgb on the sRGB path) with
+            // RESOURCE use. This device owns image/view; the opaque group and
+            // its safe wrapper retain matching pipeline/resource leases until
+            // terminal completion before either native object is destroyed.
             let view = unsafe { device.create_texture_view(image, &view_desc) }
                 .map_err(|e| format!("DX12 linear-clamp raster view creation failed: {e}"))?;
             // SAFETY: the descriptor is fixed to filtering linear min/mag,
@@ -2219,8 +2302,9 @@ pub(super) fn create_raster_uv_linear_clamp_texture_bindings(
             Some(NativeBuffer::Vulkan(buffer)),
             Some(NativeTexture::Vulkan(image)),
         ) => {
-            // SAFETY: the same closed view descriptor and device-affinity proof
-            // as DX12 apply to this retained Vulkan image.
+            // SAFETY: the same whole D2 `expected_format` descriptor
+            // (Rgba8UnormSrgb on the sRGB path), RESOURCE-use, device-affinity,
+            // and completion-retained lease proof as DX12 apply to this image.
             let view = unsafe { device.create_texture_view(image, &view_desc) }
                 .map_err(|e| format!("Vulkan linear-clamp raster view creation failed: {e}"))?;
             // SAFETY: fixed descriptor semantics are identical on Vulkan.
@@ -2363,6 +2447,18 @@ pub(super) fn set_raster_uv_linear_clamp_texture_bindings(
         != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
     {
         return Err("linear-clamp bindings require their linear-clamp raster pipeline".into());
+    }
+    set_raster_texture_bindings(encoder, bindings)
+}
+
+pub(super) fn set_raster_uv_linear_clamp_srgb_texture_bindings(
+    encoder: &mut CopyEncoder,
+    bindings: &NativeRasterTextureBindings,
+) -> Result<(), String> {
+    if bindings.pipeline.0.kernel
+        != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+    {
+        return Err("sRGB linear-clamp bindings require their sRGB raster pipeline".into());
     }
     set_raster_texture_bindings(encoder, bindings)
 }
@@ -2927,6 +3023,7 @@ pub(super) fn set_vertex_buffer(
         kernel,
         crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
     ) {
         if encoder.active_render_view.is_none() {
             return Err("explicit-UV vertex binding requires an active raster pass".into());
@@ -2971,6 +3068,7 @@ pub(super) fn set_vertex_buffer(
             kernel,
             crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
         ) && (slot > 1 || offset != 0 || size < if slot == 0 { 12 } else { 8 }))
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
         || size
@@ -2978,6 +3076,7 @@ pub(super) fn set_vertex_buffer(
             kernel,
             crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
         ) && slot == 1
             {
                 8
@@ -4793,7 +4892,7 @@ fn canonical_texture_range(descriptor: TextureDesc, range: TextureRange) -> Text
             array_layer_count: descriptor.array_layers,
             aspect: match descriptor.format {
                 TextureFormat::Depth32Float => TextureAspect::Depth,
-                TextureFormat::Rgba8Unorm => TextureAspect::Color,
+                TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb => TextureAspect::Color,
                 _ => TextureAspect::Color,
             },
         },
@@ -4825,8 +4924,10 @@ fn texture_subresources(
         .ok_or_else(|| "texture layer range overflows".to_owned())?;
     let compatible_aspect = matches!(
         (descriptor.format, aspect),
-        (TextureFormat::Rgba8Unorm, TextureAspect::Color)
-            | (TextureFormat::Depth32Float, TextureAspect::Depth)
+        (
+            TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb,
+            TextureAspect::Color
+        ) | (TextureFormat::Depth32Float, TextureAspect::Depth)
     );
     if mip_level_count == 0
         || array_layer_count == 0
@@ -5114,6 +5215,7 @@ fn lower_dimension(dimension: TextureDimension) -> wgt::TextureDimension {
 fn lower_format(format: TextureFormat) -> wgt::TextureFormat {
     match format {
         TextureFormat::Rgba8Unorm => wgt::TextureFormat::Rgba8Unorm,
+        TextureFormat::Rgba8UnormSrgb => wgt::TextureFormat::Rgba8UnormSrgb,
         TextureFormat::Bgra8Unorm => wgt::TextureFormat::Bgra8Unorm,
         TextureFormat::Rgba16Float => wgt::TextureFormat::Rgba16Float,
         TextureFormat::Depth32Float => wgt::TextureFormat::Depth32Float,
@@ -5150,10 +5252,12 @@ fn open_dx12(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
             })?;
     let hardware = hardware(Backend::Dx12, &exposed.info);
     let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
+    let rgba8_unorm_srgb_filterable = rgba8_unorm_srgb_filterable(&exposed.adapter);
     let capabilities = capabilities(
         exposed.features,
         &exposed.capabilities,
         rgba8_unorm_filterable,
+        rgba8_unorm_srgb_filterable,
     );
     let requested_limits = required_limits(Backend::Dx12, &exposed.capabilities)?;
     let adapter = exposed.adapter;
@@ -5218,10 +5322,12 @@ fn open_vulkan(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
             })?;
     let hardware = hardware(Backend::Vulkan, &exposed.info);
     let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
+    let rgba8_unorm_srgb_filterable = rgba8_unorm_srgb_filterable(&exposed.adapter);
     let capabilities = capabilities(
         exposed.features,
         &exposed.capabilities,
         rgba8_unorm_filterable,
+        rgba8_unorm_srgb_filterable,
     );
     let requested_limits = required_limits(Backend::Vulkan, &exposed.capabilities)?;
     let adapter = exposed.adapter;
@@ -5352,13 +5458,23 @@ fn rgba8_unorm_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
         .contains(wgpu_hal::TextureFormatCapabilities::SAMPLED_LINEAR)
 }
 
+fn rgba8_unorm_srgb_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
+    // SAFETY: the selected adapter remains retained through device creation;
+    // this read-only format query has no resource or queue side effects. Query
+    // sRGB separately because UNORM facts must never imply it.
+    unsafe { adapter.texture_format_capabilities(wgt::TextureFormat::Rgba8UnormSrgb) }
+        .contains(wgpu_hal::TextureFormatCapabilities::SAMPLED_LINEAR)
+}
+
 fn capabilities(
     _: wgt::Features,
     capabilities: &wgpu_hal::Capabilities,
     rgba8_unorm_filterable: bool,
+    rgba8_unorm_srgb_filterable: bool,
 ) -> HardwareCapabilities {
     HardwareCapabilities {
         rgba8_unorm_filterable,
+        rgba8_unorm_srgb_filterable,
         max_texture_dimension_2d: capabilities.limits.max_texture_dimension_2d,
         max_bind_groups: capabilities.limits.max_bind_groups,
         min_uniform_buffer_offset_alignment: capabilities
@@ -5484,6 +5600,31 @@ mod tests {
         assert_eq!(descriptor.compare, None);
         assert_eq!(descriptor.anisotropy_clamp, 1);
         assert_eq!(descriptor.border_color, None);
+    }
+
+    #[test]
+    fn srgb_format_lowering_is_distinct_from_unorm() {
+        assert_eq!(
+            lower_format(TextureFormat::Rgba8Unorm),
+            wgt::TextureFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            lower_format(TextureFormat::Rgba8UnormSrgb),
+            wgt::TextureFormat::Rgba8UnormSrgb
+        );
+        assert_ne!(
+            lower_format(TextureFormat::Rgba8Unorm),
+            lower_format(TextureFormat::Rgba8UnormSrgb)
+        );
+    }
+
+    #[test]
+    fn srgb_sampled_usage_projection_does_not_depend_on_unorm_format() {
+        let sampled = TextureUsage::empty().with(TextureUsageKind::Sampled);
+        assert_eq!(
+            texture_usage_from_native(lower_texture_usage(sampled), TextureFormat::Rgba8UnormSrgb,),
+            sampled
+        );
     }
 
     #[test]
