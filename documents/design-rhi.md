@@ -1,13 +1,14 @@
 # Fluxel RHI Design
 
-**Status: 0.1.2 copy correctness vertical slice**
+**Status: 0.1.3 Copy + fixed Compute correctness vertical slices**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
-not a promise of a complete RHI. In 0.1.2 the crate opens one headless DX12 or
+not a promise of a complete RHI. In 0.1.3 the crate opens one headless DX12 or
 Vulkan device on Windows, creates lease-backed owned resources, and implements
-the copy-only portion of `ExecutionBackend`: semantic transition lowering, recording, one
-submission, completion, retirement, and crate-private test readback. It does
-not implement compute, raster, surfaces, or presentation.
+Copy plus one fixed Compute portion of `ExecutionBackend`: semantic transition
+lowering, recording, one submission, completion, retirement, and crate-private
+test readback. It does not implement raster, surfaces, presentation, or a
+general shader API.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that
@@ -27,8 +28,8 @@ fluxel-rendergraph                    fluxel-rhi
 graph declaration                     explicit DX12/Vulkan selection
 compile / immutable plan              headless adapter enumeration
 creation-usage requirements           native device and queue ownership
-ExecutionBackend contract       -->   copy-only contract implementation
-TestRhi deterministic execution       copy-only native GPU execution
+ExecutionBackend contract       -->   Copy + fixed Compute implementation
+TestRhi deterministic execution       native GPU execution subset
 ```
 
 `fluxel-rendergraph` owns dependency, version, culling, access-state, and
@@ -76,13 +77,38 @@ facts. Descriptor usage is the caller's requested minimum and the result obeys
 the widening; buffer `StorageWrite`, for example, becomes storage read/write
 rather than pretending that a native write-only storage capability exists.
 
-The copy backend uses one logical queue, one serial encoder, and one submission.
+`CopyBackend` remains permanently Copy-only. `ComputeBackend` is a separate
+backend profile that adds Compute while retaining Copy; this prevents a Copy
+conformance client from acquiring Compute incidentally. Both use one logical
+queue, one serial encoder, and one submission. The queue is protected by an
+`OpenedDevice`-shared operation lock: every submission and any error-path
+`wait_for_idle` are mutually exclusive across cloned `Device`s and separately
+constructed backends. This is required by the HAL queue contract, not a claim
+of multi-queue support.
+
 Same-state write dependencies remain required ordering/visibility facts. Vulkan
 may emit a native memory barrier; DX12 Copy ordering can satisfy the same fact
 within the serial command list without inventing a state transition. Exported resources
 carry the graph's outgoing state; the test readback helper consumes that exact
 state as its incoming state before transitioning to `CopySource`, so it cannot
 silently repair a wrong graph result.
+
+Buffer-to-buffer Copy validates non-zero, in-range 4-byte-aligned source
+offset, destination offset, and size both while graph recording and at the RHI
+native boundary. This carry-forward rule keeps invalid safe-API input away from
+the unsafe HAL even if a caller bypasses the normal recording path.
+
+The Compute slice accepts only the closed `ComputeKernel` set and exactly one
+read/write storage-buffer binding recipe. Embedded WGSL is parsed and validated
+to Naga IR before the HAL lowers it to DX12 or Vulkan native code. A portable
+artifact identity is the WGSL source hash, entry point, workgroup shape, and
+recipe version—not a comparison of backend-specific native binaries. Pipelines
+and bindings are opaque, device-affine `Arc` values with cloneable leases; a
+binding retains its pipeline and buffer through completion. Raw hardware facts
+bound dispatch dimensions, every workgroup dimension, and total workgroup
+invocations. RenderGraph rejects zero or excessive dispatch dimensions before
+backend recording, and the RHI rechecks the fixed shader's workgroup
+requirements before native creation.
 
 All HAL calls and all `unsafe` are contained in `src/imp.rs`. Each unsafe block
 documents the validity and lifetime condition it relies on. The safe public
@@ -157,8 +183,12 @@ Developers run ignored tests explicitly on provisioned hardware. The 0.1.2
 fixtures execute C01 partial buffer copy, C02 texture copy with padded rows, and
 C03 same-state overlapping WAW separately on both backends. Each compares
 readback with a CPU oracle and requires programmatically collected diagnostics
-to be empty. This establishes copy correctness only, not compute, raster, or
-presentation conformance.
+to be empty. The 0.1.3 K01 fixture executes a fixed in-place wrapping add;
+K02 executes ordered wrapping add then multiply on the same read/write storage
+buffer, exercising a same-state RW-to-RW dependency. Each runs separately on
+DX12 and Vulkan, compares with its CPU integer oracle, and requires collected
+diagnostics to be empty. This establishes only Copy and fixed Compute
+correctness, not raster or presentation conformance.
 
 ## Evolution constraints
 
@@ -172,13 +202,14 @@ Further work remains vertical rather than speculative. The copy-only native
 3. Record declared Copy work and resolve only authorized pass-local resources.
 4. Submit work, expose completion, retain leases until completion, and validate
    crate-private readback against native conformance oracles.
-5. Add compute, raster, surface acquisition/presentation, and multi-queue only with
+5. Add raster, surface acquisition/presentation, and multi-queue only with
    explicit ownership and synchronization semantics.
 
-The current user model is: `fluxel-rhi` executes only Copy plans on native
-DX12/Vulkan; `TestRhi` remains the deterministic CPU contract backend. The
-crate must not imply compute, raster, surface, or renderer support in its API,
-examples, benchmarks, or release notes.
+The current user model is: `fluxel-rhi` executes Copy plans and the fixed
+Compute artifact subset on native DX12/Vulkan; `TestRhi` remains the
+deterministic CPU contract backend. The crate must not imply raster, surface,
+renderer, texture-compute, or general shader support in its API, examples,
+benchmarks, or release notes.
 
 ## Portable lowering constraints
 

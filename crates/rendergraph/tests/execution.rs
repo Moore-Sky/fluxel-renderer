@@ -27,7 +27,7 @@ fn caps() -> DeviceCapabilities {
         ))
         .transitions(TransitionCapabilities::GraphManagedExplicit)
         .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
-        .limits(DeviceLimits::new(4, 256))
+        .limits(DeviceLimits::new(4, 256).with_max_compute_workgroups_per_dimension([65_535; 3]))
         .buffers(BufferCapabilities::new(true, true, true))
         .texture_format(
             TextureFormatCapabilities::builder(TextureFormat::Rgba8Unorm)
@@ -259,7 +259,8 @@ fn capability_mismatch_and_missing_input_fail_before_submission() {
     let (graph, slot, _) = imported_buffer_graph();
     let (registry, input, _) = registry_with_input();
     let mut incompatible_caps = caps();
-    incompatible_caps.limits = DeviceLimits::new(5, 256);
+    incompatible_caps.limits =
+        DeviceLimits::new(5, 256).with_max_compute_workgroups_per_dimension([65_535; 3]);
     let mismatch = FrameExecutor::new(TestRhi::new(incompatible_caps, device()));
     let mut inputs = FrameInputs::new(());
     inputs.bind_buffer(slot, input);

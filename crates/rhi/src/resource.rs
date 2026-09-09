@@ -113,6 +113,73 @@ impl fmt::Display for ResourceCreateError {
 
 impl std::error::Error for ResourceCreateError {}
 
+/// Why creation of a fixed compute artifact was rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ComputeCreateError {
+    /// The device cannot support the fixed shader's declared workgroup.
+    UnsupportedComputeLimits,
+    /// The pipeline, buffer, or binding operation crossed device identities.
+    ForeignDevice,
+    /// The requested storage-buffer view is empty, unaligned, overflowing, or out of bounds.
+    InvalidBindingRange,
+    /// The buffer's actual native usage cannot provide read-write storage access.
+    StorageUsageRequired,
+    /// The fixed WGSL artifact failed Naga parsing or validation.
+    ShaderValidation(String),
+    /// The backend rejected shader lowering or compute-pipeline compilation.
+    ShaderCompilation(String),
+    /// The backend could not create a fixed layout or another non-shader object.
+    NativeObjectCreation(String),
+    /// Native creation of a validated fixed binding object failed.
+    NativeFailure(String),
+}
+
+impl fmt::Display for ComputeCreateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedComputeLimits => {
+                f.write_str("device does not support this fixed compute workgroup")
+            }
+            Self::ForeignDevice => f.write_str("compute objects belong to different devices"),
+            Self::InvalidBindingRange => f.write_str("invalid compute storage-buffer range"),
+            Self::StorageUsageRequired => {
+                f.write_str("compute bindings require read-write storage usage")
+            }
+            Self::ShaderValidation(reason) => {
+                write!(f, "compute shader validation failed: {reason}")
+            }
+            Self::ShaderCompilation(reason) => {
+                write!(f, "compute shader compilation failed: {reason}")
+            }
+            Self::NativeObjectCreation(reason) => {
+                write!(f, "native compute object creation failed: {reason}")
+            }
+            Self::NativeFailure(reason) => {
+                write!(f, "native compute binding creation failed: {reason}")
+            }
+        }
+    }
+}
+impl std::error::Error for ComputeCreateError {}
+
+#[cfg(windows)]
+fn map_compute_pipeline_create_error(
+    error: crate::imp::ComputePipelineCreateError,
+) -> ComputeCreateError {
+    match error {
+        crate::imp::ComputePipelineCreateError::ShaderValidation(reason) => {
+            ComputeCreateError::ShaderValidation(reason)
+        }
+        crate::imp::ComputePipelineCreateError::ShaderCompilation(reason) => {
+            ComputeCreateError::ShaderCompilation(reason)
+        }
+        crate::imp::ComputePipelineCreateError::NativeObjectCreation(reason) => {
+            ComputeCreateError::NativeObjectCreation(reason)
+        }
+    }
+}
+
 struct BufferShared {
     _native: crate::imp::OwnedBuffer,
     descriptor: BufferDescriptor,
@@ -145,6 +212,124 @@ pub struct Texture(Arc<TextureShared>);
 #[derive(Clone)]
 pub struct TextureLease(Arc<TextureShared>);
 
+/// The fixed, deterministic compute artifacts supported by this milestone.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ComputeKernel {
+    /// Adds one to every addressed `u32` with wrapping arithmetic.
+    WrappingAdd,
+    /// Multiplies every addressed `u32` by three with wrapping arithmetic.
+    WrappingMultiply,
+}
+
+/// Portable identity of one fixed compute artifact.
+///
+/// This identifies the validated source-level artifact shared by every native
+/// backend. It deliberately does not identify backend-specific DXIL or SPIR-V
+/// binaries.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ComputeArtifactIdentity {
+    /// Hash of the complete embedded WGSL module.
+    pub module_source_hash: u64,
+    /// Selected entry point within that module.
+    pub entry_point: &'static str,
+    /// Declared local workgroup shape.
+    pub workgroup_size: [u32; 3],
+    /// Version of the fixed one-RW-storage-buffer binding recipe.
+    pub binding_recipe_version: u32,
+}
+
+impl ComputeKernel {
+    /// Returns the fixed WGSL entry point for this artifact.
+    pub const fn entry_point(self) -> &'static str {
+        match self {
+            Self::WrappingAdd => "wrapping_add",
+            Self::WrappingMultiply => "wrapping_multiply",
+        }
+    }
+
+    /// Returns the fixed workgroup shape baked into this artifact.
+    pub const fn workgroup_size(self) -> [u32; 3] {
+        [64, 1, 1]
+    }
+
+    /// Returns the source hash recorded by conformance fixtures.
+    pub const fn source_hash(self) -> u64 {
+        // FNV-1a is an artifact identifier, not a security primitive. Keeping
+        // the calculation adjacent to the embedded source makes accidental
+        // source/hash drift impossible.
+        fnv1a64(self.wgsl_source().as_bytes())
+    }
+
+    /// Returns the portable identity shared by DX12 and Vulkan lowering.
+    pub const fn portable_identity(self) -> ComputeArtifactIdentity {
+        ComputeArtifactIdentity {
+            module_source_hash: self.source_hash(),
+            entry_point: self.entry_point(),
+            workgroup_size: self.workgroup_size(),
+            binding_recipe_version: self.binding_recipe_version(),
+        }
+    }
+
+    /// Returns the version of this slice's one read-write storage binding recipe.
+    pub const fn binding_recipe_version(self) -> u32 {
+        1
+    }
+
+    pub(crate) const fn wgsl_source(self) -> &'static str {
+        "@group(0) @binding(0) var<storage, read_write> values: array<u32>;\n\
+         @compute @workgroup_size(64)\n\
+         fn wrapping_add(@builtin(global_invocation_id) id: vec3<u32>) {\n\
+             if (id.x < arrayLength(&values)) { values[id.x] = values[id.x] + 1u; }\n\
+         }\n\
+         @compute @workgroup_size(64)\n\
+         fn wrapping_multiply(@builtin(global_invocation_id) id: vec3<u32>) {\n\
+             if (id.x < arrayLength(&values)) { values[id.x] = values[id.x] * 3u; }\n\
+         }"
+    }
+}
+
+pub(crate) const fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        index += 1;
+    }
+    hash
+}
+
+struct ComputePipelineShared {
+    _native: crate::imp::NativeComputePipeline,
+    kernel: ComputeKernel,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// An opaque, device-affine pipeline for one fixed compute artifact.
+#[derive(Clone)]
+pub struct ComputePipeline(Arc<ComputePipelineShared>);
+
+/// A cloneable strong lease for a compute pipeline and its native layout/module.
+#[derive(Clone)]
+pub struct ComputePipelineLease(Arc<ComputePipelineShared>);
+
+struct ComputeBindingsShared {
+    _native: crate::imp::NativeComputeBindings,
+    pipeline: ComputePipeline,
+    _buffer: BufferLease,
+    offset: u64,
+    size: u64,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// An opaque binding object for exactly one in-place RW storage buffer.
+#[derive(Clone)]
+pub struct ComputeBindings(Arc<ComputeBindingsShared>);
+
+/// A cloneable strong lease for a binding object, its pipeline, and its buffer.
+#[derive(Clone)]
+pub struct ComputeBindingsLease(Arc<ComputeBindingsShared>);
+
 /// A type-erased strong lease retained by native frame submissions.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -153,6 +338,10 @@ pub enum ResourceLease {
     Buffer(BufferLease),
     /// Retains one texture allocation.
     Texture(TextureLease),
+    /// Retains a native compute pipeline, module, and layout.
+    ComputePipeline(ComputePipelineLease),
+    /// Retains a native compute binding object, pipeline, and buffer.
+    ComputeBindings(ComputeBindingsLease),
 }
 
 macro_rules! resource_accessors {
@@ -217,6 +406,23 @@ resource_accessors!(
     TextureUsage
 );
 
+impl BufferLease {
+    #[allow(
+        dead_code,
+        reason = "the test-only exported-buffer wrapper consumes this exact lease identity"
+    )]
+    pub(crate) fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    #[allow(
+        dead_code,
+        reason = "the test-only exported-buffer wrapper consumes this exact lease identity"
+    )]
+    pub(crate) fn identity(&self) -> PhysicalResourceIdentity {
+        self.0.identity
+    }
+}
+
 impl From<BufferLease> for ResourceLease {
     fn from(value: BufferLease) -> Self {
         Self::Buffer(value)
@@ -226,6 +432,18 @@ impl From<BufferLease> for ResourceLease {
 impl From<TextureLease> for ResourceLease {
     fn from(value: TextureLease) -> Self {
         Self::Texture(value)
+    }
+}
+
+impl From<ComputePipelineLease> for ResourceLease {
+    fn from(value: ComputePipelineLease) -> Self {
+        Self::ComputePipeline(value)
+    }
+}
+
+impl From<ComputeBindingsLease> for ResourceLease {
+    fn from(value: ComputeBindingsLease) -> Self {
+        Self::ComputeBindings(value)
     }
 }
 
@@ -241,7 +459,155 @@ impl Texture {
     }
 }
 
+impl ComputePipeline {
+    /// Returns the fixed kernel selected during creation.
+    pub fn kernel(&self) -> ComputeKernel {
+        self.0.kernel
+    }
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a lease retaining the native pipeline and its artifacts.
+    pub fn lease(&self) -> ComputePipelineLease {
+        ComputePipelineLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeComputePipeline {
+        &self.0._native
+    }
+}
+
+impl ComputeBindings {
+    /// Returns the pipeline this binding object was created for.
+    pub fn pipeline(&self) -> &ComputePipeline {
+        &self.0.pipeline
+    }
+    /// Returns the exact authorized storage-buffer byte range.
+    pub fn range(&self) -> (u64, u64) {
+        (self.0.offset, self.0.size)
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a lease retaining all native objects referenced by this binding.
+    pub fn lease(&self) -> ComputeBindingsLease {
+        ComputeBindingsLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeComputeBindings {
+        &self.0._native
+    }
+}
+
+impl fmt::Debug for ComputePipeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ComputePipeline")
+            .field("kernel", &self.0.kernel)
+            .finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for ComputeBindings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ComputeBindings")
+            .field("range", &self.range())
+            .finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for ComputePipelineLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ComputePipelineLease")
+            .field(&Arc::strong_count(&self.0))
+            .finish()
+    }
+}
+impl fmt::Debug for ComputeBindingsLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ComputeBindingsLease")
+            .field(&Arc::strong_count(&self.0))
+            .finish()
+    }
+}
+
 impl Device {
+    /// Creates one fixed-artifact compute pipeline for this device.
+    pub fn create_compute_pipeline(
+        &self,
+        kernel: ComputeKernel,
+    ) -> Result<ComputePipeline, ComputeCreateError> {
+        validate_compute_workgroup_limits(
+            kernel.workgroup_size(),
+            self.capabilities.max_compute_workgroup_size,
+            self.capabilities.max_compute_invocations_per_workgroup,
+        )?;
+        #[cfg(windows)]
+        let native = crate::imp::create_compute_pipeline(
+            &self.inner,
+            kernel.wgsl_source(),
+            kernel.entry_point(),
+        )
+        .map_err(map_compute_pipeline_create_error)?;
+        #[cfg(not(windows))]
+        let native = crate::imp::create_compute_pipeline(
+            &self.inner,
+            kernel.wgsl_source(),
+            kernel.entry_point(),
+        )
+        .map_err(ComputeCreateError::NativeObjectCreation)?;
+        Ok(ComputePipeline(Arc::new(ComputePipelineShared {
+            _native: native,
+            kernel,
+            device: self.identity,
+        })))
+    }
+
+    /// Creates the only binding layout accepted by the fixed compute artifacts.
+    pub fn create_compute_bindings(
+        &self,
+        pipeline: &ComputePipeline,
+        buffer: &Buffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<ComputeBindings, ComputeCreateError> {
+        if pipeline.device_identity() != self.identity || buffer.device_identity() != self.identity
+        {
+            return Err(ComputeCreateError::ForeignDevice);
+        }
+        validate_compute_binding_range(
+            offset,
+            size,
+            buffer.descriptor().buffer.size,
+            self.capabilities.min_storage_buffer_offset_alignment,
+            self.capabilities.max_storage_buffer_binding_size,
+        )?;
+        if !buffer
+            .allowed_usage()
+            .contains(BufferUsageKind::StorageRead)
+            || !buffer
+                .allowed_usage()
+                .contains(BufferUsageKind::StorageWrite)
+        {
+            return Err(ComputeCreateError::StorageUsageRequired);
+        }
+        let native = crate::imp::create_compute_bindings(
+            &self.inner,
+            pipeline.native(),
+            buffer.native(),
+            offset,
+            size,
+        )
+        .map_err(ComputeCreateError::NativeFailure)?;
+        Ok(ComputeBindings(Arc::new(ComputeBindingsShared {
+            _native: native,
+            pipeline: pipeline.clone(),
+            _buffer: buffer.lease(),
+            offset,
+            size,
+            device: self.identity,
+        })))
+    }
     /// Creates a native buffer after validating and lowering its portable contract.
     pub fn create_buffer(
         &self,
@@ -283,6 +649,57 @@ impl Device {
             device: self.identity,
         })))
     }
+}
+
+/// Checks the fixed shader declaration against raw native workgroup facts.
+///
+/// This is intentionally kept at the RHI boundary: the declaration is a
+/// property of the fixed shader artifact, not of RenderGraph dispatch syntax.
+fn validate_compute_workgroup_limits(
+    workgroup_size: [u32; 3],
+    maximum_size: [u32; 3],
+    maximum_invocations: u32,
+) -> Result<(), ComputeCreateError> {
+    if workgroup_size
+        .into_iter()
+        .zip(maximum_size)
+        .any(|(requested, maximum)| requested == 0 || requested > maximum)
+    {
+        return Err(ComputeCreateError::UnsupportedComputeLimits);
+    }
+    let invocations = workgroup_size
+        .into_iter()
+        .try_fold(1_u32, |total, component| total.checked_mul(component));
+    if invocations.is_none_or(|total| total > maximum_invocations) {
+        return Err(ComputeCreateError::UnsupportedComputeLimits);
+    }
+    Ok(())
+}
+
+/// Checks a fixed RW-storage binding against portable and native device facts.
+///
+/// The fixed WGSL artifacts require four-byte elements, while the native
+/// offset must additionally meet the device's storage-buffer alignment.
+fn validate_compute_binding_range(
+    offset: u64,
+    size: u64,
+    buffer_size: u64,
+    minimum_storage_offset_alignment: u32,
+    maximum_storage_binding_size: u64,
+) -> Result<(), ComputeCreateError> {
+    let required_offset_alignment = u64::from(minimum_storage_offset_alignment.max(4));
+    let end = offset
+        .checked_add(size)
+        .ok_or(ComputeCreateError::InvalidBindingRange)?;
+    if size == 0
+        || !offset.is_multiple_of(required_offset_alignment)
+        || !size.is_multiple_of(4)
+        || size > maximum_storage_binding_size
+        || end > buffer_size
+    {
+        return Err(ComputeCreateError::InvalidBindingRange);
+    }
+    Ok(())
 }
 
 fn invalid(resource: ResourceKind, reason: InvalidResourceReason) -> ResourceCreateError {
@@ -422,6 +839,28 @@ mod tests {
     use super::*;
     use fluxel_rendergraph::{Extent3d, TextureDimension};
 
+    #[cfg(windows)]
+    #[test]
+    fn compute_pipeline_creation_stages_map_to_public_error_variants() {
+        let cases = [
+            (
+                crate::imp::ComputePipelineCreateError::ShaderValidation("parse".into()),
+                ComputeCreateError::ShaderValidation("parse".into()),
+            ),
+            (
+                crate::imp::ComputePipelineCreateError::ShaderCompilation("compile".into()),
+                ComputeCreateError::ShaderCompilation("compile".into()),
+            ),
+            (
+                crate::imp::ComputePipelineCreateError::NativeObjectCreation("layout".into()),
+                ComputeCreateError::NativeObjectCreation("layout".into()),
+            ),
+        ];
+        for (native, public) in cases {
+            assert_eq!(map_compute_pipeline_create_error(native), public);
+        }
+    }
+
     #[test]
     fn rejects_zero_buffer_and_empty_usage() {
         let empty = BufferDescriptor {
@@ -488,5 +927,60 @@ mod tests {
                 InvalidResourceReason::IncompatibleUsage
             ))
         );
+    }
+
+    #[test]
+    fn fixed_workgroup_requires_each_native_dimension_and_total_invocations() {
+        assert_eq!(
+            validate_compute_workgroup_limits([64, 1, 1], [63, 1, 1], 64),
+            Err(ComputeCreateError::UnsupportedComputeLimits)
+        );
+        assert_eq!(
+            validate_compute_workgroup_limits([64, 1, 1], [64, 1, 1], 63),
+            Err(ComputeCreateError::UnsupportedComputeLimits)
+        );
+        assert_eq!(
+            validate_compute_workgroup_limits([64, 0, 1], [64, 1, 1], 64),
+            Err(ComputeCreateError::UnsupportedComputeLimits)
+        );
+        assert_eq!(
+            validate_compute_workgroup_limits([64, 1, 1], [64, 1, 1], 64),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn storage_bindings_require_native_alignment_and_limited_in_bounds_ranges() {
+        let validate = |offset, size, buffer_size, alignment, maximum| {
+            validate_compute_binding_range(offset, size, buffer_size, alignment, maximum)
+        };
+        assert_eq!(
+            validate(4, 256, 512, 256, 256),
+            Err(ComputeCreateError::InvalidBindingRange)
+        );
+        assert_eq!(validate(0, 256, 256, 256, 256), Ok(()));
+        assert_eq!(validate(256, 256, 512, 256, 256), Ok(()));
+        assert_eq!(
+            validate(0, 260, 512, 256, 256),
+            Err(ComputeCreateError::InvalidBindingRange)
+        );
+        assert_eq!(
+            validate(0, 256, 512, 256, 252),
+            Err(ComputeCreateError::InvalidBindingRange)
+        );
+        assert_eq!(
+            validate(u64::MAX - 3, 4, u64::MAX, 4, u64::MAX),
+            Err(ComputeCreateError::InvalidBindingRange)
+        );
+    }
+
+    #[test]
+    fn portable_compute_identity_shares_module_but_distinguishes_entries() {
+        let add = ComputeKernel::WrappingAdd.portable_identity();
+        let multiply = ComputeKernel::WrappingMultiply.portable_identity();
+        assert_eq!(add.module_source_hash, multiply.module_source_hash);
+        assert_ne!(add.entry_point, multiply.entry_point);
+        assert_eq!(add.workgroup_size, [64, 1, 1]);
+        assert_eq!(add.binding_recipe_version, 1);
     }
 }

@@ -1,10 +1,10 @@
-//! Native GPU ownership and copy execution for Fluxel.
+//! Native GPU ownership plus Copy and fixed-artifact Compute execution for Fluxel.
 //!
 //! This crate exposes no `wgpu-hal` types. It opens one headless DX12 or Vulkan
-//! device, owns buffers and 2D textures, and executes the copy-only subset of a
-//! portable RenderGraph plan through barriers, one submission, completion, and
-//! lease-backed retirement. Compute, raster, surfaces, and presentation remain
-//! outside this milestone.
+//! device, owns buffers and 2D textures, and executes Copy plus a deliberately
+//! fixed Compute subset of a portable RenderGraph plan through barriers, one
+//! submission, completion, and lease-backed retirement. Raster, surfaces, and
+//! presentation remain outside this milestone.
 
 #![deny(missing_docs)]
 
@@ -106,6 +106,23 @@ pub struct HardwareCapabilities {
     pub min_uniform_buffer_offset_alignment: u32,
     /// Minimum storage-buffer dynamic-offset alignment.
     pub min_storage_buffer_offset_alignment: u32,
+    /// Maximum byte size of a single storage-buffer binding.
+    pub max_storage_buffer_binding_size: u64,
+    /// Maximum workgroup count for each dimension of a compute dispatch.
+    ///
+    /// A zero component means compute dispatches are unavailable and is
+    /// intentionally fail-closed by [`ComputeBackend`].
+    pub max_compute_workgroups_per_dimension: [u32; 3],
+    /// Maximum local workgroup size for each dimension of a compute shader.
+    ///
+    /// A zero component means the fixed compute artifacts are unavailable and
+    /// is rejected before the private native shader boundary is entered.
+    pub max_compute_workgroup_size: [u32; 3],
+    /// Maximum total invocations in one compute shader workgroup.
+    ///
+    /// Zero is treated as unavailable and rejected before native shader
+    /// creation.
+    pub max_compute_invocations_per_workgroup: u32,
 }
 
 /// A headless native device that owns resources and copy-queue execution.
@@ -135,8 +152,8 @@ impl Device {
     /// Opens one explicitly selected backend and adapter for headless use.
     ///
     /// This method enters the private HAL boundary, creates no surface, and
-    /// exposes no native handles. Copy submission is available separately
-    /// through [`CopyBackend`].
+    /// exposes no native handles. Copy submission and fixed-artifact compute
+    /// execution are available through [`CopyBackend`] and [`ComputeBackend`].
     pub fn open(backend: Backend, options: DeviceOptions) -> Result<Self, OpenError> {
         let opened = imp::open(backend, options)?;
         Ok(Self {
@@ -465,6 +482,8 @@ mod imp {
     pub(super) struct OwnedTexture;
     pub(super) struct CopyEncoder;
     pub(super) struct CopyCommandBuffer;
+    pub(super) struct NativeComputePipeline;
+    pub(super) struct NativeComputeBindings;
     #[derive(Clone)]
     pub(super) struct NativeCompletion;
     pub(super) fn open(backend: Backend, _: DeviceOptions) -> Result<OpenedDevice, OpenError> {
@@ -491,6 +510,22 @@ mod imp {
     pub(super) fn begin_copy_encoder(_: &Arc<OpenedDevice>) -> Result<CopyEncoder, String> {
         Err("native execution is only supported on Windows".into())
     }
+    pub(super) fn create_compute_pipeline(
+        _: &Arc<OpenedDevice>,
+        _: &str,
+        _: &str,
+    ) -> Result<NativeComputePipeline, String> {
+        Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn create_compute_bindings(
+        _: &Arc<OpenedDevice>,
+        _: &NativeComputePipeline,
+        _: &OwnedBuffer,
+        _: u64,
+        _: u64,
+    ) -> Result<NativeComputeBindings, String> {
+        Err("native compute is only supported on Windows".into())
+    }
     pub(super) fn transition_texture(
         _: &mut CopyEncoder,
         _: &OwnedTexture,
@@ -508,6 +543,27 @@ mod imp {
         _: ResourceAccessState,
     ) -> Result<(), String> {
         Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn begin_compute(_: &mut CopyEncoder, _: &str) -> Result<(), String> {
+        Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn end_compute(_: &mut CopyEncoder) -> Result<(), String> {
+        Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn set_compute_pipeline(
+        _: &mut CopyEncoder,
+        _: &NativeComputePipeline,
+    ) -> Result<(), String> {
+        Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn set_compute_bindings(
+        _: &mut CopyEncoder,
+        _: &NativeComputeBindings,
+    ) -> Result<(), String> {
+        Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn dispatch(_: &mut CopyEncoder, _: [u32; 3]) -> Result<(), String> {
+        Err("native compute is only supported on Windows".into())
     }
     pub(super) fn copy_texture(
         _: &mut CopyEncoder,

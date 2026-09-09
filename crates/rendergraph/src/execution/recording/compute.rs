@@ -2,10 +2,13 @@
 
 /// Returns whether the current execution milestone accepts the dispatch size.
 ///
-/// The graph currently permits every representable non-negative workgroup
-/// count; this boundary exists so future backend limits remain compute-local.
-pub(super) fn valid_dispatch(_groups: [u32; 3]) -> bool {
-    true
+/// A dispatch is valid only when every dimension is non-zero and within the
+/// backend capability limit.
+pub(super) fn valid_dispatch(groups: [u32; 3], max_groups: [u32; 3]) -> bool {
+    groups
+        .into_iter()
+        .zip(max_groups)
+        .all(|(groups, maximum)| groups != 0 && groups <= maximum)
 }
 
 use crate::{
@@ -59,12 +62,18 @@ where
         self.common.set_bindings(ticket, session)
     }
     fn dispatch(&mut self, groups: [u32; 3]) -> RecordResult {
-        if !valid_dispatch(groups) {
+        let maximum = self
+            .common
+            .backend
+            .capabilities()
+            .limits
+            .max_compute_workgroups_per_dimension;
+        if !valid_dispatch(groups, maximum) {
             return Err(recording_error(
                 RecordingErrorKind::InvalidCommandArgument,
                 self.common.pass,
                 None,
-                "dispatch group count is unsupported",
+                "dispatch group count is zero or exceeds the backend limit",
             ));
         }
         self.common

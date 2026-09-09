@@ -11,15 +11,16 @@ The current release supplies the declaration/compiler contract and a
 single-queue execution SPI verified by the deterministic CPU-only `TestRhi`.
 The companion
 [`fluxel-rhi`](https://github.com/Moore-Sky/fluxel-renderer/tree/main/crates/rhi)
-crate implements its Copy-only subset on native DX12 and Vulkan. Compute,
-raster, surfaces, and renderer lowering remain outside that native slice.
+crate implements its Copy subset and a fixed Compute subset on native DX12 and
+Vulkan. Raster, surfaces, renderer lowering, and a general shader API remain
+outside that native slice.
 
 ## Installation
 
 ```toml
 [dependencies.fluxel-rendergraph]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.2"
+tag = "v0.1.3"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -136,6 +137,11 @@ one graph instantiated with distinct frame inputs.
 `FrameResourceProvider`, and a renderer-owned `RenderObjectProvider`. The
 provided `TestRhi` validates protocol order, transitions, binding checks, and
 completion-based retirement; it does not run shaders or emulate GPU memory.
+On Windows, `fluxel-rhi` separately executes the same immutable plan on DX12
+and Vulkan for Copy and fixed Compute conformance. Its Compute support is not a
+general graph shader surface: a renderer/RHI provider registers opaque fixed
+pipeline and binding objects, while the graph continues to own only declared
+resource accesses, ordering, states, and dispatch validation.
 [`20_headless_frame_pipeline.rs`](examples/20_headless_frame_pipeline.rs) is
 the full CPU-only Raster → Compute → Copy integration fixture.
 
@@ -176,7 +182,8 @@ crate and its drivers.
 
 ## Current limits
 
-- No real-GPU command `ExecutionBackend` yet.
+- Real-GPU execution is limited to Copy and a closed fixed-Compute subset on
+  Windows DX12/Vulkan; it is not raster support or a general shader API.
 - No surface acquisition, resize/recreation, or present execution.
 - No native multi-queue lowering, resource aliasing, or GPU conformance claim.
 - The execution SPI is provisional while the first native backend is built;

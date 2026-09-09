@@ -209,6 +209,89 @@ fn whole_buffer_copy_cannot_exceed_the_physical_descriptor() {
 }
 
 #[test]
+fn buffer_copy_rejects_misaligned_arguments_before_copy_or_submit() {
+    for region in [
+        BufferCopyRegion {
+            source_offset: 2,
+            destination_offset: 0,
+            size: 4,
+        },
+        BufferCopyRegion {
+            source_offset: 0,
+            destination_offset: 2,
+            size: 4,
+        },
+        BufferCopyRegion {
+            source_offset: 0,
+            destination_offset: 0,
+            size: 6,
+        },
+    ] {
+        let mut graph = RenderGraph::new();
+        let source = graph.create_buffer("source", buffer(64));
+        let destination = graph.create_buffer("destination", buffer(64));
+        let initialized = graph.add_compute_pass(
+            "init",
+            |pass| {
+                let (source, _) = pass.write_buffer(
+                    source,
+                    BufferWriteUse::Storage,
+                    BufferRange::whole(),
+                    WriteCoverage::Full,
+                );
+                let (destination, _) = pass.write_buffer(
+                    destination,
+                    BufferWriteUse::Storage,
+                    BufferRange::whole(),
+                    WriteCoverage::Full,
+                );
+                ((source, destination), ())
+            },
+            |_, _, _, _| Ok(()),
+        );
+        let copy = graph.add_copy_pass(
+            "copy",
+            |pass| {
+                let source = pass.read_buffer(&initialized.output.0, BufferRange::whole());
+                let (output, destination) = pass.write_buffer(
+                    initialized.output.1,
+                    BufferRange::whole(),
+                    WriteCoverage::Full,
+                );
+                (output, (source, destination))
+            },
+            move |commands, _, handles, _| commands.copy_buffer(&handles.0, &handles.1, region),
+        );
+        graph.export_buffer(
+            copy.output,
+            ExportBufferContract {
+                final_state: ResourceAccessState::CopyDestination,
+            },
+        );
+        let compiled = graph.compile(&caps()).unwrap().graph;
+        let registry = TestRegistry::new(device());
+        let executor = executor();
+        assert!(matches!(
+            executor.execute(
+                &compiled, compiled.instantiate_local(FrameInputs::new(())), &registry, &registry,
+            ),
+            Err(ExecutionError::Recording(error)) if error.kind == RecordingErrorKind::InvalidCommandArgument
+        ));
+        let trace = executor.try_backend().unwrap().trace().to_vec();
+        assert!(
+            !trace
+                .iter()
+                .any(|event| matches!(event, TestTraceEvent::CopyBuffer { .. }))
+        );
+        assert!(
+            !trace
+                .iter()
+                .any(|event| matches!(event, TestTraceEvent::Submit { .. }))
+        );
+    }
+}
+
+#[test]
 fn texture_copy_rejects_out_of_bounds_and_unsupported_shapes() {
     for descriptor in [
         TextureDesc {

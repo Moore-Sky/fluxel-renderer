@@ -1,9 +1,9 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is the `0.1.0` baseline workspace for Fluxel's typed render
-graph, native RHI boundary, and renderer layer. It starts an independent release
-line from a pre-migration source snapshot and does not inherit prior version
-numbers or Git history.
+`fluxel-renderer` is a `0.1.3` workspace for Fluxel's typed render graph,
+native RHI boundary, and renderer layer. It starts an independent release line
+from a pre-migration source snapshot and does not inherit prior version numbers
+or Git history.
 
 ## Workspace
 
@@ -12,7 +12,7 @@ The workspace is organised around three crates:
 | Crate | Responsibility |
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
-| `fluxel-rhi` | Headless DX12/Vulkan ownership plus copy-only RenderGraph execution and hardware conformance. |
+| `fluxel-rhi` | Headless DX12/Vulkan ownership plus Copy and fixed-artifact Compute RenderGraph execution and hardware conformance. |
 | `fluxel-renderer` | The renderer-facing layer: scene/domain data, draw-list construction, and its internal shader boundary. |
 
 All three packages are present at the current baseline. The renderer crate
@@ -40,20 +40,22 @@ cargo +1.87.0 clippy --workspace --all-targets --all-features --locked -- -D war
 ```
 
 The graph compiler and `TestRhi` are CPU-only. `fluxel-rhi` provides
-headless DX12 and Vulkan copy execution on Windows when the native loader and
-driver are available. CI is a compile/link gate; real-GPU C01/C02/C03
-conformance remains an explicit local release gate.
+headless DX12 and Vulkan Copy and fixed Compute execution on Windows when the
+native loader and driver are available. CI is a compile/link gate; real-GPU
+C01/C02/C03 and K01/K02 conformance remain explicit local release gates.
 
 ## Roadmap
 
-Through `0.1.2`, the workspace has graph planning, CPU protocol validation,
-DX12/Vulkan owned resources, and a copy/barrier/submit/completion/readback
-correctness slice. It does **not** yet dispatch compute, draw raster work,
-lower renderer scenes, or present a surface.
+Through `0.1.3`, the workspace has graph planning, CPU protocol validation,
+DX12/Vulkan owned resources, Copy correctness, and a deliberately fixed
+Compute correctness slice. The RHI parses embedded WGSL into validated Naga IR
+and lowers the same artifact to DX12 and Vulkan; K01 and K02 compare readback
+with wrapping-integer CPU oracles. It does **not** yet draw raster work, lower
+renderer scenes, present a surface, or expose a general shader API.
 
 | Component | Next milestones |
 | --- | --- |
-| RHI / RenderGraph integration `0.1` | RHI implements Windows DX12/Vulkan resources and commands; both backends execute the same RenderGraph plan through Copy/readback → Compute/readback → Raster/readback conformance |
+| RHI / RenderGraph integration `0.1` | RHI implements Windows DX12/Vulkan resources and commands; both backends execute the same RenderGraph plan through Copy/readback → fixed Compute/readback → Raster/readback conformance |
 | Renderer / Shader / Assets `0.1` | Headless Camera/Mesh/Geometry/BasicMaterial/DrawList → minimal shader compile/reflection and resource lifetime/cache/handles |
 | Renderer `0.2` | Texture, indexed mesh, basic PBR, and one real static scene |
 | RenderGraph `0.2` | WebGPU and WebGL2 compatibility adapters |
@@ -66,8 +68,8 @@ lower renderer scenes, or present a surface.
 
 Correctness gates are readback plus CPU oracles on both native backends.
 Multi-queue, parallel recording, recording caches, and transient aliasing wait
-for profiling evidence. The ordered work packages and stop conditions are in
-the [implementation plan](documents/draft/01-plan.md).
+for profiling evidence. The published design documents above describe the
+current supported boundary; local draft materials are not release documentation.
 
 ## License
 

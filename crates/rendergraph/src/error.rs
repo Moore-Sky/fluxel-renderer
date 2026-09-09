@@ -45,6 +45,8 @@ pub enum RecordingErrorKind {
     InvalidCommandArgument,
     /// Renderer/RHI binding metadata is incompatible with the selected pipeline.
     IncompatibleBindingRecipe,
+    /// Creation of a backend-owned pipeline or binding object failed after validation.
+    BackendObjectCreation,
 }
 
 /// Optional identities and details attached to a compilation error.

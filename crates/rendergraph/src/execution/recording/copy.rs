@@ -26,6 +26,10 @@ use super::{
     shared::{CommandBridge, recording_error},
 };
 
+// Matches wgpu's COPY_BUFFER_ALIGNMENT without making portable RenderGraph
+// depend on the native HAL type crate.
+const COPY_BUFFER_ALIGNMENT: u64 = 4;
+
 pub(super) struct CopyBridge<'a, B: ExecutionBackend, O> {
     common: CommandBridge<'a, B, O>,
 }
@@ -182,6 +186,11 @@ fn validate_buffer_copy(
     region: BufferCopyRegion,
 ) -> RecordResult {
     if region.size == 0
+        || !region.source_offset.is_multiple_of(COPY_BUFFER_ALIGNMENT)
+        || !region
+            .destination_offset
+            .is_multiple_of(COPY_BUFFER_ALIGNMENT)
+        || !region.size.is_multiple_of(COPY_BUFFER_ALIGNMENT)
         || !buffer_range_contains(source.range, region.source_offset, region.size)
         || !buffer_range_contains(destination.range, region.destination_offset, region.size)
         || !buffer_descriptor_contains(source_desc, region.source_offset, region.size)
@@ -191,7 +200,7 @@ fn validate_buffer_copy(
             RecordingErrorKind::InvalidCommandArgument,
             pass,
             None,
-            "buffer copy is empty or exceeds its physical or declared access range",
+            "buffer copy requires non-zero 4-byte-aligned offsets and size within its physical and declared access ranges",
         ));
     }
     Ok(())

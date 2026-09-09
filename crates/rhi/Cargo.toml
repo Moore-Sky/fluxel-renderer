@@ -1,15 +1,15 @@
 [package]
 name = "fluxel-rhi"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
-description = "Headless DX12 and Vulkan copy-execution boundary for Fluxel"
+description = "Headless DX12 and Vulkan Copy plus fixed-Compute execution boundary for Fluxel"
 repository = "https://github.com/Moore-Sky/fluxel-renderer"
 readme = "README.md"
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.1.2" }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.1.3" }
 
 [features]
 default = ["dx12", "vulkan"]
@@ -22,6 +22,7 @@ wgpu-types = { version = "=30.0.0", default-features = false, features = ["std"]
 windows = { version = "=0.62.2", optional = true, features = ["Win32_Graphics_Direct3D12"] }
 ash = { version = "0.38", optional = true, default-features = false, features = ["loaded"] }
 log = "0.4"
+naga = { version = "=30.0.1", features = ["wgsl-in"] }
 # wgpu-hal 30 permits ordered-float 5.x, but 5.5 raised its MSRV to 1.90.
 # Keep the workspace's declared 1.87 contract until upstream narrows that range.
 ordered-float = "=5.1.0"

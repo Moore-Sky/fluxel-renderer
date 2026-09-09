@@ -352,6 +352,11 @@ pub struct DeviceLimits {
     pub max_color_attachments: u32,
     /// Required alignment of dynamic uniform-buffer offsets.
     pub min_uniform_buffer_offset_alignment: u64,
+    /// Maximum workgroup counts accepted by a compute dispatch on each dimension.
+    ///
+    /// A zero value rejects dispatches on that dimension. This is the fail-closed
+    /// default until a backend explicitly reports its native limit.
+    pub max_compute_workgroups_per_dimension: [u32; 3],
 }
 
 impl DeviceLimits {
@@ -360,7 +365,18 @@ impl DeviceLimits {
         Self {
             max_color_attachments,
             min_uniform_buffer_offset_alignment,
+            max_compute_workgroups_per_dimension: [0; 3],
         }
+    }
+
+    /// Explicitly sets the maximum workgroup count for each compute-dispatch dimension.
+    #[must_use]
+    pub fn with_max_compute_workgroups_per_dimension(
+        mut self,
+        max_compute_workgroups_per_dimension: [u32; 3],
+    ) -> Self {
+        self.max_compute_workgroups_per_dimension = max_compute_workgroups_per_dimension;
+        self
     }
 }
 
@@ -689,5 +705,15 @@ mod tests {
             .push(with_duplicate.texture_formats[0].clone());
 
         assert_ne!(capabilities.fingerprint(), with_duplicate.fingerprint());
+    }
+
+    #[test]
+    fn capability_fingerprint_includes_compute_dispatch_limits() {
+        let capabilities = capabilities();
+        let mut different_limit = capabilities.clone();
+        different_limit.limits =
+            DeviceLimits::new(0, 1).with_max_compute_workgroups_per_dimension([65_535, 65_535, 64]);
+
+        assert_ne!(capabilities.fingerprint(), different_limit.fingerprint());
     }
 }

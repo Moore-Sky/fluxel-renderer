@@ -29,7 +29,7 @@ fn capabilities() -> DeviceCapabilities {
         ))
         .transitions(TransitionCapabilities::GraphManagedExplicit)
         .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
-        .limits(DeviceLimits::new(4, 256))
+        .limits(DeviceLimits::new(4, 256).with_max_compute_workgroups_per_dimension([65_535; 3]))
         .buffers(BufferCapabilities::new(true, true, true))
         .texture_format(
             TextureFormatCapabilities::builder(TextureFormat::Rgba8Unorm)
@@ -705,6 +705,43 @@ fn callback_and_backend_failures_do_not_submit() {
             .iter()
             .any(|event| matches!(event, TestTraceEvent::Submit { .. }))
     );
+}
+
+#[test]
+fn compute_dispatch_rejects_zero_and_over_limit_dimensions_before_backend_recording() {
+    for groups in [[0, 1, 1], [5, 1, 1]] {
+        let mut caps = capabilities();
+        caps.limits = DeviceLimits::new(4, 256).with_max_compute_workgroups_per_dimension([4; 3]);
+        let mut graph = RenderGraph::new();
+        let pass = graph.add_compute_pass(
+            "limited-dispatch",
+            |_| ((), ()),
+            move |commands, _, _, _| commands.dispatch(groups),
+        );
+        graph.mark_side_effect(pass.id, SideEffectReason::Diagnostic("retain".into()));
+        let graph = graph.compile(&caps).unwrap().graph;
+        let executor = FrameExecutor::new(TestRhi::new(caps, device()));
+        let registry = TestRegistry::new(device());
+
+        assert!(matches!(
+            executor.execute(
+                &graph,
+                graph.instantiate_local(FrameInputs::new(())),
+                &registry,
+                &registry,
+            ),
+            Err(ExecutionError::Recording(error))
+                if error.kind == RecordingErrorKind::InvalidCommandArgument
+        ));
+        assert!(
+            !executor
+                .try_backend()
+                .unwrap()
+                .trace()
+                .iter()
+                .any(|event| matches!(event, TestTraceEvent::Dispatch { .. }))
+        );
+    }
 }
 
 #[test]

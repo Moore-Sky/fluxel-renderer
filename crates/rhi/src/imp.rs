@@ -24,7 +24,12 @@ use fluxel_rendergraph::{
     ResourceAccessState, TextureAspect, TextureCopyRegion, TextureDesc, TextureDimension,
     TextureFormat, TextureRange, TextureUsage, TextureUsageKind,
 };
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    num::NonZeroU64,
+    sync::{Arc, Mutex, MutexGuard},
+};
 use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _, Instance as _, Queue as _};
 use wgpu_types as wgt;
 
@@ -33,8 +38,24 @@ pub(super) struct OpenedDevice {
     // adapter-owned driver state until all dependent values are gone.
     #[allow(dead_code)]
     native: NativeDevice,
+    // All operations on the one native queue are externally synchronized by
+    // this lock. In particular, wgpu-hal requires `submit`, `wait_for_idle`,
+    // and future presentation operations on a queue to be mutually exclusive.
+    // The lock belongs to `OpenedDevice`, so cloned `Device`s and separately
+    // constructed execution backends cannot accidentally use the queue
+    // concurrently.
+    queue_operations: Mutex<()>,
     pub(super) hardware: HardwareInfo,
     pub(super) capabilities: HardwareCapabilities,
+}
+
+fn lock_queue_operations(queue_operations: &Mutex<()>) -> MutexGuard<'_, ()> {
+    // A panic while using the queue does not make later mutual exclusion less
+    // necessary. Recover the guard rather than allowing a poisoned mutex to
+    // turn into unsynchronized access (or an avoidable safe-API failure).
+    queue_operations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[allow(
@@ -76,6 +97,7 @@ enum NativeTexture {
 pub(super) struct OwnedBuffer {
     native: Option<NativeBuffer>,
     owner: Arc<OpenedDevice>,
+    size: u64,
 }
 
 pub(super) struct OwnedTexture {
@@ -86,6 +108,12 @@ pub(super) struct OwnedTexture {
 pub(super) struct CopyEncoder {
     native: Option<NativeEncoder>,
     owner: Arc<OpenedDevice>,
+    // RenderGraph states buffer ranges independently, whereas this minimal
+    // HAL path lowers a buffer barrier over the complete allocation. Keep the
+    // actual whole-buffer state for this encoder so a later range-local
+    // transition that reaches the already-current state becomes a same-state
+    // memory dependency rather than an invalid stale DX12 transition.
+    buffer_states: HashMap<usize, ResourceAccessState>,
 }
 
 #[allow(
@@ -97,6 +125,61 @@ enum NativeEncoder {
     Dx12(wgpu_hal::dx12::CommandEncoder),
     #[cfg(feature = "vulkan")]
     Vulkan(wgpu_hal::vulkan::CommandEncoder),
+}
+
+/// One fixed, device-affine compute pipeline. This remains private because the
+/// 0.1.3 slice deliberately does not expose arbitrary shader compilation.
+#[derive(Clone)]
+pub(super) struct NativeComputePipeline(Arc<NativeComputePipelineShared>);
+
+struct NativeComputePipelineShared {
+    native: Option<NativeComputePipelineInner>,
+    owner: Arc<OpenedDevice>,
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a pipeline owns its backend objects and is an infrequent setup value"
+)]
+enum NativeComputePipelineInner {
+    #[cfg(feature = "dx12")]
+    Dx12 {
+        shader: wgpu_hal::dx12::ShaderModule,
+        bind_group_layout: wgpu_hal::dx12::BindGroupLayout,
+        pipeline_layout: wgpu_hal::dx12::PipelineLayout,
+        pipeline: wgpu_hal::dx12::ComputePipeline,
+    },
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        shader: wgpu_hal::vulkan::ShaderModule,
+        bind_group_layout: wgpu_hal::vulkan::BindGroupLayout,
+        pipeline_layout: wgpu_hal::vulkan::PipelineLayout,
+        pipeline: wgpu_hal::vulkan::ComputePipeline,
+    },
+}
+
+/// One fixed RW-storage-buffer bind group. `pipeline` keeps its layout alive
+/// until this group has been destroyed.
+pub(super) struct NativeComputeBindings {
+    native: Option<NativeComputeBindingsInner>,
+    pipeline: NativeComputePipeline,
+}
+
+/// Pipeline setup stages exposed only to the safe RHI mapping layer. Keeping
+/// this private prevents backend or compiler types from entering the public
+/// contract while preserving a stable failure category for callers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum ComputePipelineCreateError {
+    ShaderValidation(String),
+    ShaderCompilation(String),
+    NativeObjectCreation(String),
+}
+
+enum NativeComputeBindingsInner {
+    #[cfg(feature = "dx12")]
+    Dx12(wgpu_hal::dx12::BindGroup),
+    #[cfg(feature = "vulkan")]
+    Vulkan(wgpu_hal::vulkan::BindGroup),
 }
 
 pub(super) struct CopyCommandBuffer {
@@ -255,6 +338,7 @@ pub(super) fn create_buffer(
         OwnedBuffer {
             native: Some(native),
             owner: Arc::clone(owner),
+            size: descriptor.buffer.size,
         },
         buffer_usage_from_native(native_usage),
     ))
@@ -324,6 +408,75 @@ pub(super) fn create_texture(
         },
         texture_usage_from_native(native_usage, texture.format),
     ))
+}
+
+impl Drop for NativeComputePipelineShared {
+    fn drop(&mut self) {
+        // SAFETY: every object below was created by `owner`; this shared owner
+        // keeps that device live. The declaration order is intentionally the
+        // reverse native dependency order: pipeline, layout, BGL, shader.
+        #[allow(
+            unreachable_patterns,
+            reason = "single-feature builds have one backend variant"
+        )]
+        let native = self.native.take().expect("compute pipeline destroyed once");
+        match (&self.owner.native, native) {
+            #[cfg(feature = "dx12")]
+            (
+                NativeDevice::Dx12 { device, .. },
+                NativeComputePipelineInner::Dx12 {
+                    shader,
+                    bind_group_layout,
+                    pipeline_layout,
+                    pipeline,
+                },
+            ) => unsafe {
+                device.destroy_compute_pipeline(pipeline);
+                device.destroy_pipeline_layout(pipeline_layout);
+                device.destroy_bind_group_layout(bind_group_layout);
+                device.destroy_shader_module(shader);
+            },
+            #[cfg(feature = "vulkan")]
+            (
+                NativeDevice::Vulkan { device, .. },
+                NativeComputePipelineInner::Vulkan {
+                    shader,
+                    bind_group_layout,
+                    pipeline_layout,
+                    pipeline,
+                },
+            ) => unsafe {
+                device.destroy_compute_pipeline(pipeline);
+                device.destroy_pipeline_layout(pipeline_layout);
+                device.destroy_bind_group_layout(bind_group_layout);
+                device.destroy_shader_module(shader);
+            },
+            _ => unreachable!("pipeline and device backend always match"),
+        }
+    }
+}
+
+impl Drop for NativeComputeBindings {
+    fn drop(&mut self) {
+        let native = self.native.take().expect("compute bindings destroyed once");
+        // SAFETY: `pipeline` keeps the matching device and BGL alive. The safe
+        // layer retains the bound buffer lease until submission completion.
+        #[allow(
+            unreachable_patterns,
+            reason = "single-feature builds have one backend variant"
+        )]
+        match (&self.pipeline.0.owner.native, native) {
+            #[cfg(feature = "dx12")]
+            (NativeDevice::Dx12 { device, .. }, NativeComputeBindingsInner::Dx12(group)) => unsafe {
+                device.destroy_bind_group(group);
+            },
+            #[cfg(feature = "vulkan")]
+            (NativeDevice::Vulkan { device, .. }, NativeComputeBindingsInner::Vulkan(group)) => unsafe {
+                device.destroy_bind_group(group);
+            },
+            _ => unreachable!("bindings and pipeline backend always match"),
+        }
+    }
 }
 
 impl Drop for CopyEncoder {
@@ -462,6 +615,484 @@ impl Drop for NativeSubmission {
     }
 }
 
+/// Compiles a previously selected fixed WGSL artifact into a single-RW-storage
+/// pipeline. The public layer never forwards caller-controlled source here.
+pub(super) fn create_compute_pipeline(
+    owner: &Arc<OpenedDevice>,
+    source: &str,
+    entry: &str,
+) -> Result<NativeComputePipeline, ComputePipelineCreateError> {
+    let module = naga::front::wgsl::Frontend::new()
+        .parse(source)
+        .map_err(|error| {
+            ComputePipelineCreateError::ShaderValidation(format!("WGSL parse failed: {error}"))
+        })?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map_err(|error| {
+        ComputePipelineCreateError::ShaderValidation(format!("WGSL validation failed: {error}"))
+    })?;
+    let shader = wgpu_hal::NagaShader {
+        module: Cow::Owned(module),
+        info,
+        debug_source: None,
+    };
+    let layout_entries = [wgt::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgt::ShaderStages::COMPUTE,
+        ty: wgt::BindingType::Buffer {
+            ty: wgt::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }];
+
+    // Each arm creates objects in dependency order and eagerly tears down any
+    // prefix on failure. This prevents a failed setup from retaining native
+    // state or leaving a half-formed public object.
+    let native = match &owner.native {
+        #[cfg(feature = "dx12")]
+        NativeDevice::Dx12 { device, .. } => {
+            let shader_module = unsafe {
+                // SAFETY: Naga parsed and validated this controlled source;
+                // the descriptor enables runtime safety checks.
+                device.create_shader_module(
+                    &wgpu_hal::ShaderModuleDescriptor {
+                        label: Some("fluxel fixed compute shader"),
+                        runtime_checks: wgt::ShaderRuntimeChecks::checked(),
+                    },
+                    wgpu_hal::ShaderInput::Naga(shader),
+                )
+            }
+            .map_err(|error| {
+                ComputePipelineCreateError::ShaderCompilation(format!(
+                    "DX12 shader creation failed: {error}"
+                ))
+            })?;
+            let bind_group_layout = unsafe {
+                // SAFETY: one statically-valid storage binding, sorted at binding zero.
+                device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+                    label: Some("fluxel fixed compute RW storage layout"),
+                    flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+                    entries: &layout_entries,
+                })
+            };
+            let bind_group_layout = match bind_group_layout {
+                Ok(value) => value,
+                Err(error) => {
+                    unsafe { device.destroy_shader_module(shader_module) };
+                    return Err(ComputePipelineCreateError::NativeObjectCreation(format!(
+                        "DX12 bind-group-layout creation failed: {error}"
+                    )));
+                }
+            };
+            let layouts = [Some(&bind_group_layout)];
+            let pipeline_layout = unsafe {
+                // SAFETY: the BGL is live and belongs to this device.
+                device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                    label: Some("fluxel fixed compute pipeline layout"),
+                    flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                    bind_group_layouts: &layouts,
+                    immediate_size: 0,
+                })
+            };
+            let pipeline_layout = match pipeline_layout {
+                Ok(value) => value,
+                Err(error) => {
+                    unsafe {
+                        device.destroy_bind_group_layout(bind_group_layout);
+                        device.destroy_shader_module(shader_module);
+                    }
+                    return Err(ComputePipelineCreateError::NativeObjectCreation(format!(
+                        "DX12 pipeline-layout creation failed: {error}"
+                    )));
+                }
+            };
+            let constants = naga::back::PipelineConstants::default();
+            let pipeline = unsafe {
+                // SAFETY: module, entry, and layout are live and all belong to this device.
+                device.create_compute_pipeline(&wgpu_hal::ComputePipelineDescriptor {
+                    label: Some("fluxel fixed compute pipeline"),
+                    layout: &pipeline_layout,
+                    stage: wgpu_hal::ProgrammableStage {
+                        module: &shader_module,
+                        entry_point: entry,
+                        constants: &constants,
+                        zero_initialize_workgroup_memory: true,
+                    },
+                    cache: None,
+                })
+            };
+            let pipeline = match pipeline {
+                Ok(value) => value,
+                Err(error) => {
+                    unsafe {
+                        device.destroy_pipeline_layout(pipeline_layout);
+                        device.destroy_bind_group_layout(bind_group_layout);
+                        device.destroy_shader_module(shader_module);
+                    }
+                    return Err(ComputePipelineCreateError::ShaderCompilation(format!(
+                        "DX12 compute-pipeline creation failed: {error}"
+                    )));
+                }
+            };
+            NativeComputePipelineInner::Dx12 {
+                shader: shader_module,
+                bind_group_layout,
+                pipeline_layout,
+                pipeline,
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        NativeDevice::Vulkan { device, .. } => {
+            let shader_module = unsafe {
+                // SAFETY: Naga parsed and validated this controlled source;
+                // the descriptor enables runtime safety checks.
+                device.create_shader_module(
+                    &wgpu_hal::ShaderModuleDescriptor {
+                        label: Some("fluxel fixed compute shader"),
+                        runtime_checks: wgt::ShaderRuntimeChecks::checked(),
+                    },
+                    wgpu_hal::ShaderInput::Naga(shader),
+                )
+            }
+            .map_err(|error| {
+                ComputePipelineCreateError::ShaderCompilation(format!(
+                    "Vulkan shader creation failed: {error}"
+                ))
+            })?;
+            let bind_group_layout = unsafe {
+                // SAFETY: one statically-valid storage binding, sorted at binding zero.
+                device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+                    label: Some("fluxel fixed compute RW storage layout"),
+                    flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+                    entries: &layout_entries,
+                })
+            };
+            let bind_group_layout = match bind_group_layout {
+                Ok(value) => value,
+                Err(error) => {
+                    unsafe { device.destroy_shader_module(shader_module) };
+                    return Err(ComputePipelineCreateError::NativeObjectCreation(format!(
+                        "Vulkan bind-group-layout creation failed: {error}"
+                    )));
+                }
+            };
+            let layouts = [Some(&bind_group_layout)];
+            let pipeline_layout = unsafe {
+                // SAFETY: the BGL is live and belongs to this device.
+                device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                    label: Some("fluxel fixed compute pipeline layout"),
+                    flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                    bind_group_layouts: &layouts,
+                    immediate_size: 0,
+                })
+            };
+            let pipeline_layout = match pipeline_layout {
+                Ok(value) => value,
+                Err(error) => {
+                    unsafe {
+                        device.destroy_bind_group_layout(bind_group_layout);
+                        device.destroy_shader_module(shader_module);
+                    }
+                    return Err(ComputePipelineCreateError::NativeObjectCreation(format!(
+                        "Vulkan pipeline-layout creation failed: {error}"
+                    )));
+                }
+            };
+            let constants = naga::back::PipelineConstants::default();
+            let pipeline = unsafe {
+                // SAFETY: module, entry, and layout are live and all belong to this device.
+                device.create_compute_pipeline(&wgpu_hal::ComputePipelineDescriptor {
+                    label: Some("fluxel fixed compute pipeline"),
+                    layout: &pipeline_layout,
+                    stage: wgpu_hal::ProgrammableStage {
+                        module: &shader_module,
+                        entry_point: entry,
+                        constants: &constants,
+                        zero_initialize_workgroup_memory: true,
+                    },
+                    cache: None,
+                })
+            };
+            let pipeline = match pipeline {
+                Ok(value) => value,
+                Err(error) => {
+                    unsafe {
+                        device.destroy_pipeline_layout(pipeline_layout);
+                        device.destroy_bind_group_layout(bind_group_layout);
+                        device.destroy_shader_module(shader_module);
+                    }
+                    return Err(ComputePipelineCreateError::ShaderCompilation(format!(
+                        "Vulkan compute-pipeline creation failed: {error}"
+                    )));
+                }
+            };
+            NativeComputePipelineInner::Vulkan {
+                shader: shader_module,
+                bind_group_layout,
+                pipeline_layout,
+                pipeline,
+            }
+        }
+    };
+
+    Ok(NativeComputePipeline(Arc::new(
+        NativeComputePipelineShared {
+            native: Some(native),
+            owner: Arc::clone(owner),
+        },
+    )))
+}
+
+/// Creates the sole RW storage binding for a validated buffer subrange.
+pub(super) fn create_compute_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeComputePipeline,
+    buffer: &OwnedBuffer,
+    offset: u64,
+    size: u64,
+) -> Result<NativeComputeBindings, String> {
+    if !Arc::ptr_eq(owner, &pipeline.0.owner) {
+        return Err("compute pipeline belongs to another native device".into());
+    }
+    validate_native_compute_binding_range(
+        offset,
+        size,
+        buffer.size,
+        owner.capabilities.min_storage_buffer_offset_alignment,
+        owner.capabilities.max_storage_buffer_binding_size,
+    )?;
+    let size = NonZeroU64::new(size).expect("checked non-zero storage binding size");
+    let entry = [wgpu_hal::BindGroupEntry {
+        binding: 0,
+        resource_index: 0,
+        count: 1,
+    }];
+    let buffer = buffer
+        .native
+        .as_ref()
+        .ok_or_else(|| "compute bindings referenced a destroyed buffer".to_owned())?;
+    let native = match (&owner.native, pipeline.0.native.as_ref(), buffer) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeDevice::Dx12 { device, .. },
+            Some(NativeComputePipelineInner::Dx12 {
+                bind_group_layout, ..
+            }),
+            NativeBuffer::Dx12(buffer),
+        ) => {
+            let binding = wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size);
+            unsafe {
+                // SAFETY: caller's safe boundary proved buffer/device identity,
+                // range containment and storage alignment; this fixed descriptor
+                // has exactly the one matching RW storage entry.
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel fixed compute RW storage bindings"),
+                    layout: bind_group_layout,
+                    buffers: &[binding],
+                    samplers: &[],
+                    textures: &[],
+                    entries: &entry,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            }
+            .map(NativeComputeBindingsInner::Dx12)
+            .map_err(|error| format!("DX12 compute bind-group creation failed: {error}"))?
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeDevice::Vulkan { device, .. },
+            Some(NativeComputePipelineInner::Vulkan {
+                bind_group_layout, ..
+            }),
+            NativeBuffer::Vulkan(buffer),
+        ) => {
+            let binding = wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size);
+            unsafe {
+                // SAFETY: caller's safe boundary proved buffer/device identity,
+                // range containment and storage alignment; this fixed descriptor
+                // has exactly the one matching RW storage entry.
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel fixed compute RW storage bindings"),
+                    layout: bind_group_layout,
+                    buffers: &[binding],
+                    samplers: &[],
+                    textures: &[],
+                    entries: &entry,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            }
+            .map(NativeComputeBindingsInner::Vulkan)
+            .map_err(|error| format!("Vulkan compute bind-group creation failed: {error}"))?
+        }
+        _ => return Err("compute bindings reference a foreign device or backend".into()),
+    };
+    Ok(NativeComputeBindings {
+        native: Some(native),
+        pipeline: pipeline.clone(),
+    })
+}
+
+/// Rechecks the range immediately before constructing an unchecked HAL binding.
+fn validate_native_compute_binding_range(
+    offset: u64,
+    size: u64,
+    buffer_size: u64,
+    minimum_storage_offset_alignment: u32,
+    maximum_storage_binding_size: u64,
+) -> Result<(), String> {
+    let required_offset_alignment = u64::from(minimum_storage_offset_alignment.max(4));
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| "compute storage binding range overflows".to_owned())?;
+    if size == 0
+        || !offset.is_multiple_of(required_offset_alignment)
+        || !size.is_multiple_of(4)
+        || size > maximum_storage_binding_size
+        || end > buffer_size
+    {
+        return Err("invalid compute storage binding range".into());
+    }
+    Ok(())
+}
+
+pub(super) fn begin_compute(encoder: &mut CopyEncoder, label: &str) -> Result<(), String> {
+    match encoder.native.as_mut().expect("live encoder") {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(encoder) => unsafe {
+            // SAFETY: ExecutionBackend serializes pass scopes and invokes this
+            // only while the encoder is recording and outside another pass.
+            encoder.begin_compute_pass(&wgpu_hal::ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+        },
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(encoder) => unsafe {
+            // SAFETY: same recording and pass-scope invariant as DX12.
+            encoder.begin_compute_pass(&wgpu_hal::ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+        },
+    }
+    Ok(())
+}
+
+pub(super) fn end_compute(encoder: &mut CopyEncoder) -> Result<(), String> {
+    match encoder.native.as_mut().expect("live encoder") {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(encoder) => unsafe {
+            // SAFETY: ExecutionBackend pairs every successful begin with one end.
+            encoder.end_compute_pass();
+        },
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(encoder) => unsafe {
+            // SAFETY: ExecutionBackend pairs every successful begin with one end.
+            encoder.end_compute_pass();
+        },
+    }
+    Ok(())
+}
+
+pub(super) fn set_compute_pipeline(
+    encoder: &mut CopyEncoder,
+    pipeline: &NativeComputePipeline,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &pipeline.0.owner) {
+        return Err("compute pipeline belongs to another native device".into());
+    }
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        pipeline.0.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeEncoder::Dx12(encoder), Some(NativeComputePipelineInner::Dx12 { pipeline, .. })) => unsafe {
+            // SAFETY: both objects are created by the matching device; caller
+            // has opened a compute pass before selecting the pipeline.
+            encoder.set_compute_pipeline(pipeline);
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            Some(NativeComputePipelineInner::Vulkan { pipeline, .. }),
+        ) => unsafe {
+            // SAFETY: same device and active-pass invariant as DX12.
+            encoder.set_compute_pipeline(pipeline);
+        },
+        _ => return Err("compute pipeline belongs to another native backend".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn set_compute_bindings(
+    encoder: &mut CopyEncoder,
+    bindings: &NativeComputeBindings,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &bindings.pipeline.0.owner) {
+        return Err("compute bindings belong to another native device".into());
+    }
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        bindings.pipeline.0.native.as_ref(),
+        bindings.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            Some(NativeComputePipelineInner::Dx12 {
+                pipeline_layout, ..
+            }),
+            Some(NativeComputeBindingsInner::Dx12(group)),
+        ) => unsafe {
+            // SAFETY: the group was made from this pipeline's sole BGL; there
+            // are no dynamic offsets and the active compute pass is tracked by
+            // the safe execution layer.
+            encoder.set_bind_group(pipeline_layout, 0, group, &[]);
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            Some(NativeComputePipelineInner::Vulkan {
+                pipeline_layout, ..
+            }),
+            Some(NativeComputeBindingsInner::Vulkan(group)),
+        ) => unsafe {
+            // SAFETY: same fixed-layout and active-pass invariant as DX12.
+            encoder.set_bind_group(pipeline_layout, 0, group, &[]);
+        },
+        _ => return Err("compute bindings belong to another native backend".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn dispatch(encoder: &mut CopyEncoder, workgroups: [u32; 3]) -> Result<(), String> {
+    if workgroups.contains(&0) {
+        return Err("compute dispatch dimensions must be non-zero".into());
+    }
+    match encoder.native.as_mut().expect("live encoder") {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(encoder) => unsafe {
+            // SAFETY: caller has established active pass, matching pipeline and
+            // bindings, and has validated all dimensions against device limits.
+            encoder.dispatch_workgroups(workgroups);
+        },
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(encoder) => unsafe {
+            // SAFETY: same active-pass and prevalidated-dimensions invariant.
+            encoder.dispatch_workgroups(workgroups);
+        },
+    }
+    Ok(())
+}
+
 pub(super) fn begin_copy_encoder(owner: &Arc<OpenedDevice>) -> Result<CopyEncoder, String> {
     let native = match &owner.native {
         #[cfg(feature = "dx12")]
@@ -496,6 +1127,7 @@ pub(super) fn begin_copy_encoder(owner: &Arc<OpenedDevice>) -> Result<CopyEncode
     Ok(CopyEncoder {
         native: Some(native),
         owner: Arc::clone(owner),
+        buffer_states: HashMap::new(),
     })
 }
 
@@ -505,7 +1137,22 @@ pub(super) fn transition_buffer(
     before: ResourceAccessState,
     after: ResourceAccessState,
 ) -> Result<(), String> {
-    let from = buffer_state(before)?;
+    let key = core::ptr::from_ref(buffer).addr();
+    let effective_before = match encoder.buffer_states.get(&key).copied() {
+        // A range-local plan transition can legitimately name the original
+        // state after another range has already changed the whole native
+        // buffer. Both ranges now require the same final state; lower this as
+        // a same-state barrier, which retains the memory dependency without
+        // lying to DX12 about its actual resource state.
+        Some(current) if current == after && before != after => current,
+        Some(current) if current != before => {
+            return Err(format!(
+                "planned buffer transition {before:?}->{after:?} conflicts with encoder state {current:?}"
+            ));
+        }
+        _ => before,
+    };
+    let from = buffer_state(effective_before)?;
     let to = buffer_state(after)?;
     match (
         encoder.native.as_mut().expect("recording encoder"),
@@ -527,6 +1174,7 @@ pub(super) fn transition_buffer(
         },
         _ => return Err("buffer and encoder backend mismatch".into()),
     }
+    encoder.buffer_states.insert(key, after);
     Ok(())
 }
 
@@ -572,6 +1220,7 @@ pub(super) fn copy_buffer(
     destination: &OwnedBuffer,
     region: BufferCopyRegion,
 ) -> Result<(), String> {
+    validate_buffer_copy_alignment(region)?;
     let size =
         wgt::BufferSize::new(region.size).ok_or_else(|| "copy size must be non-zero".to_owned())?;
     let copy = wgpu_hal::BufferCopy {
@@ -603,6 +1252,27 @@ pub(super) fn copy_buffer(
         _ => return Err("copy buffers and encoder backend mismatch".into()),
     }
     Ok(())
+}
+
+fn validate_buffer_copy_alignment(region: BufferCopyRegion) -> Result<(), String> {
+    // `wgpu-hal` is an unsafe API and does not provide the safe WebGPU copy
+    // contract for us. Preserve `COPY_BUFFER_ALIGNMENT` at this final native
+    // boundary too: test-only upload/readback helpers may bypass RenderGraph.
+    if region
+        .source_offset
+        .is_multiple_of(wgt::COPY_BUFFER_ALIGNMENT)
+        && region
+            .destination_offset
+            .is_multiple_of(wgt::COPY_BUFFER_ALIGNMENT)
+        && region.size.is_multiple_of(wgt::COPY_BUFFER_ALIGNMENT)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "buffer copy offsets and size must be aligned to COPY_BUFFER_ALIGNMENT ({})",
+            wgt::COPY_BUFFER_ALIGNMENT
+        ))
+    }
 }
 
 pub(super) fn copy_texture(
@@ -700,6 +1370,11 @@ pub(super) fn submit_copy(
             mut encoder,
             command_buffer,
         } => {
+            // Keep this guard through both submit and the accepted-unknown
+            // recovery `wait_for_idle` below. HAL requires those operations to
+            // be externally synchronized with every operation on this queue.
+            let queue_owner = Arc::clone(&owner);
+            let _queue_guard = lock_queue_operations(&queue_owner.queue_operations);
             let NativeDevice::Dx12 { device, queue, .. } = &owner.native else {
                 unreachable!()
             };
@@ -746,6 +1421,9 @@ pub(super) fn submit_copy(
             mut encoder,
             command_buffer,
         } => {
+            // See the DX12 arm: this is also held across error-path idle wait.
+            let queue_owner = Arc::clone(&owner);
+            let _queue_guard = lock_queue_operations(&queue_owner.queue_operations);
             let NativeDevice::Vulkan { device, queue, .. } = &owner.native else {
                 unreachable!()
             };
@@ -992,12 +1670,71 @@ pub(super) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
         .clone();
     #[cfg(feature = "dx12")]
     if let NativeDevice::Dx12 { device, .. } = &owner.native {
-        use windows::{Win32::Graphics::Direct3D12::ID3D12InfoQueue, core::Interface as _};
+        use windows::{
+            Win32::Graphics::Direct3D12::{
+                D3D12_MESSAGE, D3D12_MESSAGE_SEVERITY_CORRUPTION, D3D12_MESSAGE_SEVERITY_ERROR,
+                D3D12_MESSAGE_SEVERITY_WARNING, ID3D12InfoQueue,
+            },
+            core::Interface as _,
+        };
         if let Ok(queue) = device.raw_device().cast::<ID3D12InfoQueue>() {
             // SAFETY: read-only count query on the retained device queue.
             let count = unsafe { queue.GetNumStoredMessagesAllowedByRetrievalFilter() };
-            if count != 0 {
-                messages.push(format!("DX12 info queue stored {count} message(s)"));
+            for index in 0..count {
+                let mut byte_length = 0;
+                // SAFETY: a null message pointer requests the byte size for the
+                // stored message; `byte_length` is a valid out-pointer.
+                if unsafe { queue.GetMessage(index, None, &mut byte_length) }.is_err()
+                    || byte_length < core::mem::size_of::<D3D12_MESSAGE>()
+                {
+                    messages.push(format!(
+                        "DX12 InfoQueue message {index} could not be retrieved (size={byte_length})"
+                    ));
+                    continue;
+                }
+                let words = byte_length.div_ceil(core::mem::size_of::<usize>());
+                // `usize` storage supplies the alignment required by D3D12_MESSAGE.
+                let mut storage = vec![0_usize; words];
+                let message = storage.as_mut_ptr().cast::<D3D12_MESSAGE>();
+                // SAFETY: storage has the exact queried byte capacity and is
+                // sufficiently aligned; InfoQueue writes one POD message plus
+                // its null-terminated description into that buffer.
+                if unsafe { queue.GetMessage(index, Some(message), &mut byte_length) }.is_err() {
+                    messages.push(format!("DX12 InfoQueue message {index} could not be read"));
+                    continue;
+                }
+                // SAFETY: GetMessage initialized a D3D12_MESSAGE at `message`.
+                let message = unsafe { &*message };
+                let description = if message.pDescription.is_null() {
+                    String::new()
+                } else {
+                    // SAFETY: D3D12_MESSAGE descriptions are null-terminated
+                    // ANSI strings within the queried message allocation.
+                    unsafe {
+                        std::ffi::CStr::from_ptr(message.pDescription.cast())
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                };
+                let rendered = format!(
+                    "DX12 InfoQueue severity={:?} category={:?} id={:?}: {description}",
+                    message.Severity, message.Category, message.ID,
+                );
+                let blocking = matches!(
+                    message.Severity,
+                    D3D12_MESSAGE_SEVERITY_CORRUPTION
+                        | D3D12_MESSAGE_SEVERITY_ERROR
+                        | D3D12_MESSAGE_SEVERITY_WARNING
+                );
+                if blocking {
+                    messages.push(rendered);
+                } else {
+                    // Required validation gates report only Warning/Error (and
+                    // Corruption) diagnostics, matching Vulkan's Warn capture.
+                    // Keep lower-severity messages observable in hardware logs
+                    // without turning normal driver info into a false failure.
+                    eprintln!("ignored {rendered}");
+                }
             }
         }
     }
@@ -1402,6 +2139,7 @@ fn create_staging_buffer(
     Ok(OwnedBuffer {
         native: Some(native),
         owner: Arc::clone(owner),
+        size,
     })
 }
 
@@ -1797,6 +2535,7 @@ fn open_dx12(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
             adapter,
             instance,
         },
+        queue_operations: Mutex::new(()),
         hardware,
         capabilities,
     })
@@ -1854,6 +2593,7 @@ fn open_vulkan(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
             adapter,
             instance,
         },
+        queue_operations: Mutex::new(()),
         hardware,
         capabilities,
     })
@@ -1966,6 +2706,18 @@ fn capabilities(_: wgt::Features, capabilities: &wgpu_hal::Capabilities) -> Hard
         min_storage_buffer_offset_alignment: capabilities
             .limits
             .min_storage_buffer_offset_alignment,
+        max_storage_buffer_binding_size: capabilities.limits.max_storage_buffer_binding_size,
+        max_compute_workgroups_per_dimension: [capabilities
+            .limits
+            .max_compute_workgroups_per_dimension; 3],
+        max_compute_workgroup_size: [
+            capabilities.limits.max_compute_workgroup_size_x,
+            capabilities.limits.max_compute_workgroup_size_y,
+            capabilities.limits.max_compute_workgroup_size_z,
+        ],
+        max_compute_invocations_per_workgroup: capabilities
+            .limits
+            .max_compute_invocations_per_workgroup,
     }
 }
 
@@ -2000,5 +2752,63 @@ mod tests {
                 usage
             );
         }
+    }
+
+    #[test]
+    fn buffer_copy_alignment_is_checked_at_the_native_boundary() {
+        let aligned = BufferCopyRegion {
+            source_offset: 4,
+            destination_offset: 8,
+            size: 12,
+        };
+        assert!(validate_buffer_copy_alignment(aligned).is_ok());
+
+        for region in [
+            BufferCopyRegion {
+                source_offset: 2,
+                ..aligned
+            },
+            BufferCopyRegion {
+                destination_offset: 2,
+                ..aligned
+            },
+            BufferCopyRegion { size: 6, ..aligned },
+        ] {
+            assert!(validate_buffer_copy_alignment(region).is_err());
+        }
+    }
+
+    #[test]
+    fn storage_binding_range_is_rechecked_at_the_native_boundary() {
+        assert!(validate_native_compute_binding_range(0, 256, 256, 256, 256).is_ok());
+        for (offset, size, buffer_size, alignment, maximum) in [
+            (4, 256, 512, 256, 256),
+            (0, 256, 512, 256, 252),
+            (u64::MAX - 3, 4, u64::MAX, 4, u64::MAX),
+        ] {
+            assert!(
+                validate_native_compute_binding_range(
+                    offset,
+                    size,
+                    buffer_size,
+                    alignment,
+                    maximum,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn queue_operation_lock_recovers_from_poison_without_losing_exclusion() {
+        let lock = Mutex::new(());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock.lock().expect("fresh queue lock");
+            panic!("simulate a panicking queue caller");
+        }));
+        assert!(lock.is_poisoned());
+        let _guard = lock_queue_operations(&lock);
+        // The recovered guard is still held here, so a future caller remains
+        // serialized even after an unrelated panic poisoned the mutex.
     }
 }

@@ -2,21 +2,23 @@
 
 `fluxel-rhi` opens one headless Direct3D 12 or Vulkan device on Windows and
 creates opaque owned buffers and 2D textures through a safe portable contract.
-Its copy-only backend executes the same compiled RenderGraph plan on both APIs,
-including semantic transition lowering, one queue submission, completion, and
-retirement.
+Its Copy and fixed-artifact Compute backends execute the same compiled
+RenderGraph plan on both APIs, including semantic transition lowering, one
+queue submission, completion, and retirement.
 
-It is deliberately a narrow 0.1.2 milestone, not a general graphics API. It
-implements only RenderGraph Copy commands. It does **not** expose general
-mapping/readback, acquire or present a surface, compile shaders, dispatch
-compute, draw raster work, use multiple queues, or alias transient resources.
+It is deliberately a narrow 0.1.3 milestone, not a general graphics API.
+`CopyBackend` implements only Copy commands; the distinct `ComputeBackend`
+adds only closed `ComputeKernel` artifacts and their single RW storage-buffer
+binding recipe. It does **not** expose general mapping/readback, acquire or
+present a surface, a general shader API, raster drawing, multiple queues, or
+transient aliasing.
 
 ## Installation
 
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.2"
+tag = "v0.1.3"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -28,7 +30,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.2"
+tag = "v0.1.3"
 default-features = false
 features = ["dx12"]
 ```
@@ -75,9 +77,13 @@ normalization may report a wider allowed set, such as buffer `StorageWrite`
 becoming storage read/write. There are no raw handles.
 
 `CopyBackend` implements the execution SPI with one logical queue and one
-command buffer per graph execution. It rejects compute and raster families.
-Accepted submissions expose structured pending/complete/failure status and
-retain referenced resources until completion is safe to retire.
+command buffer per graph execution. It permanently rejects compute and raster
+families. `ComputeBackend` separately enables Copy plus the fixed Compute
+subset. Embedded WGSL is parsed and validated as Naga IR, then lowered by the
+HAL for DX12 or Vulkan; Fluxel's portable identity is source hash, entry point,
+workgroup shape, and binding-recipe version, never a native-binary hash.
+Pipelines and bindings are opaque device-affine values with cloneable leases;
+accepted submissions retain every referenced lease until retirement is safe.
 
 ## Core concepts
 
@@ -89,9 +95,11 @@ mechanism, not yet a polished cross-platform adapter-selection API.
 `Device::hardware()` returns unmodified driver identity: backend, name,
 vendor/device IDs, device kind, PCI bus ID where available, and driver strings.
 `Device::capabilities()` returns raw adapter limits currently needed by the
-bootstrap contract. These facts are not a portability profile, feature tier,
-or promise that a particular Fluxel graph can execute; a future renderer makes
-those policy decisions.
+bootstrap contract, including fixed-Compute dispatch, workgroup-dimension, and
+total-invocation bounds. These facts are not a portability profile, feature
+tier, or promise that a particular Fluxel graph can execute; a future renderer
+makes those policy decisions. Zero or excessive dispatch dimensions fail before
+recording; the fixed shader workgroup is checked again before native creation.
 
 `OpenError` distinguishes an omitted feature, unsupported platform, absent
 adapter, unavailable validation facility, insufficient baseline limits, and
@@ -126,9 +134,10 @@ establish the requested facility, opening fails with
 `OpenError::ValidationUnavailable` rather than continuing with a weaker
 configuration.
 
-The 0.1.2 conformance fixtures also collect DX12 information-queue and Vulkan
-validation diagnostics programmatically while checking command states and
-synchronization.
+The conformance fixtures collect DX12 information-queue and Vulkan validation
+diagnostics programmatically while checking command states and synchronization.
+C01/C02/C03 cover Copy and K01/K02 cover the fixed Compute artifacts, each
+against a CPU oracle on both native backends.
 
 ## Platform compatibility
 
@@ -147,9 +156,14 @@ makes no frame-time, throughput, allocation, synchronization, or
 GPU-performance claim. It keeps native objects in a private backend module to
 establish a safe ownership boundary for later vertical slices.
 
-The current scope ends after copy-only transition/order lowering, command
-recording, one submission, completion, lease retirement, and crate-private test
-readback. Compute and raster are later vertical slices.
+The current scope ends after Copy plus fixed-Compute transition/order lowering,
+command recording, one submission, completion, lease retirement, and
+crate-private test readback. A readback consumes the export's reported outgoing
+state as its real incoming state; it cannot silently repair a graph-state bug.
+Buffer Copies require 4-byte-aligned source offset, destination offset, and
+size, checked in both graph recording and RHI lowering. Queue operations are
+serialized per opened device, including error-path idle waits. Raster remains a
+later vertical slice.
 
 ## Testing and development
 
