@@ -765,7 +765,10 @@ fn failed_completion_is_terminal_and_trace_collection_can_be_disabled() {
         .unwrap();
     let completion = *frame.submission.completion();
     executor.try_backend().unwrap().fail(completion);
-    assert_eq!(frame.submission.status().unwrap(), CompletionStatus::Failed);
+    assert_eq!(
+        frame.submission.status().unwrap(),
+        CompletionStatus::Failed(CompletionFailure::ExecutionFailed)
+    );
     assert_eq!(frame.submission.retained_lease_count(), 0);
     assert!(executor.try_backend().unwrap().trace().is_empty());
 }

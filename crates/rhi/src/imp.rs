@@ -1,14 +1,31 @@
 //! Windows-only containment of the `wgpu-hal` bootstrap API.
 
+#![cfg_attr(
+    any(
+        all(feature = "dx12", not(feature = "vulkan")),
+        all(feature = "vulkan", not(feature = "dx12"))
+    ),
+    allow(
+        dead_code,
+        irrefutable_let_patterns,
+        unreachable_patterns,
+        unused_mut,
+        unused_variables,
+        reason = "single-backend builds intentionally collapse exhaustive native enums and omit the dual-backend hardware fixture"
+    )
+)]
+
 use crate::{
     Backend, BufferDescriptor, DeviceKind, DeviceOptions, HardwareCapabilities, HardwareInfo,
-    OpenError, ResourceCreateError, TextureDescriptor, Validation,
+    OpenError, ResourceCreateError, ResourceLease, TextureDescriptor, Validation,
 };
 use fluxel_rendergraph::{
-    BufferUsage, BufferUsageKind, TextureDimension, TextureFormat, TextureUsage, TextureUsageKind,
+    BufferCopyRegion, BufferUsage, BufferUsageKind, CompletionFailure, CompletionStatus,
+    ResourceAccessState, TextureAspect, TextureCopyRegion, TextureDesc, TextureDimension,
+    TextureFormat, TextureRange, TextureUsage, TextureUsageKind,
 };
 use std::sync::Arc;
-use wgpu_hal::{Adapter as _, Device as _, Instance as _};
+use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _, Instance as _, Queue as _};
 use wgpu_types as wgt;
 
 pub(super) struct OpenedDevice {
@@ -66,6 +83,74 @@ pub(super) struct OwnedTexture {
     owner: Arc<OpenedDevice>,
 }
 
+pub(super) struct CopyEncoder {
+    native: Option<NativeEncoder>,
+    owner: Arc<OpenedDevice>,
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "native encoders are setup objects retained once per in-flight submission, not a dense collection"
+)]
+enum NativeEncoder {
+    #[cfg(feature = "dx12")]
+    Dx12(wgpu_hal::dx12::CommandEncoder),
+    #[cfg(feature = "vulkan")]
+    Vulkan(wgpu_hal::vulkan::CommandEncoder),
+}
+
+pub(super) struct CopyCommandBuffer {
+    native: Option<NativeFinished>,
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the finished command buffer uniquely owns its native encoder until submission"
+)]
+enum NativeFinished {
+    #[cfg(feature = "dx12")]
+    Dx12 {
+        owner: Arc<OpenedDevice>,
+        encoder: wgpu_hal::dx12::CommandEncoder,
+        command_buffer: wgpu_hal::dx12::CommandBuffer,
+    },
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        owner: Arc<OpenedDevice>,
+        encoder: wgpu_hal::vulkan::CommandEncoder,
+        command_buffer: wgpu_hal::vulkan::CommandBuffer,
+    },
+}
+
+#[derive(Clone)]
+pub(super) struct NativeCompletion(Arc<std::sync::Mutex<NativeSubmission>>);
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one native submission bundle must retain the concrete encoder and command buffer together"
+)]
+enum NativeSubmission {
+    #[cfg(feature = "dx12")]
+    Dx12 {
+        owner: Arc<OpenedDevice>,
+        encoder: Option<wgpu_hal::dx12::CommandEncoder>,
+        command_buffer: Option<wgpu_hal::dx12::CommandBuffer>,
+        fence: Option<wgpu_hal::dx12::Fence>,
+        leases: Vec<ResourceLease>,
+        failure: Option<CompletionFailure>,
+    },
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        owner: Arc<OpenedDevice>,
+        encoder: Option<wgpu_hal::vulkan::CommandEncoder>,
+        command_buffer: Option<wgpu_hal::vulkan::CommandBuffer>,
+        fence: Option<wgpu_hal::vulkan::Fence>,
+        leases: Vec<ResourceLease>,
+        failure: Option<CompletionFailure>,
+    },
+    TerminalFailure(CompletionFailure),
+}
+
 impl Drop for OwnedBuffer {
     fn drop(&mut self) {
         let native = self.native.take().expect("owned buffer destroyed once");
@@ -76,14 +161,15 @@ impl Drop for OwnedBuffer {
         match (&self.owner.native, native) {
             #[cfg(feature = "dx12")]
             (NativeDevice::Dx12 { device, .. }, NativeBuffer::Dx12(buffer)) => {
-                // SAFETY: this buffer was created by this live device, has never
-                // been submitted in 0.1.1, and this unique owner destroys it once.
+                // SAFETY: this buffer was created by this live device. Submission
+                // bundles retain a strong resource lease through completion, so
+                // the unique final owner cannot run while commands reference it.
                 unsafe { device.destroy_buffer(buffer) };
             }
             #[cfg(feature = "vulkan")]
             (NativeDevice::Vulkan { device, .. }, NativeBuffer::Vulkan(buffer)) => {
-                // SAFETY: same-device ownership is retained by `owner`; 0.1.1
-                // has no mapping or submission and the Option enforces one drop.
+                // SAFETY: same-device ownership and in-flight leases are retained;
+                // the Option enforces one native destruction.
                 unsafe { device.destroy_buffer(buffer) };
             }
             _ => unreachable!("resource and device backend always match"),
@@ -104,13 +190,13 @@ impl Drop for OwnedTexture {
             #[cfg(feature = "dx12")]
             (NativeDevice::Dx12 { device, .. }, NativeTexture::Dx12(texture)) => {
                 // SAFETY: this texture belongs to the retained live device and
-                // no commands can reference it in the 0.1.1 API.
+                // in-flight command bundles keep its resource lease alive.
                 unsafe { device.destroy_texture(texture) };
             }
             #[cfg(feature = "vulkan")]
             (NativeDevice::Vulkan { device, .. }, NativeTexture::Vulkan(texture)) => {
-                // SAFETY: same-device ownership and unique final destruction are
-                // enforced structurally; 0.1.1 exposes no submission.
+                // SAFETY: same-device ownership, completion retention, and unique
+                // final destruction are enforced structurally.
                 unsafe { device.destroy_texture(texture) };
             }
             _ => unreachable!("resource and device backend always match"),
@@ -238,6 +324,1238 @@ pub(super) fn create_texture(
         },
         texture_usage_from_native(native_usage, texture.format),
     ))
+}
+
+impl Drop for CopyEncoder {
+    fn drop(&mut self) {
+        if let Some(mut native) = self.native.take() {
+            // SAFETY: a live CopyEncoder is always recording; an unconsumed
+            // encoder must discard exactly once and is never submitted.
+            unsafe {
+                match &mut native {
+                    #[cfg(feature = "dx12")]
+                    NativeEncoder::Dx12(encoder) => encoder.discard_encoding(),
+                    #[cfg(feature = "vulkan")]
+                    NativeEncoder::Vulkan(encoder) => encoder.discard_encoding(),
+                }
+            }
+        }
+    }
+}
+
+impl Drop for CopyCommandBuffer {
+    fn drop(&mut self) {
+        if let Some(finished) = self.native.take() {
+            reset_finished(finished);
+        }
+    }
+}
+
+fn reset_finished(finished: NativeFinished) {
+    match finished {
+        #[cfg(feature = "dx12")]
+        NativeFinished::Dx12 {
+            mut encoder,
+            command_buffer,
+            ..
+        } => {
+            // SAFETY: encoder is closed, the command buffer was never accepted
+            // or has completed, and it is the only live buffer from this encoder.
+            unsafe { encoder.reset_all(core::iter::once(command_buffer)) };
+        }
+        #[cfg(feature = "vulkan")]
+        NativeFinished::Vulkan {
+            mut encoder,
+            command_buffer,
+            ..
+        } => {
+            // SAFETY: same closed-encoder and complete/unsubmitted ownership
+            // proof as the DX12 branch.
+            unsafe { encoder.reset_all(core::iter::once(command_buffer)) };
+        }
+    }
+}
+
+impl Drop for NativeSubmission {
+    fn drop(&mut self) {
+        match self {
+            #[cfg(feature = "dx12")]
+            Self::Dx12 {
+                owner,
+                encoder,
+                command_buffer,
+                fence,
+                leases,
+                failure,
+            } => {
+                let (
+                    NativeDevice::Dx12 { device, .. },
+                    Some(mut encoder),
+                    Some(command_buffer),
+                    Some(fence),
+                ) = (
+                    &owner.native,
+                    encoder.take(),
+                    command_buffer.take(),
+                    fence.take(),
+                )
+                else {
+                    return;
+                };
+                // A submit/query failure can mean ExecuteCommandLists was accepted
+                // before fence signaling failed. In that state no fence value can
+                // prove completion. Retain the complete native/resource bundle for
+                // process lifetime rather than resetting storage still in use.
+                if failure.is_some() {
+                    let retained = std::mem::take(leases);
+                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
+                    // SAFETY: the sole command buffer completed at fence value 1.
+                    unsafe {
+                        encoder.reset_all(core::iter::once(command_buffer));
+                        device.destroy_fence(fence);
+                    }
+                } else {
+                    let retained = std::mem::take(leases);
+                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                }
+            }
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan {
+                owner,
+                encoder,
+                command_buffer,
+                fence,
+                leases,
+                failure,
+            } => {
+                let (
+                    NativeDevice::Vulkan { device, .. },
+                    Some(mut encoder),
+                    Some(command_buffer),
+                    Some(fence),
+                ) = (
+                    &owner.native,
+                    encoder.take(),
+                    command_buffer.take(),
+                    fence.take(),
+                )
+                else {
+                    return;
+                };
+                if failure.is_some() {
+                    let retained = std::mem::take(leases);
+                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
+                    // SAFETY: the sole command buffer completed at fence value 1.
+                    unsafe {
+                        encoder.reset_all(core::iter::once(command_buffer));
+                        device.destroy_fence(fence);
+                    }
+                } else {
+                    let retained = std::mem::take(leases);
+                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                }
+            }
+            Self::TerminalFailure(_) => {}
+        }
+    }
+}
+
+pub(super) fn begin_copy_encoder(owner: &Arc<OpenedDevice>) -> Result<CopyEncoder, String> {
+    let native = match &owner.native {
+        #[cfg(feature = "dx12")]
+        NativeDevice::Dx12 { device, queue, .. } => {
+            let desc = wgpu_hal::CommandEncoderDescriptor {
+                label: Some("fluxel copy graph"),
+                queue,
+            };
+            // SAFETY: queue and device were opened together and remain retained.
+            let mut encoder =
+                unsafe { device.create_command_encoder(&desc) }.map_err(|e| e.to_string())?;
+            // SAFETY: a freshly created encoder is closed.
+            unsafe { encoder.begin_encoding(Some("fluxel copy graph")) }
+                .map_err(|e| e.to_string())?;
+            NativeEncoder::Dx12(encoder)
+        }
+        #[cfg(feature = "vulkan")]
+        NativeDevice::Vulkan { device, queue, .. } => {
+            let desc = wgpu_hal::CommandEncoderDescriptor {
+                label: Some("fluxel copy graph"),
+                queue,
+            };
+            // SAFETY: queue and device share the retained adapter/device lineage.
+            let mut encoder =
+                unsafe { device.create_command_encoder(&desc) }.map_err(|e| e.to_string())?;
+            // SAFETY: a freshly created encoder is closed.
+            unsafe { encoder.begin_encoding(Some("fluxel copy graph")) }
+                .map_err(|e| e.to_string())?;
+            NativeEncoder::Vulkan(encoder)
+        }
+    };
+    Ok(CopyEncoder {
+        native: Some(native),
+        owner: Arc::clone(owner),
+    })
+}
+
+pub(super) fn transition_buffer(
+    encoder: &mut CopyEncoder,
+    buffer: &OwnedBuffer,
+    before: ResourceAccessState,
+    after: ResourceAccessState,
+) -> Result<(), String> {
+    let from = buffer_state(before)?;
+    let to = buffer_state(after)?;
+    match (
+        encoder.native.as_mut().expect("recording encoder"),
+        buffer.native.as_ref().expect("live buffer"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeEncoder::Dx12(encoder), NativeBuffer::Dx12(buffer)) => unsafe {
+            encoder.transition_buffers(core::iter::once(wgpu_hal::BufferBarrier {
+                buffer,
+                usage: wgpu_hal::StateTransition { from, to },
+            }));
+        },
+        #[cfg(feature = "vulkan")]
+        (NativeEncoder::Vulkan(encoder), NativeBuffer::Vulkan(buffer)) => unsafe {
+            encoder.transition_buffers(core::iter::once(wgpu_hal::BufferBarrier {
+                buffer,
+                usage: wgpu_hal::StateTransition { from, to },
+            }));
+        },
+        _ => return Err("buffer and encoder backend mismatch".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn transition_texture(
+    encoder: &mut CopyEncoder,
+    texture: &OwnedTexture,
+    descriptor: TextureDesc,
+    range: TextureRange,
+    before: ResourceAccessState,
+    after: ResourceAccessState,
+) -> Result<(), String> {
+    let from = texture_state(before)?;
+    let to = texture_state(after)?;
+    let range = texture_range(descriptor, range)?;
+    match (
+        encoder.native.as_mut().expect("recording encoder"),
+        texture.native.as_ref().expect("live texture"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeEncoder::Dx12(encoder), NativeTexture::Dx12(texture)) => unsafe {
+            encoder.transition_textures(core::iter::once(wgpu_hal::TextureBarrier {
+                texture,
+                range,
+                usage: wgpu_hal::StateTransition { from, to },
+            }));
+        },
+        #[cfg(feature = "vulkan")]
+        (NativeEncoder::Vulkan(encoder), NativeTexture::Vulkan(texture)) => unsafe {
+            encoder.transition_textures(core::iter::once(wgpu_hal::TextureBarrier {
+                texture,
+                range,
+                usage: wgpu_hal::StateTransition { from, to },
+            }));
+        },
+        _ => return Err("texture and encoder backend mismatch".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn copy_buffer(
+    encoder: &mut CopyEncoder,
+    source: &OwnedBuffer,
+    destination: &OwnedBuffer,
+    region: BufferCopyRegion,
+) -> Result<(), String> {
+    let size =
+        wgt::BufferSize::new(region.size).ok_or_else(|| "copy size must be non-zero".to_owned())?;
+    let copy = wgpu_hal::BufferCopy {
+        src_offset: region.source_offset,
+        dst_offset: region.destination_offset,
+        size,
+    };
+    match (
+        encoder.native.as_mut().expect("recording encoder"),
+        source.native.as_ref().expect("live buffer"),
+        destination.native.as_ref().expect("live buffer"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            NativeBuffer::Dx12(source),
+            NativeBuffer::Dx12(destination),
+        ) => unsafe {
+            encoder.copy_buffer_to_buffer(source, destination, core::iter::once(copy));
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            NativeBuffer::Vulkan(source),
+            NativeBuffer::Vulkan(destination),
+        ) => unsafe {
+            encoder.copy_buffer_to_buffer(source, destination, core::iter::once(copy));
+        },
+        _ => return Err("copy buffers and encoder backend mismatch".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn copy_texture(
+    encoder: &mut CopyEncoder,
+    source: &OwnedTexture,
+    destination: &OwnedTexture,
+    descriptor: TextureDesc,
+    region: TextureCopyRegion,
+) -> Result<(), String> {
+    let copy = wgpu_hal::TextureCopy {
+        src_base: copy_base(region.source_mip_level, region.source_origin),
+        dst_base: copy_base(region.destination_mip_level, region.destination_origin),
+        size: wgpu_hal::CopyExtent {
+            width: region.extent[0],
+            height: region.extent[1],
+            depth: region.extent[2],
+        },
+    };
+    let source_usage = wgt::TextureUses::COPY_SRC;
+    let _ = descriptor;
+    match (
+        encoder.native.as_mut().expect("recording encoder"),
+        source.native.as_ref().expect("live texture"),
+        destination.native.as_ref().expect("live texture"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            NativeTexture::Dx12(source),
+            NativeTexture::Dx12(destination),
+        ) => unsafe {
+            encoder.copy_texture_to_texture(
+                source,
+                source_usage,
+                destination,
+                core::iter::once(copy),
+            );
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            NativeTexture::Vulkan(source),
+            NativeTexture::Vulkan(destination),
+        ) => unsafe {
+            encoder.copy_texture_to_texture(
+                source,
+                source_usage,
+                destination,
+                core::iter::once(copy),
+            );
+        },
+        _ => return Err("copy textures and encoder backend mismatch".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn finish_copy_encoder(mut encoder: CopyEncoder) -> Result<CopyCommandBuffer, String> {
+    let native = encoder.native.take().expect("recording encoder");
+    let finished = match native {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(mut native) => {
+            // SAFETY: this encoder is recording and no prior error was retained.
+            let command_buffer = unsafe { native.end_encoding() }.map_err(|e| e.to_string())?;
+            NativeFinished::Dx12 {
+                owner: Arc::clone(&encoder.owner),
+                encoder: native,
+                command_buffer,
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(mut native) => {
+            // SAFETY: this encoder is recording and no prior error was retained.
+            let command_buffer = unsafe { native.end_encoding() }.map_err(|e| e.to_string())?;
+            NativeFinished::Vulkan {
+                owner: Arc::clone(&encoder.owner),
+                encoder: native,
+                command_buffer,
+            }
+        }
+    };
+    Ok(CopyCommandBuffer {
+        native: Some(finished),
+    })
+}
+
+pub(super) fn submit_copy(
+    mut buffer: CopyCommandBuffer,
+    leases: Vec<ResourceLease>,
+) -> Result<NativeCompletion, String> {
+    let finished = buffer.native.take().expect("finished command buffer");
+    let submission = match finished {
+        #[cfg(feature = "dx12")]
+        NativeFinished::Dx12 {
+            owner,
+            mut encoder,
+            command_buffer,
+        } => {
+            let NativeDevice::Dx12 { device, queue, .. } = &owner.native else {
+                unreachable!()
+            };
+            // SAFETY: device is live and owns the new unsignaled fence.
+            let fence = unsafe { device.create_fence() }.map_err(|e| e.to_string())?;
+            // SAFETY: command buffer and encoder belong to this device/queue and
+            // remain owned by the returned completion until fence value 1.
+            match unsafe { queue.submit(&[&command_buffer], &[], (&fence, 1)) } {
+                Ok(()) => NativeSubmission::Dx12 {
+                    owner,
+                    encoder: Some(encoder),
+                    command_buffer: Some(command_buffer),
+                    fence: Some(fence),
+                    leases,
+                    failure: None,
+                },
+                Err(error) => {
+                    let failure = completion_failure(&error);
+                    // DX12 may execute command lists before a later fence signal
+                    // reports this error. Only a successful queue-idle wait makes
+                    // immediate command allocator reuse legal.
+                    if unsafe { queue.wait_for_idle() }.is_ok() {
+                        unsafe {
+                            encoder.reset_all(core::iter::once(command_buffer));
+                            device.destroy_fence(fence);
+                        }
+                        NativeSubmission::TerminalFailure(failure)
+                    } else {
+                        NativeSubmission::Dx12 {
+                            owner,
+                            encoder: Some(encoder),
+                            command_buffer: Some(command_buffer),
+                            fence: Some(fence),
+                            leases,
+                            failure: Some(CompletionFailure::DeviceLost),
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        NativeFinished::Vulkan {
+            owner,
+            mut encoder,
+            command_buffer,
+        } => {
+            let NativeDevice::Vulkan { device, queue, .. } = &owner.native else {
+                unreachable!()
+            };
+            // SAFETY: device is live and owns the new unsignaled fence.
+            let fence = unsafe { device.create_fence() }.map_err(|e| e.to_string())?;
+            // SAFETY: all submitted objects remain retained to completion.
+            match unsafe { queue.submit(&[&command_buffer], &[], (&fence, 1)) } {
+                Ok(()) => NativeSubmission::Vulkan {
+                    owner,
+                    encoder: Some(encoder),
+                    command_buffer: Some(command_buffer),
+                    fence: Some(fence),
+                    leases,
+                    failure: None,
+                },
+                Err(error) => {
+                    let failure = completion_failure(&error);
+                    if unsafe { queue.wait_for_idle() }.is_ok() {
+                        unsafe {
+                            encoder.reset_all(core::iter::once(command_buffer));
+                            device.destroy_fence(fence);
+                        }
+                        NativeSubmission::TerminalFailure(failure)
+                    } else {
+                        NativeSubmission::Vulkan {
+                            owner,
+                            encoder: Some(encoder),
+                            command_buffer: Some(command_buffer),
+                            fence: Some(fence),
+                            leases,
+                            failure: Some(CompletionFailure::DeviceLost),
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Ok(NativeCompletion(Arc::new(std::sync::Mutex::new(
+        submission,
+    ))))
+}
+
+fn completion_failure(error: &wgpu_hal::DeviceError) -> CompletionFailure {
+    if *error == wgpu_hal::DeviceError::Lost {
+        CompletionFailure::DeviceLost
+    } else {
+        CompletionFailure::ExecutionFailed
+    }
+}
+
+pub(super) fn completion_status(completion: &NativeCompletion) -> Result<CompletionStatus, String> {
+    let mut submission = completion
+        .0
+        .lock()
+        .map_err(|_| "completion lock poisoned".to_owned())?;
+    let value = match &mut *submission {
+        #[cfg(feature = "dx12")]
+        NativeSubmission::Dx12 {
+            owner,
+            fence: Some(fence),
+            failure,
+            ..
+        } => {
+            if let Some(failure) = *failure {
+                return Ok(CompletionStatus::Failed(failure));
+            }
+            let NativeDevice::Dx12 { device, .. } = &owner.native else {
+                unreachable!()
+            };
+            match unsafe { device.get_fence_value(fence) } {
+                Ok(value) => value,
+                Err(error) => {
+                    let reason = completion_failure(&error);
+                    *failure = Some(reason);
+                    return Ok(CompletionStatus::Failed(reason));
+                }
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        NativeSubmission::Vulkan {
+            owner,
+            fence: Some(fence),
+            failure,
+            ..
+        } => {
+            if let Some(failure) = *failure {
+                return Ok(CompletionStatus::Failed(failure));
+            }
+            let NativeDevice::Vulkan { device, .. } = &owner.native else {
+                unreachable!()
+            };
+            match unsafe { device.get_fence_value(fence) } {
+                Ok(value) => value,
+                Err(error) => {
+                    let reason = completion_failure(&error);
+                    *failure = Some(reason);
+                    return Ok(CompletionStatus::Failed(reason));
+                }
+            }
+        }
+        NativeSubmission::TerminalFailure(failure) => {
+            return Ok(CompletionStatus::Failed(*failure));
+        }
+        _ => {
+            return Ok(CompletionStatus::Failed(
+                fluxel_rendergraph::CompletionFailure::ExecutionFailed,
+            ));
+        }
+    };
+    Ok(if value >= 1 {
+        CompletionStatus::Complete
+    } else {
+        CompletionStatus::Pending
+    })
+}
+
+pub(super) fn wait_completion(
+    completion: &NativeCompletion,
+    timeout: core::time::Duration,
+) -> Result<CompletionStatus, String> {
+    let mut submission = completion
+        .0
+        .lock()
+        .map_err(|_| "completion lock poisoned".to_owned())?;
+    let complete = match &mut *submission {
+        #[cfg(feature = "dx12")]
+        NativeSubmission::Dx12 {
+            owner,
+            fence: Some(fence),
+            failure,
+            ..
+        } => {
+            if let Some(failure) = *failure {
+                return Ok(CompletionStatus::Failed(failure));
+            }
+            let NativeDevice::Dx12 { device, .. } = &owner.native else {
+                unreachable!()
+            };
+            match unsafe { device.wait(fence, 1, Some(timeout)) } {
+                Ok(complete) => complete,
+                Err(error) => {
+                    let reason = completion_failure(&error);
+                    *failure = Some(reason);
+                    return Ok(CompletionStatus::Failed(reason));
+                }
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        NativeSubmission::Vulkan {
+            owner,
+            fence: Some(fence),
+            failure,
+            ..
+        } => {
+            if let Some(failure) = *failure {
+                return Ok(CompletionStatus::Failed(failure));
+            }
+            let NativeDevice::Vulkan { device, .. } = &owner.native else {
+                unreachable!()
+            };
+            match unsafe { device.wait(fence, 1, Some(timeout)) } {
+                Ok(complete) => complete,
+                Err(error) => {
+                    let reason = completion_failure(&error);
+                    *failure = Some(reason);
+                    return Ok(CompletionStatus::Failed(reason));
+                }
+            }
+        }
+        NativeSubmission::TerminalFailure(failure) => {
+            return Ok(CompletionStatus::Failed(*failure));
+        }
+        _ => {
+            return Ok(CompletionStatus::Failed(
+                fluxel_rendergraph::CompletionFailure::ExecutionFailed,
+            ));
+        }
+    };
+    Ok(if complete {
+        CompletionStatus::Complete
+    } else {
+        CompletionStatus::Pending
+    })
+}
+
+#[cfg(test)]
+struct ValidationLogger;
+
+#[cfg(test)]
+static VALIDATION_LOGGER: ValidationLogger = ValidationLogger;
+#[cfg(test)]
+static VALIDATION_MESSAGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+static VALIDATION_LOGGER_INIT: std::sync::Once = std::sync::Once::new();
+
+#[cfg(test)]
+impl log::Log for ValidationLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            VALIDATION_MESSAGES
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(format!("{}: {}", record.target(), record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+#[cfg(test)]
+pub(super) fn initialize_validation_capture() {
+    VALIDATION_LOGGER_INIT.call_once(|| {
+        let _ = log::set_logger(&VALIDATION_LOGGER);
+        // wgpu-hal chooses Vulkan debug-utils severities from this global
+        // filter while creating the instance, so Warn must be enabled before
+        // Device::open to capture validation warnings as well as errors.
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+}
+
+#[cfg(test)]
+pub(super) fn clear_validation_diagnostics(owner: &Arc<OpenedDevice>) {
+    VALIDATION_MESSAGES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    #[cfg(feature = "dx12")]
+    if let NativeDevice::Dx12 { device, .. } = &owner.native {
+        use windows::{Win32::Graphics::Direct3D12::ID3D12InfoQueue, core::Interface as _};
+        if let Ok(queue) = device.raw_device().cast::<ID3D12InfoQueue>() {
+            // SAFETY: the information queue belongs to the retained live device.
+            unsafe { queue.ClearStoredMessages() };
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
+    let mut messages = VALIDATION_MESSAGES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    #[cfg(feature = "dx12")]
+    if let NativeDevice::Dx12 { device, .. } = &owner.native {
+        use windows::{Win32::Graphics::Direct3D12::ID3D12InfoQueue, core::Interface as _};
+        if let Ok(queue) = device.raw_device().cast::<ID3D12InfoQueue>() {
+            // SAFETY: read-only count query on the retained device queue.
+            let count = unsafe { queue.GetNumStoredMessagesAllowedByRetrievalFilter() };
+            if count != 0 {
+                messages.push(format!("DX12 info queue stored {count} message(s)"));
+            }
+        }
+    }
+    messages
+}
+
+#[cfg(test)]
+pub(super) fn upload_buffer_for_test(
+    owner: &Arc<OpenedDevice>,
+    target: &OwnedBuffer,
+    target_lease: ResourceLease,
+    bytes: &[u8],
+) -> Result<ResourceAccessState, String> {
+    let staging = create_staging_buffer(
+        owner,
+        bytes.len() as u64,
+        wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
+    )?;
+    with_mapped_write(&staging, bytes)?;
+    let mut encoder = begin_copy_encoder(owner)?;
+    transition_buffer(
+        &mut encoder,
+        &staging,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopySource,
+    )?;
+    transition_buffer(
+        &mut encoder,
+        target,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopyDestination,
+    )?;
+    copy_buffer(
+        &mut encoder,
+        &staging,
+        target,
+        BufferCopyRegion {
+            source_offset: 0,
+            destination_offset: 0,
+            size: bytes.len() as u64,
+        },
+    )?;
+    let completion = submit_copy(finish_copy_encoder(encoder)?, vec![target_lease])?;
+    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
+    if status != CompletionStatus::Complete {
+        if matches!(status, CompletionStatus::Failed(_)) {
+            std::mem::forget(staging);
+        }
+        return Err(format!("upload did not complete: {status:?}"));
+    }
+    drop(completion);
+    drop(staging);
+    Ok(ResourceAccessState::CopyDestination)
+}
+
+#[cfg(test)]
+pub(super) fn readback_buffer_for_test(
+    owner: &Arc<OpenedDevice>,
+    source: &OwnedBuffer,
+    source_lease: ResourceLease,
+    incoming_state: ResourceAccessState,
+    size: u64,
+) -> Result<Vec<u8>, String> {
+    let staging = create_staging_buffer(
+        owner,
+        size,
+        wgt::BufferUses::MAP_READ | wgt::BufferUses::COPY_DST,
+    )?;
+    let mut encoder = begin_copy_encoder(owner)?;
+    transition_buffer(
+        &mut encoder,
+        source,
+        incoming_state,
+        ResourceAccessState::CopySource,
+    )?;
+    transition_buffer(
+        &mut encoder,
+        &staging,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopyDestination,
+    )?;
+    copy_buffer(
+        &mut encoder,
+        source,
+        &staging,
+        BufferCopyRegion {
+            source_offset: 0,
+            destination_offset: 0,
+            size,
+        },
+    )?;
+    let completion = submit_copy(finish_copy_encoder(encoder)?, vec![source_lease])?;
+    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
+    if status != CompletionStatus::Complete {
+        if matches!(status, CompletionStatus::Failed(_)) {
+            std::mem::forget(staging);
+        }
+        return Err(format!("readback did not complete: {status:?}"));
+    }
+    drop(completion);
+    let bytes = with_mapped_read(&staging, size)?;
+    drop(staging);
+    Ok(bytes)
+}
+
+#[cfg(test)]
+pub(super) struct TextureReadback {
+    pub(super) tight: Vec<u8>,
+    pub(super) padded: Vec<u8>,
+    pub(super) bytes_per_row: u32,
+}
+
+#[cfg(test)]
+pub(super) fn upload_texture_for_test(
+    owner: &Arc<OpenedDevice>,
+    target: &OwnedTexture,
+    target_lease: ResourceLease,
+    descriptor: TextureDesc,
+    tight: &[u8],
+) -> Result<ResourceAccessState, String> {
+    let row_bytes = descriptor
+        .extent
+        .width
+        .checked_mul(4)
+        .ok_or("row size overflow")?;
+    let pitch = row_bytes.next_multiple_of(256);
+    let staging_size = u64::from(pitch) * u64::from(descriptor.extent.height);
+    if tight.len() as u64 != u64::from(row_bytes) * u64::from(descriptor.extent.height) {
+        return Err("tight texture upload length mismatch".into());
+    }
+    let mut padded = vec![0xEE; staging_size as usize];
+    for row in 0..descriptor.extent.height as usize {
+        padded[row * pitch as usize..row * pitch as usize + row_bytes as usize]
+            .copy_from_slice(&tight[row * row_bytes as usize..(row + 1) * row_bytes as usize]);
+    }
+    let staging = create_staging_buffer(
+        owner,
+        staging_size,
+        wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
+    )?;
+    with_mapped_write(&staging, &padded)?;
+    let mut encoder = begin_copy_encoder(owner)?;
+    transition_buffer(
+        &mut encoder,
+        &staging,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopySource,
+    )?;
+    transition_texture(
+        &mut encoder,
+        target,
+        descriptor,
+        TextureRange::Whole,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopyDestination,
+    )?;
+    copy_buffer_to_texture(
+        &mut encoder,
+        &staging,
+        target,
+        pitch,
+        descriptor.extent.width,
+        descriptor.extent.height,
+    )?;
+    let completion = submit_copy(finish_copy_encoder(encoder)?, vec![target_lease])?;
+    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
+    if status != CompletionStatus::Complete {
+        if matches!(status, CompletionStatus::Failed(_)) {
+            std::mem::forget(staging);
+        }
+        return Err(format!("texture upload did not complete: {status:?}"));
+    }
+    drop(completion);
+    drop(staging);
+    Ok(ResourceAccessState::CopyDestination)
+}
+
+#[cfg(test)]
+pub(super) fn readback_texture_for_test(
+    owner: &Arc<OpenedDevice>,
+    source: &OwnedTexture,
+    source_lease: ResourceLease,
+    descriptor: TextureDesc,
+    incoming_state: ResourceAccessState,
+) -> Result<TextureReadback, String> {
+    let row_bytes = descriptor
+        .extent
+        .width
+        .checked_mul(4)
+        .ok_or("row size overflow")?;
+    let pitch = row_bytes.next_multiple_of(256);
+    let staging_size = u64::from(pitch) * u64::from(descriptor.extent.height);
+    let staging = create_staging_buffer(
+        owner,
+        staging_size,
+        wgt::BufferUses::MAP_READ | wgt::BufferUses::COPY_DST,
+    )?;
+    let mut encoder = begin_copy_encoder(owner)?;
+    transition_texture(
+        &mut encoder,
+        source,
+        descriptor,
+        TextureRange::Whole,
+        incoming_state,
+        ResourceAccessState::CopySource,
+    )?;
+    transition_buffer(
+        &mut encoder,
+        &staging,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopyDestination,
+    )?;
+    clear_buffer(&mut encoder, &staging, staging_size)?;
+    transition_buffer(
+        &mut encoder,
+        &staging,
+        ResourceAccessState::CopyDestination,
+        ResourceAccessState::CopyDestination,
+    )?;
+    copy_texture_to_buffer(
+        &mut encoder,
+        source,
+        &staging,
+        pitch,
+        descriptor.extent.width,
+        descriptor.extent.height,
+    )?;
+    let completion = submit_copy(finish_copy_encoder(encoder)?, vec![source_lease])?;
+    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
+    if status != CompletionStatus::Complete {
+        if matches!(status, CompletionStatus::Failed(_)) {
+            std::mem::forget(staging);
+        }
+        return Err(format!("texture readback did not complete: {status:?}"));
+    }
+    drop(completion);
+    let padded = with_mapped_read(&staging, staging_size)?;
+    let mut tight =
+        Vec::with_capacity((u64::from(row_bytes) * u64::from(descriptor.extent.height)) as usize);
+    for row in 0..descriptor.extent.height as usize {
+        tight.extend_from_slice(
+            &padded[row * pitch as usize..row * pitch as usize + row_bytes as usize],
+        );
+    }
+    drop(staging);
+    Ok(TextureReadback {
+        tight,
+        padded,
+        bytes_per_row: pitch,
+    })
+}
+
+#[cfg(test)]
+fn copy_buffer_to_texture(
+    encoder: &mut CopyEncoder,
+    source: &OwnedBuffer,
+    destination: &OwnedTexture,
+    pitch: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let copy = wgpu_hal::BufferTextureCopy {
+        buffer_layout: wgt::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(pitch),
+            rows_per_image: Some(height),
+        },
+        texture_base: copy_base(0, [0, 0, 0]),
+        size: wgpu_hal::CopyExtent {
+            width,
+            height,
+            depth: 1,
+        },
+    };
+    match (
+        encoder.native.as_mut().expect("recording encoder"),
+        source.native.as_ref().expect("live buffer"),
+        destination.native.as_ref().expect("live texture"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            NativeBuffer::Dx12(source),
+            NativeTexture::Dx12(destination),
+        ) => unsafe {
+            encoder.copy_buffer_to_texture(source, destination, core::iter::once(copy));
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            NativeBuffer::Vulkan(source),
+            NativeTexture::Vulkan(destination),
+        ) => unsafe {
+            encoder.copy_buffer_to_texture(source, destination, core::iter::once(copy));
+        },
+        _ => return Err("buffer-to-texture backend mismatch".into()),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn copy_texture_to_buffer(
+    encoder: &mut CopyEncoder,
+    source: &OwnedTexture,
+    destination: &OwnedBuffer,
+    pitch: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let copy = wgpu_hal::BufferTextureCopy {
+        buffer_layout: wgt::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(pitch),
+            rows_per_image: Some(height),
+        },
+        texture_base: copy_base(0, [0, 0, 0]),
+        size: wgpu_hal::CopyExtent {
+            width,
+            height,
+            depth: 1,
+        },
+    };
+    match (
+        encoder.native.as_mut().expect("recording encoder"),
+        source.native.as_ref().expect("live texture"),
+        destination.native.as_ref().expect("live buffer"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            NativeTexture::Dx12(source),
+            NativeBuffer::Dx12(destination),
+        ) => unsafe {
+            encoder.copy_texture_to_buffer(
+                source,
+                wgt::TextureUses::COPY_SRC,
+                destination,
+                core::iter::once(copy),
+            );
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            NativeTexture::Vulkan(source),
+            NativeBuffer::Vulkan(destination),
+        ) => unsafe {
+            encoder.copy_texture_to_buffer(
+                source,
+                wgt::TextureUses::COPY_SRC,
+                destination,
+                core::iter::once(copy),
+            );
+        },
+        _ => return Err("texture-to-buffer backend mismatch".into()),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn clear_buffer(encoder: &mut CopyEncoder, buffer: &OwnedBuffer, size: u64) -> Result<(), String> {
+    match (
+        encoder.native.as_mut().expect("recording encoder"),
+        buffer.native.as_ref().expect("live buffer"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeEncoder::Dx12(encoder), NativeBuffer::Dx12(buffer)) => unsafe {
+            encoder.clear_buffer(buffer, 0..size);
+        },
+        #[cfg(feature = "vulkan")]
+        (NativeEncoder::Vulkan(encoder), NativeBuffer::Vulkan(buffer)) => unsafe {
+            encoder.clear_buffer(buffer, 0..size);
+        },
+        _ => return Err("clear buffer backend mismatch".into()),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn create_staging_buffer(
+    owner: &Arc<OpenedDevice>,
+    size: u64,
+    usage: wgt::BufferUses,
+) -> Result<OwnedBuffer, String> {
+    let desc = wgpu_hal::BufferDescriptor {
+        label: Some("fluxel test staging"),
+        size,
+        usage,
+        memory_flags: wgpu_hal::MemoryFlags::PREFER_COHERENT,
+    };
+    let native = match &owner.native {
+        #[cfg(feature = "dx12")]
+        NativeDevice::Dx12 { device, .. } => NativeBuffer::Dx12(
+            // SAFETY: non-zero in-bounds fixture size and valid staging flags.
+            unsafe { device.create_buffer(&desc) }.map_err(|e| e.to_string())?,
+        ),
+        #[cfg(feature = "vulkan")]
+        NativeDevice::Vulkan { device, .. } => NativeBuffer::Vulkan(
+            // SAFETY: non-zero in-bounds fixture size and valid staging flags.
+            unsafe { device.create_buffer(&desc) }.map_err(|e| e.to_string())?,
+        ),
+    };
+    Ok(OwnedBuffer {
+        native: Some(native),
+        owner: Arc::clone(owner),
+    })
+}
+
+#[cfg(test)]
+fn with_mapped_write(buffer: &OwnedBuffer, bytes: &[u8]) -> Result<(), String> {
+    let range = 0..bytes.len() as u64;
+    match (
+        &buffer.owner.native,
+        buffer.native.as_ref().expect("live staging"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeDevice::Dx12 { device, .. }, NativeBuffer::Dx12(native)) => unsafe {
+            let mapping = device
+                .map_buffer(native, range.clone())
+                .map_err(|e| e.to_string())?;
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
+            if !mapping.is_coherent {
+                device.flush_mapped_ranges(native, core::iter::once(range));
+            }
+            device.unmap_buffer(native);
+        },
+        #[cfg(feature = "vulkan")]
+        (NativeDevice::Vulkan { device, .. }, NativeBuffer::Vulkan(native)) => unsafe {
+            let mapping = device
+                .map_buffer(native, range.clone())
+                .map_err(|e| e.to_string())?;
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
+            if !mapping.is_coherent {
+                device.flush_mapped_ranges(native, core::iter::once(range));
+            }
+            device.unmap_buffer(native);
+        },
+        _ => return Err("staging backend mismatch".into()),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn with_mapped_read(buffer: &OwnedBuffer, size: u64) -> Result<Vec<u8>, String> {
+    let range = 0..size;
+    let mut result = vec![0; size as usize];
+    match (
+        &buffer.owner.native,
+        buffer.native.as_ref().expect("live staging"),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeDevice::Dx12 { device, .. }, NativeBuffer::Dx12(native)) => unsafe {
+            let mapping = device
+                .map_buffer(native, range.clone())
+                .map_err(|e| e.to_string())?;
+            if !mapping.is_coherent {
+                device.invalidate_mapped_ranges(native, core::iter::once(range));
+            }
+            core::ptr::copy_nonoverlapping(mapping.ptr.as_ptr(), result.as_mut_ptr(), result.len());
+            device.unmap_buffer(native);
+        },
+        #[cfg(feature = "vulkan")]
+        (NativeDevice::Vulkan { device, .. }, NativeBuffer::Vulkan(native)) => unsafe {
+            let mapping = device
+                .map_buffer(native, range.clone())
+                .map_err(|e| e.to_string())?;
+            if !mapping.is_coherent {
+                device.invalidate_mapped_ranges(native, core::iter::once(range));
+            }
+            core::ptr::copy_nonoverlapping(mapping.ptr.as_ptr(), result.as_mut_ptr(), result.len());
+            device.unmap_buffer(native);
+        },
+        _ => return Err("staging backend mismatch".into()),
+    }
+    Ok(result)
+}
+
+fn copy_base(mip_level: u32, origin: [u32; 3]) -> wgpu_hal::TextureCopyBase {
+    wgpu_hal::TextureCopyBase {
+        mip_level,
+        array_layer: 0,
+        origin: wgt::Origin3d {
+            x: origin[0],
+            y: origin[1],
+            z: origin[2],
+        },
+        aspect: wgpu_hal::FormatAspects::COLOR,
+    }
+}
+
+fn texture_range(
+    descriptor: TextureDesc,
+    range: TextureRange,
+) -> Result<wgt::ImageSubresourceRange, String> {
+    Ok(match range {
+        TextureRange::Whole => wgt::ImageSubresourceRange {
+            aspect: wgt::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(descriptor.mip_levels),
+            base_array_layer: 0,
+            array_layer_count: Some(descriptor.array_layers),
+        },
+        TextureRange::Subresources {
+            base_mip_level,
+            mip_level_count,
+            base_array_layer,
+            array_layer_count,
+            aspect,
+        } => wgt::ImageSubresourceRange {
+            aspect: match aspect {
+                TextureAspect::Color => wgt::TextureAspect::All,
+                TextureAspect::Depth => wgt::TextureAspect::DepthOnly,
+                TextureAspect::Stencil => wgt::TextureAspect::StencilOnly,
+                _ => return Err("unsupported texture aspect".into()),
+            },
+            base_mip_level,
+            mip_level_count: Some(mip_level_count),
+            base_array_layer,
+            array_layer_count: Some(array_layer_count),
+        },
+    })
+}
+
+fn buffer_state(state: ResourceAccessState) -> Result<wgt::BufferUses, String> {
+    Ok(match state {
+        ResourceAccessState::Undefined => wgt::BufferUses::empty(),
+        ResourceAccessState::ShaderStorageRead => wgt::BufferUses::STORAGE_READ_ONLY,
+        ResourceAccessState::ShaderStorageWrite | ResourceAccessState::ShaderStorageReadWrite => {
+            wgt::BufferUses::STORAGE_READ_WRITE
+        }
+        ResourceAccessState::UniformRead => wgt::BufferUses::UNIFORM,
+        ResourceAccessState::VertexRead => wgt::BufferUses::VERTEX,
+        ResourceAccessState::IndexRead => wgt::BufferUses::INDEX,
+        ResourceAccessState::IndirectRead => wgt::BufferUses::INDIRECT,
+        ResourceAccessState::CopySource => wgt::BufferUses::COPY_SRC,
+        ResourceAccessState::CopyDestination => wgt::BufferUses::COPY_DST,
+        _ => return Err("texture-only state used for buffer transition".into()),
+    })
+}
+
+fn texture_state(state: ResourceAccessState) -> Result<wgt::TextureUses, String> {
+    Ok(match state {
+        ResourceAccessState::Undefined => wgt::TextureUses::UNINITIALIZED,
+        ResourceAccessState::ColorAttachmentRead
+        | ResourceAccessState::ColorAttachmentWrite
+        | ResourceAccessState::ColorAttachmentReadWrite => wgt::TextureUses::COLOR_TARGET,
+        ResourceAccessState::DepthStencilRead => wgt::TextureUses::DEPTH_STENCIL_READ,
+        ResourceAccessState::DepthStencilWrite | ResourceAccessState::DepthStencilReadWrite => {
+            wgt::TextureUses::DEPTH_STENCIL_WRITE
+        }
+        ResourceAccessState::ShaderSampledRead => wgt::TextureUses::RESOURCE,
+        ResourceAccessState::ShaderStorageRead => wgt::TextureUses::STORAGE_READ_ONLY,
+        ResourceAccessState::ShaderStorageWrite => wgt::TextureUses::STORAGE_WRITE_ONLY,
+        ResourceAccessState::ShaderStorageReadWrite => wgt::TextureUses::STORAGE_READ_WRITE,
+        ResourceAccessState::CopySource => wgt::TextureUses::COPY_SRC,
+        ResourceAccessState::CopyDestination => wgt::TextureUses::COPY_DST,
+        ResourceAccessState::Present => wgt::TextureUses::PRESENT,
+        _ => return Err("buffer-only state used for texture transition".into()),
+    })
 }
 
 fn resource_error(backend: Backend, error: impl core::fmt::Display) -> ResourceCreateError {

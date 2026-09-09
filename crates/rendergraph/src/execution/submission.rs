@@ -49,7 +49,7 @@ impl<B: ExecutionBackend> FrameSubmission<B> {
         let status = backend.completion_status(self.completion());
         if matches!(
             status,
-            CompletionStatus::Complete | CompletionStatus::Failed
+            CompletionStatus::Complete | CompletionStatus::Failed(_)
         ) {
             self.leases.take();
             self.settled = true;

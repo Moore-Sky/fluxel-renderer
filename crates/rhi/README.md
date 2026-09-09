@@ -2,19 +2,21 @@
 
 `fluxel-rhi` opens one headless Direct3D 12 or Vulkan device on Windows and
 creates opaque owned buffers and 2D textures through a safe portable contract.
+Its copy-only backend executes the same compiled RenderGraph plan on both APIs,
+including semantic transition lowering, one queue submission, completion, and
+retirement.
 
-It is deliberately a narrow 0.1.1 milestone, not a general graphics API. It
-does **not** record commands, submit work, map/read back memory, acquire or
-present a surface, compile shaders, or implement
-`fluxel_rendergraph::ExecutionBackend`. The render-graph crate's CPU-only
-`TestRhi` remains the executable backend used by the numbered graph examples.
+It is deliberately a narrow 0.1.2 milestone, not a general graphics API. It
+implements only RenderGraph Copy commands. It does **not** expose general
+mapping/readback, acquire or present a surface, compile shaders, dispatch
+compute, draw raster work, use multiple queues, or alias transient resources.
 
 ## Installation
 
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.1"
+tag = "v0.1.2"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -26,7 +28,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.1"
+tag = "v0.1.2"
 default-features = false
 features = ["dx12"]
 ```
@@ -68,7 +70,14 @@ cargo run -p fluxel-rhi --example 01_open_device -- vulkan
 typed descriptors and usage sets before entering the native boundary. Returned
 resources expose only descriptor, actual allowed usage, opaque identity and a
 cloneable lease. The final resource or lease destroys the native object once;
-it also retains the owning device. There are no raw handles or submission APIs.
+it also retains the owning device. Requested usage is a minimum: native
+normalization may report a wider allowed set, such as buffer `StorageWrite`
+becoming storage read/write. There are no raw handles.
+
+`CopyBackend` implements the execution SPI with one logical queue and one
+command buffer per graph execution. It rejects compute and raster families.
+Accepted submissions expose structured pending/complete/failure status and
+retain referenced resources until completion is safe to retire.
 
 ## Core concepts
 
@@ -117,8 +126,9 @@ establish the requested facility, opening fails with
 `OpenError::ValidationUnavailable` rather than continuing with a weaker
 configuration.
 
-Validation covers device opening and native resource creation today. It cannot
-validate command states or synchronization until those operations exist.
+The 0.1.2 conformance fixtures also collect DX12 information-queue and Vulkan
+validation diagnostics programmatically while checking command states and
+synchronization.
 
 ## Platform compatibility
 
@@ -137,10 +147,9 @@ makes no frame-time, throughput, allocation, synchronization, or
 GPU-performance claim. It keeps native objects in a private backend module to
 establish a safe ownership boundary for later vertical slices.
 
-The current scope ends after owned resource creation, actual-usage reporting,
-and lease-backed destruction. Native execution conformance still needs
-transition/barrier emission, command recording, submission/completion and
-readback.
+The current scope ends after copy-only transition/order lowering, command
+recording, one submission, completion, lease retirement, and crate-private test
+readback. Compute and raster are later vertical slices.
 
 ## Testing and development
 

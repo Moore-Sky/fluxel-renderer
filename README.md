@@ -12,7 +12,7 @@ The workspace is organised around three crates:
 | Crate | Responsibility |
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
-| `fluxel-rhi` | Headless DX12/Vulkan device bootstrap, native backend boundary, and hardware capability reporting. |
+| `fluxel-rhi` | Headless DX12/Vulkan ownership plus copy-only RenderGraph execution and hardware conformance. |
 | `fluxel-renderer` | The renderer-facing layer: scene/domain data, draw-list construction, and its internal shader boundary. |
 
 All three packages are present at the current baseline. The renderer crate
@@ -40,16 +40,16 @@ cargo +1.87.0 clippy --workspace --all-targets --all-features --locked -- -D war
 ```
 
 The graph compiler and `TestRhi` are CPU-only. `fluxel-rhi` provides
-headless DX12 and Vulkan bootstrap on Windows when the native loader and driver
-are available. Its CI coverage is a native compile/link gate; opening real
-hardware is opt-in.
+headless DX12 and Vulkan copy execution on Windows when the native loader and
+driver are available. CI is a compile/link gate; real-GPU C01/C02/C03
+conformance remains an explicit local release gate.
 
 ## Roadmap
 
-`0.1.0` has graph planning, CPU protocol validation, DX12/Vulkan device
-bootstrap, physical-resource usage contracts, and the first headless renderer
-domain types. It does **not** yet create native GPU resources, execute GPU
-commands, compile shaders, read back results, or present a surface.
+Through `0.1.2`, the workspace has graph planning, CPU protocol validation,
+DX12/Vulkan owned resources, and a copy/barrier/submit/completion/readback
+correctness slice. It does **not** yet dispatch compute, draw raster work,
+lower renderer scenes, or present a surface.
 
 | Component | Next milestones |
 | --- | --- |

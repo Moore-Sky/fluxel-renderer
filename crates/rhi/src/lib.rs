@@ -1,16 +1,20 @@
-//! Native GPU bootstrap for Fluxel execution.
+//! Native GPU ownership and copy execution for Fluxel.
 //!
-//! This crate deliberately exposes no `wgpu-hal` types. At this stage it can
-//! open one headless DX12 or Vulkan device and report the unmodified hardware
-//! facts used to do so; command recording is introduced by later milestones.
+//! This crate exposes no `wgpu-hal` types. It opens one headless DX12 or Vulkan
+//! device, owns buffers and 2D textures, and executes the copy-only subset of a
+//! portable RenderGraph plan through barriers, one submission, completion, and
+//! lease-backed retirement. Compute, raster, surfaces, and presentation remain
+//! outside this milestone.
 
 #![deny(missing_docs)]
 
 use core::fmt;
 use std::sync::Arc;
 
+mod execution;
 mod resource;
 
+pub use execution::*;
 pub use resource::*;
 
 /// A native graphics API supported by Fluxel's Windows RHI.
@@ -104,7 +108,7 @@ pub struct HardwareCapabilities {
     pub min_storage_buffer_offset_alignment: u32,
 }
 
-/// A headless native device that has not yet recorded or submitted work.
+/// A headless native device that owns resources and copy-queue execution.
 pub struct Device {
     #[allow(
         dead_code,
@@ -116,11 +120,23 @@ pub struct Device {
     capabilities: HardwareCapabilities,
 }
 
+impl Clone for Device {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            identity: self.identity,
+            hardware: self.hardware.clone(),
+            capabilities: self.capabilities,
+        }
+    }
+}
+
 impl Device {
     /// Opens one explicitly selected backend and adapter for headless use.
     ///
-    /// This method contains all HAL `unsafe` calls, creates no surface, and
-    /// exposes no native handles. No command submission occurs in 0.1.1.
+    /// This method enters the private HAL boundary, creates no surface, and
+    /// exposes no native handles. Copy submission is available separately
+    /// through [`CopyBackend`].
     pub fn open(backend: Backend, options: DeviceOptions) -> Result<Self, OpenError> {
         let opened = imp::open(backend, options)?;
         Ok(Self {
@@ -434,9 +450,12 @@ mod imp;
 mod imp {
     use super::{
         Backend, BufferDescriptor, DeviceOptions, HardwareCapabilities, HardwareInfo, OpenError,
-        ResourceCreateError, TextureDescriptor,
+        ResourceCreateError, ResourceLease, TextureDescriptor,
     };
-    use fluxel_rendergraph::{BufferUsage, TextureUsage};
+    use fluxel_rendergraph::{
+        BufferCopyRegion, BufferUsage, CompletionFailure, CompletionStatus, ResourceAccessState,
+        TextureCopyRegion, TextureDesc, TextureRange, TextureUsage,
+    };
     use std::sync::Arc;
     pub(super) struct OpenedDevice {
         pub(super) hardware: HardwareInfo,
@@ -444,6 +463,10 @@ mod imp {
     }
     pub(super) struct OwnedBuffer;
     pub(super) struct OwnedTexture;
+    pub(super) struct CopyEncoder;
+    pub(super) struct CopyCommandBuffer;
+    #[derive(Clone)]
+    pub(super) struct NativeCompletion;
     pub(super) fn open(backend: Backend, _: DeviceOptions) -> Result<OpenedDevice, OpenError> {
         Err(OpenError::PlatformUnsupported { backend })
     }
@@ -464,5 +487,61 @@ mod imp {
             backend: owner.hardware.backend,
             reason: "native resources are only supported on Windows".into(),
         })
+    }
+    pub(super) fn begin_copy_encoder(_: &Arc<OpenedDevice>) -> Result<CopyEncoder, String> {
+        Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn transition_texture(
+        _: &mut CopyEncoder,
+        _: &OwnedTexture,
+        _: TextureDesc,
+        _: TextureRange,
+        _: ResourceAccessState,
+        _: ResourceAccessState,
+    ) -> Result<(), String> {
+        Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn transition_buffer(
+        _: &mut CopyEncoder,
+        _: &OwnedBuffer,
+        _: ResourceAccessState,
+        _: ResourceAccessState,
+    ) -> Result<(), String> {
+        Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn copy_texture(
+        _: &mut CopyEncoder,
+        _: &OwnedTexture,
+        _: &OwnedTexture,
+        _: TextureDesc,
+        _: TextureCopyRegion,
+    ) -> Result<(), String> {
+        Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn copy_buffer(
+        _: &mut CopyEncoder,
+        _: &OwnedBuffer,
+        _: &OwnedBuffer,
+        _: BufferCopyRegion,
+    ) -> Result<(), String> {
+        Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn finish_copy_encoder(_: CopyEncoder) -> Result<CopyCommandBuffer, String> {
+        Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn submit_copy(
+        _: CopyCommandBuffer,
+        _: Vec<ResourceLease>,
+    ) -> Result<NativeCompletion, String> {
+        Err("native execution is only supported on Windows".into())
+    }
+    pub(super) fn completion_status(_: &NativeCompletion) -> Result<CompletionStatus, String> {
+        Ok(CompletionStatus::Failed(CompletionFailure::DeviceLost))
+    }
+    pub(super) fn wait_completion(
+        _: &NativeCompletion,
+        _: core::time::Duration,
+    ) -> Result<CompletionStatus, String> {
+        Ok(CompletionStatus::Failed(CompletionFailure::DeviceLost))
     }
 }

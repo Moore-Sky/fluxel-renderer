@@ -9,17 +9,17 @@ ad-hoc command recording order.
 
 The current release supplies the declaration/compiler contract and a
 single-queue execution SPI verified by the deterministic CPU-only `TestRhi`.
-It does **not** yet record or submit native DX12/Vulkan commands. The companion
+The companion
 [`fluxel-rhi`](https://github.com/Moore-Sky/fluxel-renderer/tree/main/crates/rhi)
-crate currently provides headless device bootstrap, not that execution
-backend.
+crate implements its Copy-only subset on native DX12 and Vulkan. Compute,
+raster, surfaces, and renderer lowering remain outside that native slice.
 
 ## Installation
 
 ```toml
 [dependencies.fluxel-rendergraph]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.0"
+tag = "v0.1.2"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is

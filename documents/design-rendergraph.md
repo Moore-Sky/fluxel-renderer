@@ -1,6 +1,6 @@
 # Fluxel RenderGraph architecture
 
-**Status: 0.1.0 migration baseline**
+**Status: 0.1.2 copy-execution contract**
 
 This workspace starts its own release sequence at `0.1.0`. Its code was
 imported from a pre-migration snapshot; prior version numbers and Git history
@@ -126,7 +126,9 @@ Graph-created resources are transient logical declarations. External resources
 are stable import slots with static descriptor, incoming state, ownership, and
 initial-content contracts; concrete objects are supplied per frame. Exports are
 roots with outgoing-state contracts. Imported leases survive until full-frame
-completion, not merely submission.
+completion, not merely submission. Each exported value reports that outgoing
+state alongside its physical object and lease, so a graph-external consumer
+such as readback must use the graph result as its actual incoming state.
 
 Incoming state and incoming contents are intentionally separate. A resource in
 a readable native state is not necessarily initialized, so ordinary imports
@@ -222,6 +224,13 @@ export leases remain caller-owned. Re-entrant executor operations report
 `ExecutorBusy` instead of waiting while a backend lock is held. These rules
 make safe native lifetime behavior part of the protocol without putting native
 handles into graph state.
+
+`CompletionStatus` distinguishes pending, complete, and an accepted
+submission's structured terminal failure (`DeviceLost` or
+`ExecutionFailed`). A backend may return submit `Err` only when it knows no GPU
+work was accepted. Accepted-unknown native errors must instead produce a
+completion and retain or quarantine every referenced object; they cannot be
+treated as an unsubmitted command buffer.
 
 ## Capabilities: facts, not a feature wishlist
 

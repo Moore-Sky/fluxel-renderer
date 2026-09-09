@@ -33,8 +33,18 @@ pub enum CompletionStatus {
     Pending,
     /// The submission completed successfully.
     Complete,
-    /// The submission cannot complete successfully.
-    Failed,
+    /// The accepted submission reached a terminal failure.
+    Failed(CompletionFailure),
+}
+
+/// Why an accepted submission reached a terminal failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CompletionFailure {
+    /// The native device was lost while work was pending.
+    DeviceLost,
+    /// The backend reported another terminal execution failure.
+    ExecutionFailed,
 }
 
 /// Minimal single-queue backend contract used by future graph execution.

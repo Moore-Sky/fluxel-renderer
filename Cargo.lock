@@ -304,7 +304,7 @@ version = "0.1.0"
 
 [[package]]
 name = "fluxel-rendergraph"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "clap",
  "criterion",
@@ -312,10 +312,11 @@ dependencies = [
 
 [[package]]
 name = "fluxel-rhi"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ash",
  "fluxel-rendergraph",
+ "log",
  "ordered-float",
  "wgpu-hal",
  "wgpu-types",

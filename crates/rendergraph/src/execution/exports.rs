@@ -21,6 +21,8 @@ pub struct ExportedTexture<B: ExecutionBackend> {
     pub physical: B::Texture,
     /// Descriptor of the exported texture.
     pub descriptor: TextureDesc,
+    /// State established by the graph's final transition for this export.
+    pub outgoing_state: crate::rhi::ResourceAccessState,
     /// Caller-owned strong lease; completion alone does not invalidate it.
     pub lease: B::Lease,
 }
@@ -31,6 +33,8 @@ pub struct ExportedBuffer<B: ExecutionBackend> {
     pub physical: B::Buffer,
     /// Descriptor of the exported buffer.
     pub descriptor: BufferDesc,
+    /// State established by the graph's final transition for this export.
+    pub outgoing_state: crate::rhi::ResourceAccessState,
     /// Caller-owned strong lease; completion alone does not invalidate it.
     pub lease: B::Lease,
 }
@@ -86,7 +90,7 @@ pub(super) fn build_exports<B: ExecutionBackend, F>(
     let mut buffers = Vec::new();
     for root in &graph.roots {
         match *root {
-            RootDecl::Texture(slot, resource, _, _) => {
+            RootDecl::Texture(slot, resource, _, contract) => {
                 let PhysicalResource::Texture {
                     physical,
                     descriptor,
@@ -99,11 +103,12 @@ pub(super) fn build_exports<B: ExecutionBackend, F>(
                     ExportedTexture {
                         physical: physical.clone(),
                         descriptor: *descriptor,
+                        outgoing_state: contract.final_state,
                         lease: leases[&resource].clone(),
                     },
                 ));
             }
-            RootDecl::Buffer(slot, resource, _, _) => {
+            RootDecl::Buffer(slot, resource, _, contract) => {
                 let PhysicalResource::Buffer {
                     physical,
                     descriptor,
@@ -116,6 +121,7 @@ pub(super) fn build_exports<B: ExecutionBackend, F>(
                     ExportedBuffer {
                         physical: physical.clone(),
                         descriptor: *descriptor,
+                        outgoing_state: contract.final_state,
                         lease: leases[&resource].clone(),
                     },
                 ));

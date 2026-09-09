@@ -1,12 +1,13 @@
 # Fluxel RHI Design
 
-**Status: 0.1.1 owned-resource baseline**
+**Status: 0.1.2 copy correctness vertical slice**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
-not a promise of a complete RHI. In 0.1.1 the crate safely opens one headless
-DX12 or Vulkan device on Windows and creates lease-backed owned buffers and
-textures with verified actual usage. It does not implement `ExecutionBackend`, command encoding,
-submission, completion, readback, surfaces, or presentation.
+not a promise of a complete RHI. In 0.1.2 the crate opens one headless DX12 or
+Vulkan device on Windows, creates lease-backed owned resources, and implements
+the copy-only portion of `ExecutionBackend`: semantic transition lowering, recording, one
+submission, completion, retirement, and crate-private test readback. It does
+not implement compute, raster, surfaces, or presentation.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that
@@ -26,8 +27,8 @@ fluxel-rendergraph                    fluxel-rhi
 graph declaration                     explicit DX12/Vulkan selection
 compile / immutable plan              headless adapter enumeration
 creation-usage requirements           native device and queue ownership
-ExecutionBackend contract       -->   future contract implementation
-TestRhi deterministic execution       future native GPU execution
+ExecutionBackend contract       -->   copy-only contract implementation
+TestRhi deterministic execution       copy-only native GPU execution
 ```
 
 `fluxel-rendergraph` owns dependency, version, culling, access-state, and
@@ -70,8 +71,18 @@ Creation reuses RenderGraph's typed descriptors and usage sets. Malformed
 shapes, incompatible format/usage combinations, and `Present` on an ordinary
 owned texture fail before creation. Reported allowed usage is the conservative
 portable projection of the successful HAL creation descriptor and format
-facts. It is an authorization upper bound, not an exhaustive claim about every
-operation a physical API might technically permit (notably DX12 buffers).
+facts. Descriptor usage is the caller's requested minimum and the result obeys
+`requested ⊆ allowed`. Native normalization may widen that set and must report
+the widening; buffer `StorageWrite`, for example, becomes storage read/write
+rather than pretending that a native write-only storage capability exists.
+
+The copy backend uses one logical queue, one serial encoder, and one submission.
+Same-state write dependencies remain required ordering/visibility facts. Vulkan
+may emit a native memory barrier; DX12 Copy ordering can satisfy the same fact
+within the serial command list without inventing a state transition. Exported resources
+carry the graph's outgoing state; the test readback helper consumes that exact
+state as its incoming state before transitioning to `CopySource`, so it cannot
+silently repair a wrong graph result.
 
 All HAL calls and all `unsafe` are contained in `src/imp.rs`. Each unsafe block
 documents the validity and lifetime condition it relies on. The safe public
@@ -142,32 +153,32 @@ it is a native compile/link gate. Actual device-open and required-validation
 tests are `#[ignore]`, because a hosted runner's installed driver and validation
 layers are environmental facts, not reproducible source-level prerequisites.
 
-Developers run ignored tests explicitly on provisioned hardware. The 0.1.1
-fixture creates buffers and textures on both backends with required native
-validation, verifies exact projected usage and rejection recovery, and exercises
-lease teardown. It establishes resource creation only, not barrier, command, or
+Developers run ignored tests explicitly on provisioned hardware. The 0.1.2
+fixtures execute C01 partial buffer copy, C02 texture copy with padded rows, and
+C03 same-state overlapping WAW separately on both backends. Each compares
+readback with a CPU oracle and requires programmatically collected diagnostics
+to be empty. This establishes copy correctness only, not compute, raster, or
 presentation conformance.
 
 ## Evolution constraints
 
-Future work is vertical rather than speculative. A native `ExecutionBackend`
-implementation begins only when it can honor the core contract end to end:
+Further work remains vertical rather than speculative. The copy-only native
+`ExecutionBackend` honors the current core contract end to end:
 
 1. Allocate transient resources from the compiled usage summary and report the
    actual allowed operation set for every transient and import, allowing core
    frame resolution to validate the required subset.
-2. Map compiled state transitions to native barriers.
-3. Record declared copy/compute/raster work and resolve only authorized
-   pass-local resources.
-4. Submit work, expose completion, retain leases until completion, then add
-   readback and native conformance tests.
-5. Add surface acquisition/presentation and multi-queue lowering only with
+2. Map compiled state transitions to backend-correct barriers or ordering.
+3. Record declared Copy work and resolve only authorized pass-local resources.
+4. Submit work, expose completion, retain leases until completion, and validate
+   crate-private readback against native conformance oracles.
+5. Add compute, raster, surface acquisition/presentation, and multi-queue only with
    explicit ownership and synchronization semantics.
 
-Until those slices land, the correct user model is: `fluxel-rhi` opens and
-describes a native device; `TestRhi` executes the render-graph execution
-contract deterministically on the CPU. The crate must not imply otherwise in
-its API, examples, benchmarks, or release notes.
+The current user model is: `fluxel-rhi` executes only Copy plans on native
+DX12/Vulkan; `TestRhi` remains the deterministic CPU contract backend. The
+crate must not imply compute, raster, surface, or renderer support in its API,
+examples, benchmarks, or release notes.
 
 ## Portable lowering constraints
 

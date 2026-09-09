@@ -122,6 +122,7 @@ struct BufferShared {
 }
 
 /// One opaque owned native buffer.
+#[derive(Clone)]
 pub struct Buffer(Arc<BufferShared>);
 
 /// A cloneable lifetime token for a buffer.
@@ -137,11 +138,22 @@ struct TextureShared {
 }
 
 /// One opaque owned native texture.
+#[derive(Clone)]
 pub struct Texture(Arc<TextureShared>);
 
 /// A cloneable lifetime token for a texture.
 #[derive(Clone)]
 pub struct TextureLease(Arc<TextureShared>);
+
+/// A type-erased strong lease retained by native frame submissions.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ResourceLease {
+    /// Retains one buffer allocation.
+    Buffer(BufferLease),
+    /// Retains one texture allocation.
+    Texture(TextureLease),
+}
 
 macro_rules! resource_accessors {
     ($resource:ident, $lease:ident, $shared:ident, $desc:ty, $usage:ty) => {
@@ -151,6 +163,10 @@ macro_rules! resource_accessors {
                 self.0.descriptor
             }
             /// Returns operations proven by the final native creation facts.
+            ///
+            /// This is an authorization upper bound, not necessarily the exact
+            /// requested set. Native normalization may widen a request; for
+            /// example, buffer storage write is reported as storage read/write.
             pub fn allowed_usage(&self) -> $usage {
                 self.0.allowed_usage
             }
@@ -200,6 +216,30 @@ resource_accessors!(
     TextureDescriptor,
     TextureUsage
 );
+
+impl From<BufferLease> for ResourceLease {
+    fn from(value: BufferLease) -> Self {
+        Self::Buffer(value)
+    }
+}
+
+impl From<TextureLease> for ResourceLease {
+    fn from(value: TextureLease) -> Self {
+        Self::Texture(value)
+    }
+}
+
+impl Buffer {
+    pub(crate) fn native(&self) -> &crate::imp::OwnedBuffer {
+        &self.0._native
+    }
+}
+
+impl Texture {
+    pub(crate) fn native(&self) -> &crate::imp::OwnedTexture {
+        &self.0._native
+    }
+}
 
 impl Device {
     /// Creates a native buffer after validating and lowering its portable contract.

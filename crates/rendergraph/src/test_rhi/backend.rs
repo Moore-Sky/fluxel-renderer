@@ -149,7 +149,10 @@ impl TestRhi {
 
     /// Marks a submitted token as failed.
     pub fn fail(&mut self, completion: TestCompletion) {
-        self.completion.insert(completion, CompletionStatus::Failed);
+        self.completion.insert(
+            completion,
+            CompletionStatus::Failed(crate::backend::CompletionFailure::ExecutionFailed),
+        );
     }
 
     /// Returns the number of retirement entries that still retain leases.
@@ -603,7 +606,9 @@ impl ExecutionBackend for TestRhi {
         self.completion
             .get(_completion)
             .copied()
-            .unwrap_or(CompletionStatus::Failed)
+            .unwrap_or(CompletionStatus::Failed(
+                crate::backend::CompletionFailure::ExecutionFailed,
+            ))
     }
     fn retire(&mut self, _completion: TestCompletion, _leases: Vec<TestLease>) {
         if self.trace_enabled {
@@ -626,7 +631,9 @@ impl ExecutionBackend for TestRhi {
             completion
                 .get(&entry.completion)
                 .copied()
-                .unwrap_or(CompletionStatus::Failed)
+                .unwrap_or(CompletionStatus::Failed(
+                    crate::backend::CompletionFailure::ExecutionFailed,
+                ))
                 == CompletionStatus::Pending
         });
         Ok(before - self.retired.len())
