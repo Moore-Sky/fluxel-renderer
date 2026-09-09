@@ -9,6 +9,7 @@ pub(crate) const FRAME_UNIFORM_BYTES: usize = 80;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FrameUniform {
     bytes: [u8; FRAME_UNIFORM_BYTES],
+    view_projection: [[f32; 4]; 4],
 }
 
 impl FrameUniform {
@@ -43,12 +44,20 @@ impl FrameUniform {
             let start = 64 + index * 4;
             bytes[start..start + 4].copy_from_slice(&value.to_bits().to_le_bytes());
         }
-        Ok(Self { bytes })
+        Ok(Self {
+            bytes,
+            view_projection: matrix,
+        })
     }
 
     /// Returns the exact immutable-upload payload.
     pub(crate) fn bytes(&self) -> &[u8; FRAME_UNIFORM_BYTES] {
         &self.bytes
+    }
+
+    /// Returns the validated column-major projection-times-view matrix.
+    pub(crate) const fn view_projection(&self) -> &[[f32; 4]; 4] {
+        &self.view_projection
     }
 }
 

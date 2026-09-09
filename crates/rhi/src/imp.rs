@@ -17,7 +17,8 @@
 
 use crate::{
     Backend, BufferDescriptor, BufferUploadStage, DeviceKind, DeviceOptions, HardwareCapabilities,
-    HardwareInfo, OpenError, ResourceCreateError, ResourceLease, TextureDescriptor, Validation,
+    HardwareInfo, OpenError, ResourceCreateError, ResourceLease, TextureDescriptor,
+    TextureUploadStage, Validation,
 };
 use fluxel_rendergraph::{
     BufferCopyRegion, BufferUsage, BufferUsageKind, CompletionFailure, CompletionStatus,
@@ -104,6 +105,8 @@ pub(super) struct OwnedBuffer {
 pub(super) struct OwnedTexture {
     native: Option<NativeTexture>,
     owner: Arc<OpenedDevice>,
+    descriptor: TextureDesc,
+    allowed_usage: TextureUsage,
 }
 
 pub(super) struct CopyEncoder {
@@ -282,6 +285,25 @@ enum NativeRasterPipelineInner {
 pub(super) struct NativeRasterUniformBindings {
     native: Option<NativeRasterUniformBindingsInner>,
     pipeline: NativeRasterPipeline,
+}
+
+/// Private holder for the closed textured raster bind group and texture view.
+pub(super) struct NativeRasterTextureBindings {
+    native: Option<NativeRasterTextureBindingsInner>,
+    pipeline: NativeRasterPipeline,
+}
+
+enum NativeRasterTextureBindingsInner {
+    #[cfg(feature = "dx12")]
+    Dx12 {
+        group: wgpu_hal::dx12::BindGroup,
+        view: wgpu_hal::dx12::TextureView,
+    },
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        group: wgpu_hal::vulkan::BindGroup,
+        view: wgpu_hal::vulkan::TextureView,
+    },
 }
 
 #[allow(
@@ -535,12 +557,15 @@ pub(super) fn create_texture(
             )
         }
     };
+    let allowed_usage = texture_usage_from_native(native_usage, texture.format);
     Ok((
         OwnedTexture {
             native: Some(native),
             owner: Arc::clone(owner),
+            descriptor: texture,
+            allowed_usage,
         },
-        texture_usage_from_native(native_usage, texture.format),
+        allowed_usage,
     ))
 }
 
@@ -666,6 +691,38 @@ impl Drop for NativeRasterUniformBindings {
                 device.destroy_bind_group(group)
             },
             _ => unreachable!("raster uniform binding and device backend always match"),
+        }
+    }
+}
+
+impl Drop for NativeRasterTextureBindings {
+    fn drop(&mut self) {
+        let native = self
+            .native
+            .take()
+            .expect("raster texture bindings destroyed once");
+        match (&self.pipeline.0.owner.native, native) {
+            #[cfg(feature = "dx12")]
+            (
+                NativeDevice::Dx12 { device, .. },
+                NativeRasterTextureBindingsInner::Dx12 { group, view },
+            ) => unsafe {
+                // SAFETY: the retained pipeline owns this matching device and
+                // layout; ResourceLease keeps the group/view and their bound
+                // resources alive until terminal queue completion.
+                device.destroy_bind_group(group);
+                device.destroy_texture_view(view);
+            },
+            #[cfg(feature = "vulkan")]
+            (
+                NativeDevice::Vulkan { device, .. },
+                NativeRasterTextureBindingsInner::Vulkan { group, view },
+            ) => unsafe {
+                // SAFETY: same device/layout/lifetime proof as DX12.
+                device.destroy_bind_group(group);
+                device.destroy_texture_view(view);
+            },
+            _ => unreachable!("textured raster bindings and device backend always match"),
         }
     }
 }
@@ -1237,6 +1294,13 @@ pub(super) fn create_raster_pipeline(
                 attributes: &position_f32x3_attributes,
             })]
         }
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture => {
+            vec![Some(wgpu_hal::VertexBufferLayout {
+                array_stride: 12,
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: &position_f32x3_attributes,
+            })]
+        }
     };
     let color_targets = [Some(wgt::ColorTargetState::from(
         wgt::TextureFormat::Rgba8Unorm,
@@ -1251,6 +1315,25 @@ pub(super) fn create_raster_pipeline(
         },
         count: None,
     }];
+    let textured_frame_entries = [
+        frame_uniform_entries[0],
+        wgt::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgt::ShaderStages::FRAGMENT,
+            ty: wgt::BindingType::Texture {
+                sample_type: wgt::TextureSampleType::Float { filterable: false },
+                view_dimension: wgt::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+    ];
+    let raster_binding_entries: &[wgt::BindGroupLayoutEntry] =
+        if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture {
+            &textured_frame_entries
+        } else {
+            &frame_uniform_entries
+        };
     let constants = naga::back::PipelineConstants::default();
     let native = match &owner.native {
         #[cfg(feature = "dx12")]
@@ -1288,31 +1371,34 @@ pub(super) fn create_raster_pipeline(
                     )));
                 }
             };
-            let bind_group_layout =
-                if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial {
-                    match unsafe {
-                        // SAFETY: the static one-entry descriptor is valid and
-                        // its entries live through this creation call.
-                        device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
-                            label: Some("fluxel fixed camera/material frame layout"),
-                            flags: wgpu_hal::BindGroupLayoutFlags::empty(),
-                            entries: &frame_uniform_entries,
-                        })
-                    } {
-                        Ok(value) => Some(value),
-                        Err(e) => {
-                            unsafe {
-                                device.destroy_shader_module(fragment_shader);
-                                device.destroy_shader_module(vertex_shader)
-                            };
-                            return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
-                                "DX12 raster bind-group-layout creation failed: {e}"
-                            )));
-                        }
+            let bind_group_layout = if matches!(
+                kernel,
+                crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                match unsafe {
+                    // SAFETY: the static one-entry descriptor is valid and
+                    // its entries live through this creation call.
+                    device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+                        label: Some("fluxel fixed camera/material frame layout"),
+                        flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+                        entries: raster_binding_entries,
+                    })
+                } {
+                    Ok(value) => Some(value),
+                    Err(e) => {
+                        unsafe {
+                            device.destroy_shader_module(fragment_shader);
+                            device.destroy_shader_module(vertex_shader)
+                        };
+                        return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
+                            "DX12 raster bind-group-layout creation failed: {e}"
+                        )));
                     }
-                } else {
-                    None
-                };
+                }
+            } else {
+                None
+            };
             let layout_result = if let Some(ref bgl) = bind_group_layout {
                 let layouts = [Some(bgl)];
                 unsafe {
@@ -1444,30 +1530,33 @@ pub(super) fn create_raster_pipeline(
                     )));
                 }
             };
-            let bind_group_layout =
-                if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial {
-                    match unsafe {
-                        // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.
-                        device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
-                            label: Some("fluxel fixed camera/material frame layout"),
-                            flags: wgpu_hal::BindGroupLayoutFlags::empty(),
-                            entries: &frame_uniform_entries,
-                        })
-                    } {
-                        Ok(value) => Some(value),
-                        Err(e) => {
-                            unsafe {
-                                device.destroy_shader_module(fragment_shader);
-                                device.destroy_shader_module(vertex_shader)
-                            };
-                            return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
-                                "Vulkan raster bind-group-layout creation failed: {e}"
-                            )));
-                        }
+            let bind_group_layout = if matches!(
+                kernel,
+                crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                match unsafe {
+                    // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.
+                    device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+                        label: Some("fluxel fixed camera/material frame layout"),
+                        flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+                        entries: raster_binding_entries,
+                    })
+                } {
+                    Ok(value) => Some(value),
+                    Err(e) => {
+                        unsafe {
+                            device.destroy_shader_module(fragment_shader);
+                            device.destroy_shader_module(vertex_shader)
+                        };
+                        return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
+                            "Vulkan raster bind-group-layout creation failed: {e}"
+                        )));
                     }
-                } else {
-                    None
-                };
+                }
+            } else {
+                None
+            };
             let layout_result = if let Some(ref bgl) = bind_group_layout {
                 let layouts = [Some(bgl)];
                 unsafe {
@@ -1696,6 +1785,209 @@ pub(super) fn set_raster_uniform_bindings(
             encoder.set_bind_group(pipeline_layout, 0, group, &[])
         },
         _ => return Err("raster uniform bindings belong to another native backend".into()),
+    }
+    Ok(())
+}
+
+/// Creates the fixed two-entry textured raster bind group after both safe and
+/// native boundary validation established device affinity and complete ranges.
+pub(super) fn create_raster_texture_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    uniform: &OwnedBuffer,
+    texture: &OwnedTexture,
+) -> Result<NativeRasterTextureBindings, String> {
+    if !Arc::ptr_eq(owner, &pipeline.0.owner)
+        || !Arc::ptr_eq(owner, &uniform.owner)
+        || !Arc::ptr_eq(owner, &texture.owner)
+        || uniform.size != 80
+        || !uniform.allowed_usage.contains(BufferUsageKind::Uniform)
+        || texture.descriptor.dimension != TextureDimension::D2
+        || texture.descriptor.format != TextureFormat::Rgba8Unorm
+        || texture.descriptor.extent.depth != 1
+        || texture.descriptor.mip_levels != 1
+        || texture.descriptor.array_layers != 1
+        || texture.descriptor.sample_count != 1
+        || !texture.allowed_usage.contains(TextureUsageKind::Sampled)
+    {
+        return Err("invalid textured raster binding".into());
+    }
+    let view_desc = wgpu_hal::TextureViewDescriptor {
+        label: Some("fluxel textured raster Rgba8 view"),
+        format: wgt::TextureFormat::Rgba8Unorm,
+        dimension: wgt::TextureViewDimension::D2,
+        usage: wgt::TextureUses::RESOURCE,
+        range: wgt::ImageSubresourceRange {
+            aspect: wgt::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+        },
+    };
+    let entries = [
+        wgpu_hal::BindGroupEntry {
+            binding: 0,
+            resource_index: 0,
+            count: 1,
+        },
+        wgpu_hal::BindGroupEntry {
+            binding: 1,
+            resource_index: 0,
+            count: 1,
+        },
+    ];
+    let size = NonZeroU64::new(80).expect("fixed uniform size");
+    match (
+        &owner.native,
+        pipeline.0.native.as_ref(),
+        uniform.native.as_ref(),
+        texture.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeDevice::Dx12 { device, .. },
+            Some(NativeRasterPipelineInner::Dx12 {
+                bind_group_layout: Some(layout),
+                ..
+            }),
+            Some(NativeBuffer::Dx12(buffer)),
+            Some(NativeTexture::Dx12(image)),
+        ) => {
+            // SAFETY: all handles originate from `owner`; the closed D2 RGBA8,
+            // one-mip/one-layer descriptor and RESOURCE usage were checked above.
+            // `view_desc` and `image` outlive this call, and the returned view is
+            // retained with the bind group until native destruction.
+            let view = unsafe { device.create_texture_view(image, &view_desc) }
+                .map_err(|e| format!("DX12 textured raster view creation failed: {e}"))?;
+            // SAFETY: `layout` belongs to this pipeline/device; binding 0 is the
+            // validated full 80-byte Uniform buffer and binding 1 is the live
+            // RESOURCE view above. Both leases are retained by the public binding
+            // object, and recording/submission is serialized by the queue lock.
+            let group = unsafe {
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel textured raster bindings"),
+                    layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, 0, size)],
+                    samplers: &[],
+                    textures: &[wgpu_hal::TextureBinding {
+                        view: &view,
+                        usage: wgt::TextureUses::RESOURCE,
+                    }],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            };
+            match group {
+                Ok(group) => Ok(NativeRasterTextureBindings {
+                    native: Some(NativeRasterTextureBindingsInner::Dx12 { group, view }),
+                    pipeline: pipeline.clone(),
+                }),
+                Err(e) => {
+                    // SAFETY: creation failed before ownership escaped; `view`
+                    // belongs to this device and has no dependent bind group.
+                    unsafe { device.destroy_texture_view(view) };
+                    Err(format!("DX12 textured raster binding creation failed: {e}"))
+                }
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeDevice::Vulkan { device, .. },
+            Some(NativeRasterPipelineInner::Vulkan {
+                bind_group_layout: Some(layout),
+                ..
+            }),
+            Some(NativeBuffer::Vulkan(buffer)),
+            Some(NativeTexture::Vulkan(image)),
+        ) => {
+            // SAFETY: all handles originate from `owner`; the closed D2 RGBA8,
+            // one-mip/one-layer descriptor and RESOURCE usage were checked above.
+            // `view_desc` and `image` outlive this call, and the returned view is
+            // retained with the bind group until native destruction.
+            let view = unsafe { device.create_texture_view(image, &view_desc) }
+                .map_err(|e| format!("Vulkan textured raster view creation failed: {e}"))?;
+            // SAFETY: `layout` belongs to this pipeline/device; binding 0 is the
+            // validated full 80-byte Uniform buffer and binding 1 is the live
+            // RESOURCE view above. Both leases are retained by the public binding
+            // object, and recording/submission is serialized by the queue lock.
+            let group = unsafe {
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel textured raster bindings"),
+                    layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, 0, size)],
+                    samplers: &[],
+                    textures: &[wgpu_hal::TextureBinding {
+                        view: &view,
+                        usage: wgt::TextureUses::RESOURCE,
+                    }],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            };
+            match group {
+                Ok(group) => Ok(NativeRasterTextureBindings {
+                    native: Some(NativeRasterTextureBindingsInner::Vulkan { group, view }),
+                    pipeline: pipeline.clone(),
+                }),
+                Err(e) => {
+                    // SAFETY: creation failed before ownership escaped; `view`
+                    // belongs to this device and has no dependent bind group.
+                    unsafe { device.destroy_texture_view(view) };
+                    Err(format!(
+                        "Vulkan textured raster binding creation failed: {e}"
+                    ))
+                }
+            }
+        }
+        _ => Err("textured raster bindings do not match textured raster pipeline".into()),
+    }
+}
+
+pub(super) fn set_raster_texture_bindings(
+    encoder: &mut CopyEncoder,
+    bindings: &NativeRasterTextureBindings,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &bindings.pipeline.0.owner)
+        || encoder.active_render_view.is_none()
+        || encoder.active_raster_pipeline != Some(Arc::as_ptr(&bindings.pipeline.0) as usize)
+    {
+        return Err("textured raster binding requires its active raster pipeline".into());
+    }
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        bindings.pipeline.0.native.as_ref(),
+        bindings.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            Some(NativeRasterPipelineInner::Dx12 {
+                pipeline_layout, ..
+            }),
+            Some(NativeRasterTextureBindingsInner::Dx12 { group, .. }),
+        ) => {
+            // SAFETY: device affinity and the currently active matching pipeline
+            // were checked above; group layout slot zero is the closed two-entry
+            // recipe and all resources are retained through command completion.
+            unsafe { encoder.set_bind_group(pipeline_layout, 0, group, &[]) }
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            Some(NativeRasterPipelineInner::Vulkan {
+                pipeline_layout, ..
+            }),
+            Some(NativeRasterTextureBindingsInner::Vulkan { group, .. }),
+        ) => {
+            // SAFETY: device affinity and the currently active matching pipeline
+            // were checked above; group layout slot zero is the closed two-entry
+            // recipe and all resources are retained through command completion.
+            unsafe { encoder.set_bind_group(pipeline_layout, 0, group, &[]) }
+        }
+        _ => return Err("textured raster binding backend mismatch".into()),
     }
     Ok(())
 }
@@ -2255,6 +2547,7 @@ pub(super) fn set_vertex_buffer(
             kernel,
             crate::RasterKernel::IndexedPositionFloat32x3
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
         ) && offset != 0
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
         || size < 12
@@ -3536,6 +3829,95 @@ pub(super) struct TextureReadback {
     pub(super) bytes_per_row: u32,
 }
 
+pub(super) fn upload_immutable_texture(
+    owner: &Arc<OpenedDevice>,
+    target: &OwnedTexture,
+    target_lease: ResourceLease,
+    descriptor: TextureDesc,
+    tight: &[u8],
+) -> Result<NativeCompletion, (TextureUploadStage, String)> {
+    let row_bytes = descriptor
+        .extent
+        .width
+        .checked_mul(4)
+        .ok_or_else(|| (TextureUploadStage::Staging, "row size overflow".into()))?;
+    let pitch = row_bytes
+        .checked_add(255)
+        .and_then(|value| (value / 256).checked_mul(256))
+        .ok_or_else(|| (TextureUploadStage::Staging, "row pitch overflow".into()))?;
+    let staging_size = u64::from(pitch)
+        .checked_mul(u64::from(descriptor.extent.height))
+        .ok_or_else(|| (TextureUploadStage::Staging, "staging size overflow".into()))?;
+    let tight_size = u64::from(row_bytes)
+        .checked_mul(u64::from(descriptor.extent.height))
+        .ok_or_else(|| (TextureUploadStage::Staging, "tight size overflow".into()))?;
+    if u64::try_from(tight.len()).ok() != Some(tight_size) {
+        return Err((
+            TextureUploadStage::Staging,
+            "tight texture upload length mismatch".into(),
+        ));
+    }
+    let staging_len = usize::try_from(staging_size).map_err(|_| {
+        (
+            TextureUploadStage::Staging,
+            "staging size exceeds usize".into(),
+        )
+    })?;
+    let pitch_len = usize::try_from(pitch).map_err(|_| {
+        (
+            TextureUploadStage::Staging,
+            "row pitch exceeds usize".into(),
+        )
+    })?;
+    let row_len = usize::try_from(row_bytes)
+        .map_err(|_| (TextureUploadStage::Staging, "row size exceeds usize".into()))?;
+    let mut padded = vec![0xEE; staging_len];
+    for (destination, source) in padded
+        .chunks_exact_mut(pitch_len)
+        .zip(tight.chunks_exact(row_len))
+    {
+        destination[..row_len].copy_from_slice(source);
+    }
+    let staging = create_staging_buffer(
+        owner,
+        staging_size,
+        wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
+    )
+    .map_err(|reason| (TextureUploadStage::Staging, reason))?;
+    with_mapped_write(&staging, &padded).map_err(|reason| (TextureUploadStage::Staging, reason))?;
+    let mut encoder =
+        begin_copy_encoder(owner).map_err(|reason| (TextureUploadStage::Recording, reason))?;
+    transition_buffer(
+        &mut encoder,
+        &staging,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopySource,
+    )
+    .map_err(|reason| (TextureUploadStage::Recording, reason))?;
+    transition_texture(
+        &mut encoder,
+        target,
+        descriptor,
+        TextureRange::Whole,
+        ResourceAccessState::Undefined,
+        ResourceAccessState::CopyDestination,
+    )
+    .map_err(|reason| (TextureUploadStage::Recording, reason))?;
+    copy_buffer_to_texture(
+        &mut encoder,
+        &staging,
+        target,
+        pitch,
+        descriptor.extent.width,
+        descriptor.extent.height,
+    )
+    .map_err(|reason| (TextureUploadStage::Recording, reason))?;
+    let command =
+        finish_copy_encoder(encoder).map_err(|reason| (TextureUploadStage::Recording, reason))?;
+    submit_copy_with_staging(command, vec![target_lease], vec![staging])
+        .map_err(|reason| (TextureUploadStage::SubmitRejected, reason))
+}
+
 #[cfg(test)]
 pub(super) fn upload_texture_for_test(
     owner: &Arc<OpenedDevice>,
@@ -3544,66 +3926,12 @@ pub(super) fn upload_texture_for_test(
     descriptor: TextureDesc,
     tight: &[u8],
 ) -> Result<ResourceAccessState, String> {
-    let row_bytes = descriptor
-        .extent
-        .width
-        .checked_mul(4)
-        .ok_or("row size overflow")?;
-    let pitch = row_bytes.next_multiple_of(256);
-    let staging_size = u64::from(pitch) * u64::from(descriptor.extent.height);
-    if tight.len() as u64 != u64::from(row_bytes) * u64::from(descriptor.extent.height) {
-        return Err("tight texture upload length mismatch".into());
-    }
-    let mut padded = vec![0xEE; staging_size as usize];
-    for row in 0..descriptor.extent.height as usize {
-        padded[row * pitch as usize..row * pitch as usize + row_bytes as usize]
-            .copy_from_slice(&tight[row * row_bytes as usize..(row + 1) * row_bytes as usize]);
-    }
-    let staging = create_staging_buffer(
-        owner,
-        staging_size,
-        wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
-    )?;
-    with_mapped_write(&staging, &padded)?;
-    let mut encoder = begin_copy_encoder(owner)?;
-    transition_buffer(
-        &mut encoder,
-        &staging,
-        ResourceAccessState::Undefined,
-        ResourceAccessState::CopySource,
-    )?;
-    transition_texture(
-        &mut encoder,
-        target,
-        descriptor,
-        TextureRange::Whole,
-        ResourceAccessState::Undefined,
-        ResourceAccessState::CopyDestination,
-    )?;
-    copy_buffer_to_texture(
-        &mut encoder,
-        &staging,
-        target,
-        pitch,
-        descriptor.extent.width,
-        descriptor.extent.height,
-    )?;
-    let completion = submit_copy(finish_copy_encoder(encoder)?, vec![target_lease])?;
-    let status = match wait_completion(&completion, core::time::Duration::from_secs(10)) {
-        Ok(status) => status,
-        Err(error) => {
-            std::mem::forget(staging);
-            let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
-            return Err(error);
-        }
-    };
+    let completion = upload_immutable_texture(owner, target, target_lease, descriptor, tight)
+        .map_err(|(_, reason)| reason)?;
+    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
     if status != CompletionStatus::Complete {
-        std::mem::forget(staging);
-        let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
         return Err(format!("texture upload did not complete: {status:?}"));
     }
-    drop(completion);
-    drop(staging);
     Ok(ResourceAccessState::CopyDestination)
 }
 
@@ -3620,8 +3948,13 @@ pub(super) fn readback_texture_for_test(
         .width
         .checked_mul(4)
         .ok_or("row size overflow")?;
-    let pitch = row_bytes.next_multiple_of(256);
-    let staging_size = u64::from(pitch) * u64::from(descriptor.extent.height);
+    let pitch = row_bytes
+        .checked_add(255)
+        .and_then(|value| (value / 256).checked_mul(256))
+        .ok_or("row pitch overflow")?;
+    let staging_size = u64::from(pitch)
+        .checked_mul(u64::from(descriptor.extent.height))
+        .ok_or("staging size overflow")?;
     let staging = create_staging_buffer(
         owner,
         staging_size,
@@ -3683,12 +4016,15 @@ pub(super) fn readback_texture_for_test(
     }
     drop(completion);
     let padded = with_mapped_read(&staging, staging_size)?;
-    let mut tight =
-        Vec::with_capacity((u64::from(row_bytes) * u64::from(descriptor.extent.height)) as usize);
-    for row in 0..descriptor.extent.height as usize {
-        tight.extend_from_slice(
-            &padded[row * pitch as usize..row * pitch as usize + row_bytes as usize],
-        );
+    let tight_size = u64::from(row_bytes)
+        .checked_mul(u64::from(descriptor.extent.height))
+        .ok_or("tight size overflow")?;
+    let tight_capacity = usize::try_from(tight_size).map_err(|_| "tight size exceeds usize")?;
+    let pitch_len = usize::try_from(pitch).map_err(|_| "row pitch exceeds usize")?;
+    let row_len = usize::try_from(row_bytes).map_err(|_| "row size exceeds usize")?;
+    let mut tight = Vec::with_capacity(tight_capacity);
+    for row in padded.chunks_exact(pitch_len) {
+        tight.extend_from_slice(&row[..row_len]);
     }
     drop(staging);
     Ok(TextureReadback {
@@ -3698,7 +4034,6 @@ pub(super) fn readback_texture_for_test(
     })
 }
 
-#[cfg(test)]
 fn copy_buffer_to_texture(
     encoder: &mut CopyEncoder,
     source: &OwnedBuffer,
@@ -3730,17 +4065,29 @@ fn copy_buffer_to_texture(
             NativeEncoder::Dx12(encoder),
             NativeBuffer::Dx12(source),
             NativeTexture::Dx12(destination),
-        ) => unsafe {
-            encoder.copy_buffer_to_texture(source, destination, core::iter::once(copy));
-        },
+        ) => {
+            // SAFETY: the staging and destination belong to this encoder's
+            // device, their CopySource/CopyDestination states were transitioned
+            // immediately before this call, and checked padded pitch/range cover
+            // exactly the closed D2 upload extent. Submission retains both leases.
+            unsafe {
+                encoder.copy_buffer_to_texture(source, destination, core::iter::once(copy));
+            }
+        }
         #[cfg(feature = "vulkan")]
         (
             NativeEncoder::Vulkan(encoder),
             NativeBuffer::Vulkan(source),
             NativeTexture::Vulkan(destination),
-        ) => unsafe {
-            encoder.copy_buffer_to_texture(source, destination, core::iter::once(copy));
-        },
+        ) => {
+            // SAFETY: the staging and destination belong to this encoder's
+            // device, their CopySource/CopyDestination states were transitioned
+            // immediately before this call, and checked padded pitch/range cover
+            // exactly the closed D2 upload extent. Submission retains both leases.
+            unsafe {
+                encoder.copy_buffer_to_texture(source, destination, core::iter::once(copy));
+            }
+        }
         _ => return Err("buffer-to-texture backend mismatch".into()),
     }
     Ok(())
@@ -3778,27 +4125,37 @@ fn copy_texture_to_buffer(
             NativeEncoder::Dx12(encoder),
             NativeTexture::Dx12(source),
             NativeBuffer::Dx12(destination),
-        ) => unsafe {
-            encoder.copy_texture_to_buffer(
-                source,
-                wgt::TextureUses::COPY_SRC,
-                destination,
-                core::iter::once(copy),
-            );
-        },
+        ) => {
+            // SAFETY: test-only observation uses the exported incoming state
+            // for the source transition, validated CopySource usage, and a
+            // checked padded staging range retained through completion.
+            unsafe {
+                encoder.copy_texture_to_buffer(
+                    source,
+                    wgt::TextureUses::COPY_SRC,
+                    destination,
+                    core::iter::once(copy),
+                );
+            }
+        }
         #[cfg(feature = "vulkan")]
         (
             NativeEncoder::Vulkan(encoder),
             NativeTexture::Vulkan(source),
             NativeBuffer::Vulkan(destination),
-        ) => unsafe {
-            encoder.copy_texture_to_buffer(
-                source,
-                wgt::TextureUses::COPY_SRC,
-                destination,
-                core::iter::once(copy),
-            );
-        },
+        ) => {
+            // SAFETY: test-only observation uses the exported incoming state
+            // for the source transition, validated CopySource usage, and a
+            // checked padded staging range retained through completion.
+            unsafe {
+                encoder.copy_texture_to_buffer(
+                    source,
+                    wgt::TextureUses::COPY_SRC,
+                    destination,
+                    core::iter::once(copy),
+                );
+            }
+        }
         _ => return Err("texture-to-buffer backend mismatch".into()),
     }
     Ok(())

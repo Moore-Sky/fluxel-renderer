@@ -2,8 +2,9 @@
 //!
 //! This crate models cameras, geometry, meshes, basic materials, and ordered
 //! draw lists. Its opt-in `gpu-upload` feature publishes immutable indexed-mesh
-//! snapshots after native completion. Its opt-in fixed-frame slice lowers one
-//! closed indexed draw without exposing native resources.
+//! and RGBA8 texture snapshots after native completion. Its opt-in fixed-frame
+//! slice lowers closed constant-color or textureLoad indexed draws without
+//! exposing native resources.
 
 #![deny(missing_docs)]
 
@@ -24,8 +25,10 @@ pub use fixed_frame::{
 };
 #[cfg(feature = "gpu-upload")]
 pub use upload::{
-    IndexedMeshSnapshot, IndexedMeshUpload, IndexedMeshUploadFailure, IndexedMeshUploadStartError,
-    IndexedMeshUploadStatus,
+    BaseColorTextureSnapshot, BaseColorTextureUpload, BaseColorTextureUploadFailure,
+    BaseColorTextureUploadStartError, BaseColorTextureUploadStatus, IndexedMeshSnapshot,
+    IndexedMeshUpload, IndexedMeshUploadFailure, IndexedMeshUploadStartError,
+    IndexedMeshUploadStatus, Rgba8Image, Rgba8ImageError, TexturedBasicMaterial,
 };
 
 /// A camera described by view and projection matrices.

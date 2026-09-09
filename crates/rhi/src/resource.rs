@@ -128,6 +128,20 @@ pub enum BufferUploadStage {
     Completion,
 }
 
+/// The stage at which an immutable texture upload reached the native boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum TextureUploadStage {
+    /// Creating or writing private row-padded staging storage failed.
+    Staging,
+    /// Recording the fixed buffer-to-texture copy failed.
+    Recording,
+    /// The queue rejected the submission before accepting it.
+    SubmitRejected,
+    /// Querying or waiting for an accepted completion failed.
+    Completion,
+}
+
 /// A stable reason why an immutable buffer upload request was rejected before native work.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
@@ -144,6 +158,36 @@ pub enum InvalidBufferUploadReason {
     CopyDestinationUsageRequired,
     /// Test-only observation requires the finalized buffer to allow copy-source use.
     CopySourceUsageRequired,
+}
+
+/// A stable reason why an immutable RGBA8 texture request was rejected.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum InvalidTextureUploadReason {
+    /// Only a two-dimensional image is accepted.
+    DimensionUnsupported,
+    /// Only `Rgba8Unorm` is accepted.
+    FormatUnsupported,
+    /// The closed upload has exactly one mip level.
+    MipLevelsUnsupported,
+    /// The closed upload has exactly one array layer.
+    ArrayLayersUnsupported,
+    /// The closed upload is not multisampled.
+    SampleCountUnsupported,
+    /// The closed upload only owns device-local storage.
+    MemoryPolicyUnsupported,
+    /// Required copy-destination usage is missing.
+    CopyDestinationUsageRequired,
+    /// Required sampled usage is missing.
+    SampledUsageRequired,
+    /// The closed upload declaration requested an operation outside its
+    /// production contract. Test-only readback may additionally request
+    /// `CopySource`; no other widening is accepted.
+    UnexpectedUsage,
+    /// The supplied bytes are not exactly tight RGBA8 image bytes.
+    DataLengthMismatch,
+    /// The declared extent cannot be represented as a tight byte length.
+    DataLengthOverflow,
 }
 
 /// Why an immutable buffer upload could not be started or observed.
@@ -189,6 +233,49 @@ impl fmt::Display for BufferUploadError {
 
 impl std::error::Error for BufferUploadError {}
 
+/// Why an immutable texture upload could not be started or observed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TextureUploadError {
+    /// The portable upload request was malformed.
+    InvalidRequest(InvalidTextureUploadReason),
+    /// Creating the destination texture failed.
+    Resource(ResourceCreateError),
+    /// An observation request used a texture from a different native device.
+    ForeignDevice,
+    /// A private native boundary operation failed.
+    Native {
+        /// Backend selected by the owning device.
+        backend: Backend,
+        /// Upload stage that failed.
+        stage: TextureUploadStage,
+        /// Native diagnostic retained without exposing HAL types.
+        reason: String,
+    },
+}
+
+impl fmt::Display for TextureUploadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRequest(reason) => {
+                write!(f, "invalid immutable texture upload: {reason:?}")
+            }
+            Self::Resource(error) => write!(f, "immutable texture upload resource error: {error}"),
+            Self::ForeignDevice => f.write_str("immutable texture upload used a foreign device"),
+            Self::Native {
+                backend,
+                stage,
+                reason,
+            } => write!(
+                f,
+                "{backend:?} immutable texture upload {stage:?} failed: {reason}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TextureUploadError {}
+
 /// An immutable buffer upload accepted by the native queue but not yet finalized.
 ///
 /// This value retains the destination and the accepted submission. Dropping it
@@ -213,6 +300,25 @@ pub struct IncompleteBufferUpload {
 #[derive(Clone)]
 pub struct UploadedBuffer {
     buffer: Buffer,
+}
+
+/// An immutable texture upload accepted by the native queue but not yet finalized.
+pub struct PendingTextureUpload {
+    texture: Option<Texture>,
+    completion: NativeCompletion,
+    backend: Backend,
+}
+
+/// A non-complete texture upload returned by [`PendingTextureUpload::finalize`].
+pub struct IncompleteTextureUpload {
+    upload: PendingTextureUpload,
+    status: CompletionStatus,
+}
+
+/// An immutable RGBA8 texture whose contents are available to later GPU work.
+#[derive(Clone)]
+pub struct UploadedTexture {
+    texture: Texture,
 }
 
 /// Why creation of a fixed compute artifact was rejected.
@@ -545,6 +651,8 @@ pub enum RasterKernel {
     /// An indexed model-identity mesh using `float32x3` positions and exactly
     /// one 80-byte view-projection plus base-color uniform binding.
     IndexedPositionFloat32x3CameraMaterial,
+    /// An indexed camera/material mesh with one closed `textureLoad` RGBA8 binding.
+    IndexedPositionFloat32x3CameraMaterialTexture,
 }
 
 /// The non-configurable vertex layout selected by a fixed raster artifact.
@@ -557,6 +665,22 @@ pub enum RasterVertexLayout {
     PositionFloat32x2ColorUnorm8x4,
     /// One vertex is `float32x3 position` at byte zero, for a 12-byte stride.
     PositionFloat32x3,
+}
+
+/// Shader-stage visibility recorded by a closed raster binding identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterBindingVisibility {
+    /// The binding is visible to both vertex and fragment stages.
+    VertexFragment,
+    /// The binding is visible only to the fragment stage.
+    Fragment,
+}
+
+/// Texture sample type recorded by a closed raster binding identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterTextureSampleType {
+    /// A normalized floating-point sampled texture read as `f32`.
+    Float,
 }
 
 /// Portable identity of one fixed raster artifact.
@@ -583,8 +707,28 @@ pub struct RasterArtifactIdentity {
     pub binding_count: u32,
     /// Minimum byte size of the sole fixed uniform binding, or zero when none.
     pub uniform_binding_size: u64,
+    /// Uniform binding number for a fixed uniform recipe.
+    pub uniform_binding: Option<u32>,
+    /// Shader-stage visibility of the fixed uniform binding.
+    pub uniform_visibility: Option<RasterBindingVisibility>,
     /// Version of the fixed binding layout; zero means no binding layout.
     pub binding_recipe_version: u32,
+    /// Texture ABI schema version; zero means no texture binding.
+    pub texture_binding_recipe_version: u32,
+    /// Texture binding number for the closed textured recipe.
+    pub texture_binding: Option<u32>,
+    /// Texture dimension for the closed textured recipe.
+    pub texture_dimension: Option<TextureDimension>,
+    /// Texture format for the closed textured recipe.
+    pub texture_format: Option<TextureFormat>,
+    /// Shader-stage visibility of the closed texture binding.
+    pub texture_visibility: Option<RasterBindingVisibility>,
+    /// Sample type exposed by the closed texture binding.
+    pub texture_sample_type: Option<RasterTextureSampleType>,
+    /// The only mip level read by the closed texture recipe.
+    pub texture_mip_level: Option<u32>,
+    /// Version of the fixed texture-coordinate mapping recipe.
+    pub texture_mapping_recipe_version: u32,
     /// Version of the fixed vertex/index/target recipe.
     pub recipe_version: u32,
 }
@@ -612,6 +756,25 @@ impl fmt::Debug for RasterArtifactIdentity {
                 .field("uniform_binding_size", &self.uniform_binding_size)
                 .field("binding_recipe_version", &self.binding_recipe_version);
         }
+        if self.texture_binding_recipe_version != 0 {
+            identity
+                .field(
+                    "texture_binding_recipe_version",
+                    &self.texture_binding_recipe_version,
+                )
+                .field("texture_binding", &self.texture_binding)
+                .field("texture_dimension", &self.texture_dimension)
+                .field("texture_format", &self.texture_format)
+                .field("uniform_binding", &self.uniform_binding)
+                .field("uniform_visibility", &self.uniform_visibility)
+                .field("texture_visibility", &self.texture_visibility)
+                .field("texture_sample_type", &self.texture_sample_type)
+                .field("texture_mip_level", &self.texture_mip_level)
+                .field(
+                    "texture_mapping_recipe_version",
+                    &self.texture_mapping_recipe_version,
+                );
+        }
         identity
             .field("recipe_version", &self.recipe_version)
             .finish()
@@ -626,12 +789,16 @@ impl RasterKernel {
             Self::IndexedPositionColor => "position_color_vertex",
             Self::IndexedPositionFloat32x3 => "position_f32x3_vertex",
             Self::IndexedPositionFloat32x3CameraMaterial => "camera_material_vertex",
+            Self::IndexedPositionFloat32x3CameraMaterialTexture => "camera_material_texture_vertex",
         }
     }
 
     /// Returns the shared fixed fragment entry point.
     pub const fn fragment_entry_point(self) -> &'static str {
-        "color_fragment"
+        match self {
+            Self::IndexedPositionFloat32x3CameraMaterialTexture => "texture_color_fragment",
+            _ => "color_fragment",
+        }
     }
 
     /// Returns the target format supported by every fixed artifact.
@@ -646,6 +813,7 @@ impl RasterKernel {
             Self::IndexedPositionColor => 12,
             Self::IndexedPositionFloat32x3 => 12,
             Self::IndexedPositionFloat32x3CameraMaterial => 12,
+            Self::IndexedPositionFloat32x3CameraMaterialTexture => 12,
         }
     }
 
@@ -656,6 +824,7 @@ impl RasterKernel {
             Self::IndexedPositionColor => Some(IndexFormat::Uint16),
             Self::IndexedPositionFloat32x3 => Some(IndexFormat::Uint32),
             Self::IndexedPositionFloat32x3CameraMaterial => Some(IndexFormat::Uint32),
+            Self::IndexedPositionFloat32x3CameraMaterialTexture => Some(IndexFormat::Uint32),
         }
     }
 
@@ -666,6 +835,9 @@ impl RasterKernel {
             Self::IndexedPositionColor => RasterVertexLayout::PositionFloat32x2ColorUnorm8x4,
             Self::IndexedPositionFloat32x3 => RasterVertexLayout::PositionFloat32x3,
             Self::IndexedPositionFloat32x3CameraMaterial => RasterVertexLayout::PositionFloat32x3,
+            Self::IndexedPositionFloat32x3CameraMaterialTexture => {
+                RasterVertexLayout::PositionFloat32x3
+            }
         }
     }
 
@@ -679,9 +851,86 @@ impl RasterKernel {
             vertex_layout: self.vertex_layout(),
             vertex_stride: self.vertex_stride(),
             index_format: self.index_format(),
-            binding_count: if self.has_frame_uniform() { 1 } else { 0 },
+            binding_count: if self.has_frame_uniform() {
+                if matches!(self, Self::IndexedPositionFloat32x3CameraMaterialTexture) {
+                    2
+                } else {
+                    1
+                }
+            } else {
+                0
+            },
             uniform_binding_size: if self.has_frame_uniform() { 80 } else { 0 },
+            uniform_binding: if self.has_frame_uniform() {
+                Some(0)
+            } else {
+                None
+            },
+            uniform_visibility: if self.has_frame_uniform() {
+                Some(RasterBindingVisibility::VertexFragment)
+            } else {
+                None
+            },
             binding_recipe_version: if self.has_frame_uniform() { 1 } else { 0 },
+            texture_binding_recipe_version: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                1
+            } else {
+                0
+            },
+            texture_binding: if matches!(self, Self::IndexedPositionFloat32x3CameraMaterialTexture)
+            {
+                Some(1)
+            } else {
+                None
+            },
+            texture_dimension: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                Some(TextureDimension::D2)
+            } else {
+                None
+            },
+            texture_format: if matches!(self, Self::IndexedPositionFloat32x3CameraMaterialTexture) {
+                Some(TextureFormat::Rgba8Unorm)
+            } else {
+                None
+            },
+            texture_visibility: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                Some(RasterBindingVisibility::Fragment)
+            } else {
+                None
+            },
+            texture_sample_type: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                Some(RasterTextureSampleType::Float)
+            } else {
+                None
+            },
+            texture_mip_level: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                Some(0)
+            } else {
+                None
+            },
+            texture_mapping_recipe_version: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+            ) {
+                1
+            } else {
+                0
+            },
             recipe_version: 1,
         }
     }
@@ -748,11 +997,24 @@ impl RasterKernel {
              _ = input; return frame.base_color;\n\
          }"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialTexture => {
+                "struct FrameUniforms { view_projection: mat4x4<f32>, base_color: vec4<f32>, };\n\
+         @group(0) @binding(0) var<uniform> frame: FrameUniforms;\n\
+         @group(0) @binding(1) var tex: texture_2d<f32>;\n\
+         struct VertexInput { @location(0) position: vec3<f32>, };\n\
+         struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) @interpolate(perspective, center) uv: vec2<f32>, };\n\
+         @vertex fn camera_material_texture_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.position.xy * vec2(0.5, -0.5) + vec2(0.5)); }\n\
+         @fragment fn texture_color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { let dimensions = textureDimensions(tex, 0); let texel = min(vec2<u32>(floor(clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(dimensions))), dimensions - vec2<u32>(1)); return frame.base_color * textureLoad(tex, vec2<i32>(texel), 0); }"
+            }
         }
     }
 
     const fn has_frame_uniform(self) -> bool {
-        matches!(self, Self::IndexedPositionFloat32x3CameraMaterial)
+        matches!(
+            self,
+            Self::IndexedPositionFloat32x3CameraMaterial
+                | Self::IndexedPositionFloat32x3CameraMaterialTexture
+        )
     }
 }
 
@@ -796,6 +1058,32 @@ impl fmt::Debug for RasterUniformBindingsLease {
     }
 }
 
+struct RasterTextureBindingsShared {
+    _native: crate::imp::NativeRasterTextureBindings,
+    pipeline: RasterPipeline,
+    _uniform: BufferLease,
+    _texture: TextureLease,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// Closed group-0 bindings: one 80-byte frame uniform and one whole sampled RGBA8 texture.
+#[derive(Clone)]
+pub struct RasterTextureBindings(Arc<RasterTextureBindingsShared>);
+
+/// Strong lease retaining the textured raster binding and both resources.
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "retained through ResourceLease for terminal native completion"
+)]
+pub struct RasterTextureBindingsLease(Arc<RasterTextureBindingsShared>);
+
+impl fmt::Debug for RasterTextureBindingsLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RasterTextureBindingsLease(..)")
+    }
+}
+
 struct TexturePackBindingsShared {
     _native: crate::imp::NativeTexturePackBindings,
     pipeline: ComputePipeline,
@@ -831,6 +1119,8 @@ pub enum ResourceLease {
     RasterPipeline(RasterPipelineLease),
     /// Retains the closed camera/material raster uniform binding.
     RasterUniformBindings(RasterUniformBindingsLease),
+    /// Retains the closed textured raster binding.
+    RasterTextureBindings(RasterTextureBindingsLease),
     /// Retains the closed sampled-texture-to-storage-buffer binding object.
     TexturePackBindings(TexturePackBindingsLease),
 }
@@ -967,6 +1257,11 @@ impl From<RasterUniformBindingsLease> for ResourceLease {
         Self::RasterUniformBindings(value)
     }
 }
+impl From<RasterTextureBindingsLease> for ResourceLease {
+    fn from(value: RasterTextureBindingsLease) -> Self {
+        Self::RasterTextureBindings(value)
+    }
+}
 
 impl From<TexturePackBindingsLease> for ResourceLease {
     fn from(value: TexturePackBindingsLease) -> Self {
@@ -1090,6 +1385,123 @@ impl UploadedBuffer {
     }
 }
 
+impl PendingTextureUpload {
+    /// Returns the accepted upload's current completion state without blocking.
+    pub fn status(&self) -> Result<CompletionStatus, TextureUploadError> {
+        crate::imp::completion_status(&self.completion.0).map_err(|reason| {
+            TextureUploadError::Native {
+                backend: self.backend,
+                stage: TextureUploadStage::Completion,
+                reason,
+            }
+        })
+    }
+
+    /// Waits at most `timeout` for this accepted upload to complete.
+    pub fn wait(
+        &self,
+        timeout: core::time::Duration,
+    ) -> Result<CompletionStatus, TextureUploadError> {
+        crate::imp::wait_completion(&self.completion.0, timeout).map_err(|reason| {
+            TextureUploadError::Native {
+                backend: self.backend,
+                stage: TextureUploadStage::Completion,
+                reason,
+            }
+        })
+    }
+
+    /// Converts a proven-complete upload into its graph-importable texture.
+    pub fn finalize(mut self) -> Result<UploadedTexture, IncompleteTextureUpload> {
+        let status = crate::imp::completion_status(&self.completion.0).unwrap_or(
+            CompletionStatus::Failed(fluxel_rendergraph::CompletionFailure::DeviceLost),
+        );
+        if status == CompletionStatus::Complete {
+            Ok(UploadedTexture {
+                texture: self
+                    .texture
+                    .take()
+                    .expect("pending upload retains its destination until completion"),
+            })
+        } else {
+            Err(IncompleteTextureUpload {
+                upload: self,
+                status,
+            })
+        }
+    }
+}
+
+impl Drop for PendingTextureUpload {
+    fn drop(&mut self) {
+        if !matches!(
+            crate::imp::completion_status(&self.completion.0),
+            Ok(CompletionStatus::Complete)
+        ) {
+            let _quarantined = std::mem::ManuallyDrop::new(self.completion.clone());
+        }
+    }
+}
+
+impl IncompleteTextureUpload {
+    /// Returns the observed non-complete state.
+    #[must_use]
+    pub fn status(&self) -> CompletionStatus {
+        self.status
+    }
+    /// Returns the retained operation for a later poll or wait.
+    #[must_use]
+    pub fn upload(&self) -> &PendingTextureUpload {
+        &self.upload
+    }
+    /// Returns ownership of the retained upload.
+    #[must_use]
+    pub fn into_pending(self) -> PendingTextureUpload {
+        self.upload
+    }
+}
+
+impl UploadedTexture {
+    /// Returns the immutable destination texture.
+    #[must_use]
+    pub fn texture(&self) -> &Texture {
+        &self.texture
+    }
+    /// Returns the state that graph imports must use as their incoming state.
+    #[must_use]
+    pub const fn outgoing_state(&self) -> ResourceAccessState {
+        ResourceAccessState::CopyDestination
+    }
+    /// Acquires an independent lifetime lease for later graph submission.
+    #[must_use]
+    pub fn lease(&self) -> TextureLease {
+        self.texture.lease()
+    }
+}
+
+impl fmt::Debug for PendingTextureUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingTextureUpload")
+            .field("texture", &self.texture)
+            .finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for IncompleteTextureUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IncompleteTextureUpload")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for UploadedTexture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UploadedTexture")
+            .field("texture", &self.texture)
+            .field("outgoing_state", &self.outgoing_state())
+            .finish()
+    }
+}
+
 impl fmt::Debug for PendingBufferUpload {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PendingBufferUpload")
@@ -1203,6 +1615,24 @@ impl RasterUniformBindings {
     }
 }
 
+impl RasterTextureBindings {
+    /// Returns the textured raster pipeline accepted by this binding.
+    pub fn pipeline(&self) -> &RasterPipeline {
+        &self.0.pipeline
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a strong lifetime lease.
+    pub fn lease(&self) -> RasterTextureBindingsLease {
+        RasterTextureBindingsLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeRasterTextureBindings {
+        &self.0._native
+    }
+}
+
 impl TexturePackBindings {
     /// Returns the `TexturePackRgba8` pipeline selected during creation.
     pub fn pipeline(&self) -> &ComputePipeline {
@@ -1284,6 +1714,38 @@ impl fmt::Debug for TexturePackBindingsLease {
 }
 
 impl Device {
+    /// Creates a device-local RGBA8 texture and starts one immutable whole-image upload.
+    ///
+    /// Input bytes are tightly packed RGBA8 rows. The private native boundary
+    /// supplies required row padding; callers never provide a native pitch.
+    pub fn upload_immutable_texture(
+        &self,
+        descriptor: TextureDescriptor,
+        bytes: &[u8],
+    ) -> Result<PendingTextureUpload, TextureUploadError> {
+        validate_immutable_texture_upload_descriptor(descriptor, bytes)?;
+        let texture = self
+            .create_texture(descriptor)
+            .map_err(TextureUploadError::Resource)?;
+        let completion = crate::imp::upload_immutable_texture(
+            &self.inner,
+            texture.native(),
+            texture.lease().into(),
+            descriptor.texture,
+            bytes,
+        )
+        .map_err(|(stage, reason)| TextureUploadError::Native {
+            backend: self.hardware.backend,
+            stage,
+            reason,
+        })?;
+        Ok(PendingTextureUpload {
+            texture: Some(texture),
+            completion: NativeCompletion(completion),
+            backend: self.hardware.backend,
+        })
+    }
+
     /// Creates a device-local buffer and starts one immutable copy upload.
     ///
     /// The descriptor size must exactly match `bytes`, the byte length must be
@@ -1530,6 +1992,47 @@ impl Device {
             },
         )))
     }
+
+    /// Creates the only uniform-plus-whole-texture binding accepted by the textured raster artifact.
+    pub fn create_raster_texture_bindings(
+        &self,
+        pipeline: &RasterPipeline,
+        uniform: &Buffer,
+        texture: &Texture,
+    ) -> Result<RasterTextureBindings, RasterCreateError> {
+        if pipeline.kernel() != RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture {
+            return Err(RasterCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity
+            || uniform.device_identity() != self.identity
+            || texture.device_identity() != self.identity
+        {
+            return Err(RasterCreateError::ForeignDevice);
+        }
+        validate_raster_uniform_contract(
+            RasterKernel::IndexedPositionFloat32x3CameraMaterial,
+            uniform.descriptor().buffer.size,
+            uniform.allowed_usage(),
+        )?;
+        validate_texture_pack_texture_desc(texture.descriptor().texture, texture.allowed_usage())
+            .map_err(|_| RasterCreateError::BindingRecipeMismatch)?;
+        let native = crate::imp::create_raster_texture_bindings(
+            &self.inner,
+            pipeline.native(),
+            uniform.native(),
+            texture.native(),
+        )
+        .map_err(RasterCreateError::NativeFailure)?;
+        Ok(RasterTextureBindings(Arc::new(
+            RasterTextureBindingsShared {
+                _native: native,
+                pipeline: pipeline.clone(),
+                _uniform: uniform.lease(),
+                _texture: texture.lease(),
+                device: self.identity,
+            },
+        )))
+    }
     /// Creates a native buffer after validating and lowering its portable contract.
     pub fn create_buffer(
         &self,
@@ -1618,6 +2121,62 @@ fn validate_immutable_upload_descriptor(
         return Err(BufferUploadError::InvalidRequest(
             InvalidBufferUploadReason::CopyDestinationUsageRequired,
         ));
+    }
+    Ok(())
+}
+
+fn validate_immutable_texture_upload_descriptor(
+    descriptor: TextureDescriptor,
+    bytes: &[u8],
+) -> Result<(), TextureUploadError> {
+    let image = descriptor.texture;
+    let invalid = |reason| Err(TextureUploadError::InvalidRequest(reason));
+    if image.dimension != TextureDimension::D2 {
+        return invalid(InvalidTextureUploadReason::DimensionUnsupported);
+    }
+    if image.format != TextureFormat::Rgba8Unorm {
+        return invalid(InvalidTextureUploadReason::FormatUnsupported);
+    }
+    if image.mip_levels != 1 {
+        return invalid(InvalidTextureUploadReason::MipLevelsUnsupported);
+    }
+    if image.array_layers != 1 {
+        return invalid(InvalidTextureUploadReason::ArrayLayersUnsupported);
+    }
+    if image.sample_count != 1 {
+        return invalid(InvalidTextureUploadReason::SampleCountUnsupported);
+    }
+    if descriptor.memory != MemoryPolicy::DeviceOnly {
+        return invalid(InvalidTextureUploadReason::MemoryPolicyUnsupported);
+    }
+    if !descriptor.usage.contains(TextureUsageKind::CopyDestination) {
+        return invalid(InvalidTextureUploadReason::CopyDestinationUsageRequired);
+    }
+    if !descriptor.usage.contains(TextureUsageKind::Sampled) {
+        return invalid(InvalidTextureUploadReason::SampledUsageRequired);
+    }
+    let production_usage =
+        TextureUsage::from_kinds([TextureUsageKind::CopyDestination, TextureUsageKind::Sampled]);
+    // The production object deliberately has no readback or general-purpose
+    // usage widening.  Test-support may add exactly CopySource so its private
+    // oracle can observe the upload; it may never grant storage or attachment
+    // access through this creation path.
+    #[cfg(any(test, feature = "test-support"))]
+    let usage_is_closed = descriptor.usage == production_usage
+        || descriptor.usage == production_usage.with(TextureUsageKind::CopySource);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let usage_is_closed = descriptor.usage == production_usage;
+    if !usage_is_closed {
+        return invalid(InvalidTextureUploadReason::UnexpectedUsage);
+    }
+    let expected = u64::from(image.extent.width)
+        .checked_mul(u64::from(image.extent.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(TextureUploadError::InvalidRequest(
+            InvalidTextureUploadReason::DataLengthOverflow,
+        ))?;
+    if u64::try_from(bytes.len()).ok() != Some(expected) {
+        return invalid(InvalidTextureUploadReason::DataLengthMismatch);
     }
     Ok(())
 }
@@ -1954,6 +2513,102 @@ mod tests {
         );
     }
 
+    #[cfg(all(windows, feature = "dx12"))]
+    #[test]
+    #[ignore = "requires a Windows DX12 device with required validation"]
+    fn immutable_texture_upload_dx12_failure_contract() {
+        run_immutable_texture_upload_failure_contract(crate::Backend::Dx12);
+    }
+
+    #[cfg(all(windows, feature = "vulkan"))]
+    #[test]
+    #[ignore = "requires a Windows Vulkan device with required validation"]
+    fn immutable_texture_upload_vulkan_failure_contract() {
+        run_immutable_texture_upload_failure_contract(crate::Backend::Vulkan);
+    }
+
+    #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+    fn run_immutable_texture_upload_failure_contract(backend: crate::Backend) {
+        use core::time::Duration;
+
+        let device = Device::open(
+            backend,
+            crate::DeviceOptions {
+                validation: crate::Validation::Required,
+                ..crate::DeviceOptions::default()
+            },
+        )
+        .unwrap();
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        let descriptor = TextureDescriptor {
+            texture: TextureDesc {
+                dimension: TextureDimension::D2,
+                extent: Extent3d {
+                    width: 3,
+                    height: 2,
+                    depth: 1,
+                },
+                mip_levels: 1,
+                array_layers: 1,
+                sample_count: 1,
+                format: TextureFormat::Rgba8Unorm,
+            },
+            usage: TextureUsage::from_kinds([
+                TextureUsageKind::CopyDestination,
+                TextureUsageKind::Sampled,
+                TextureUsageKind::CopySource,
+            ]),
+            memory: MemoryPolicy::DeviceOnly,
+        };
+
+        crate::imp::inject_submit_rejected_once();
+        assert!(matches!(
+            device.upload_immutable_texture(descriptor, &[0; 24]),
+            Err(TextureUploadError::Native {
+                stage: TextureUploadStage::SubmitRejected,
+                ..
+            })
+        ));
+
+        crate::imp::inject_submit_accepted_unknown_once();
+        let unknown = device
+            .upload_immutable_texture(descriptor, &[1; 24])
+            .unwrap();
+        assert_eq!(
+            unknown.status().unwrap(),
+            CompletionStatus::Failed(fluxel_rendergraph::CompletionFailure::DeviceLost)
+        );
+        let incomplete = unknown.finalize().unwrap_err();
+        assert_eq!(
+            incomplete.status(),
+            CompletionStatus::Failed(fluxel_rendergraph::CompletionFailure::DeviceLost)
+        );
+        // An unproven accepted submission never publishes a texture. Dropping
+        // this retained operation takes the same quarantine path as a caller
+        // that abandons it before observing completion.
+        drop(incomplete);
+
+        let pending = device
+            .upload_immutable_texture(descriptor, &[2; 24])
+            .unwrap();
+        crate::imp::inject_completion_pending_once();
+        assert_eq!(pending.status().unwrap(), CompletionStatus::Pending);
+        assert_eq!(
+            pending.wait(Duration::from_secs(10)).unwrap(),
+            CompletionStatus::Complete
+        );
+        let uploaded = pending.finalize().expect("complete upload is published");
+        assert_eq!(
+            uploaded.outgoing_state(),
+            ResourceAccessState::CopyDestination
+        );
+        let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+        assert!(diagnostics.is_empty(), "{backend:?}: {diagnostics:?}");
+        eprintln!(
+            "artifact case=D2-failure backend={backend:?} submit_rejected=true accepted_unknown=DeviceLost observation=Pending completion=Complete diagnostics={diagnostics:?}"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn compute_pipeline_creation_stages_map_to_public_error_variants() {
@@ -2167,7 +2822,10 @@ mod tests {
         assert_eq!(camera.binding_count, 1);
         assert_eq!(camera.uniform_binding_size, 80);
         assert_eq!(camera.binding_recipe_version, 1);
-        assert!(format!("{camera:?}").contains("binding_count: 1"));
+        assert_eq!(
+            format!("{camera:?}"),
+            "RasterArtifactIdentity { module_source_hash: 8563197035213614468, vertex_entry_point: \"camera_material_vertex\", fragment_entry_point: \"color_fragment\", target_format: Rgba8Unorm, vertex_layout: PositionFloat32x3, vertex_stride: 12, index_format: Some(Uint32), binding_count: 1, uniform_binding_size: 80, binding_recipe_version: 1, recipe_version: 1 }"
+        );
         assert_ne!(camera.module_source_hash, indexed_f32x3.module_source_hash);
     }
 
@@ -2236,5 +2894,132 @@ mod tests {
             validate_texture_pack_texture_desc(image, TextureUsage::empty()),
             Err(ComputeCreateError::BindingRecipeMismatch)
         );
+    }
+
+    #[test]
+    fn immutable_texture_upload_is_closed_and_requires_exact_tight_rgba8() {
+        let image = TextureDesc {
+            dimension: TextureDimension::D2,
+            extent: Extent3d {
+                width: 3,
+                height: 2,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        };
+        let descriptor = TextureDescriptor {
+            texture: image,
+            usage: TextureUsage::from_kinds([
+                TextureUsageKind::CopyDestination,
+                TextureUsageKind::Sampled,
+            ]),
+            memory: MemoryPolicy::DeviceOnly,
+        };
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(descriptor, &[0; 24]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(descriptor, &[0; 23]),
+            Err(TextureUploadError::InvalidRequest(
+                InvalidTextureUploadReason::DataLengthMismatch
+            ))
+        );
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(
+                TextureDescriptor {
+                    usage: TextureUsage::empty().with(TextureUsageKind::Sampled),
+                    ..descriptor
+                },
+                &[0; 24]
+            ),
+            Err(TextureUploadError::InvalidRequest(
+                InvalidTextureUploadReason::CopyDestinationUsageRequired
+            ))
+        );
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(
+                TextureDescriptor {
+                    usage: descriptor.usage.with(TextureUsageKind::StorageWrite),
+                    ..descriptor
+                },
+                &[0; 24]
+            ),
+            Err(TextureUploadError::InvalidRequest(
+                InvalidTextureUploadReason::UnexpectedUsage
+            ))
+        );
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(
+                TextureDescriptor {
+                    usage: descriptor.usage.with(TextureUsageKind::ColorAttachment),
+                    ..descriptor
+                },
+                &[0; 24]
+            ),
+            Err(TextureUploadError::InvalidRequest(
+                InvalidTextureUploadReason::UnexpectedUsage
+            ))
+        );
+        // Readback is a test-only widening, not a production upload feature.
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(
+                TextureDescriptor {
+                    usage: descriptor.usage.with(TextureUsageKind::CopySource),
+                    ..descriptor
+                },
+                &[0; 24]
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_immutable_texture_upload_descriptor(
+                TextureDescriptor {
+                    texture: TextureDesc {
+                        mip_levels: 2,
+                        ..image
+                    },
+                    ..descriptor
+                },
+                &[0; 24]
+            ),
+            Err(TextureUploadError::InvalidRequest(
+                InvalidTextureUploadReason::MipLevelsUnsupported
+            ))
+        );
+    }
+
+    #[test]
+    fn textured_raster_identity_is_explicit_without_mutating_legacy_debug() {
+        let legacy = format!(
+            "{:?}",
+            RasterKernel::IndexedPositionFloat32x3.portable_identity()
+        );
+        assert!(!legacy.contains("texture_binding"));
+        let identity =
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture.portable_identity();
+        assert_eq!(identity.binding_count, 2);
+        assert_eq!(identity.uniform_binding_size, 80);
+        assert_eq!(identity.uniform_binding, Some(0));
+        assert_eq!(
+            identity.uniform_visibility,
+            Some(RasterBindingVisibility::VertexFragment)
+        );
+        assert_eq!(identity.texture_binding, Some(1));
+        assert_eq!(identity.texture_dimension, Some(TextureDimension::D2));
+        assert_eq!(identity.texture_format, Some(TextureFormat::Rgba8Unorm));
+        assert_eq!(
+            identity.texture_visibility,
+            Some(RasterBindingVisibility::Fragment)
+        );
+        assert_eq!(
+            identity.texture_sample_type,
+            Some(RasterTextureSampleType::Float)
+        );
+        assert_eq!(identity.texture_mip_level, Some(0));
+        assert_eq!(identity.texture_mapping_recipe_version, 1);
     }
 }

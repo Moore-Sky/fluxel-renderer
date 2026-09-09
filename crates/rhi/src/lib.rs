@@ -4,8 +4,9 @@
 //! device, owns buffers and 2D textures, and executes deliberately fixed Copy,
 //! Compute, and Raster subsets of a portable RenderGraph plan through barriers,
 //! one submission, completion, and lease-backed retirement. Surfaces and
-//! presentation remain outside this milestone. A narrow immutable-buffer
-//! upload operation retains staging and destination storage through completion.
+//! presentation remain outside this milestone. Narrow immutable buffer and
+//! whole RGBA8 texture uploads retain staging and destination storage through
+//! completion.
 
 #![deny(missing_docs)]
 
@@ -474,7 +475,10 @@ mod imp;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support {
-    use crate::{BufferUploadError, BufferUploadStage, Device, UploadedBuffer};
+    use crate::{
+        BufferUploadError, BufferUploadStage, Device, TextureUploadError, TextureUploadStage,
+        UploadedBuffer, UploadedTexture,
+    };
 
     /// Clears diagnostics collected after `Device::open` enabled capture.
     pub fn clear_validation_diagnostics(device: &Device) {
@@ -573,6 +577,56 @@ pub mod test_support {
             })
         }
     }
+
+    /// Reads a finalized immutable texture using its exact exported incoming
+    /// state. The returned tuple is `(tight_rgba8, padded_native_rows,
+    /// bytes_per_row)` for hardware CPU-oracle fixtures only.
+    ///
+    /// This helper consumes [`UploadedTexture::outgoing_state`] as its actual
+    /// incoming state and restores that state afterward; it never assumes or
+    /// silently repairs an incorrect graph export.
+    pub fn readback_uploaded_texture(
+        device: &Device,
+        uploaded: &UploadedTexture,
+    ) -> Result<(Vec<u8>, Vec<u8>, u32), TextureUploadError> {
+        if uploaded.texture().device_identity() != device.identity() {
+            return Err(TextureUploadError::ForeignDevice);
+        }
+        if !uploaded
+            .texture()
+            .allowed_usage()
+            .contains(fluxel_rendergraph::TextureUsageKind::CopySource)
+        {
+            return Err(TextureUploadError::InvalidRequest(
+                crate::InvalidTextureUploadReason::UnexpectedUsage,
+            ));
+        }
+        #[cfg(windows)]
+        {
+            let readback = crate::imp::readback_texture_for_test(
+                &device.inner,
+                uploaded.texture().native(),
+                uploaded.lease().into(),
+                uploaded.texture().descriptor().texture,
+                uploaded.outgoing_state(),
+            )
+            .map_err(|reason| TextureUploadError::Native {
+                backend: device.hardware().backend,
+                stage: TextureUploadStage::Completion,
+                reason,
+            })?;
+            Ok((readback.tight, readback.padded, readback.bytes_per_row))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = uploaded;
+            Err(TextureUploadError::Native {
+                backend: device.hardware().backend,
+                stage: TextureUploadStage::Completion,
+                reason: "native readback is only supported on Windows".into(),
+            })
+        }
+    }
 }
 
 #[cfg(any(
@@ -583,6 +637,7 @@ mod imp {
     use super::{
         Backend, BufferDescriptor, BufferUploadStage, DeviceOptions, HardwareCapabilities,
         HardwareInfo, OpenError, ResourceCreateError, ResourceLease, TextureDescriptor,
+        TextureUploadStage,
     };
     use fluxel_rendergraph::{
         BufferCopyRegion, BufferUsage, CompletionFailure, CompletionStatus, ResourceAccessState,
@@ -602,6 +657,7 @@ mod imp {
     pub(super) struct NativeTexturePackBindings;
     pub(super) struct NativeRasterPipeline;
     pub(super) struct NativeRasterUniformBindings;
+    pub(super) struct NativeRasterTextureBindings;
     #[derive(Clone)]
     pub(super) struct NativeCompletion;
     pub(super) fn open(backend: Backend, _: DeviceOptions) -> Result<OpenedDevice, OpenError> {
@@ -640,6 +696,18 @@ mod imp {
     ) -> Result<NativeCompletion, (BufferUploadStage, String)> {
         Err((
             BufferUploadStage::Staging,
+            "native uploads are unavailable without a Windows backend".into(),
+        ))
+    }
+    pub(super) fn upload_immutable_texture(
+        _: &Arc<OpenedDevice>,
+        _: &OwnedTexture,
+        _: ResourceLease,
+        _: TextureDesc,
+        _: &[u8],
+    ) -> Result<NativeCompletion, (TextureUploadStage, String)> {
+        Err((
+            TextureUploadStage::Staging,
             "native uploads are unavailable without a Windows backend".into(),
         ))
     }
@@ -722,6 +790,14 @@ mod imp {
     ) -> Result<NativeRasterUniformBindings, String> {
         Err("native raster is only supported on Windows".into())
     }
+    pub(super) fn create_raster_texture_bindings(
+        _: &Arc<OpenedDevice>,
+        _: &NativeRasterPipeline,
+        _: &OwnedBuffer,
+        _: &OwnedTexture,
+    ) -> Result<NativeRasterTextureBindings, String> {
+        Err("native raster is only supported on Windows".into())
+    }
     pub(super) fn transition_texture(
         _: &mut CopyEncoder,
         _: &OwnedTexture,
@@ -787,6 +863,12 @@ mod imp {
     pub(super) fn set_raster_uniform_bindings(
         _: &mut CopyEncoder,
         _: &NativeRasterUniformBindings,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn set_raster_texture_bindings(
+        _: &mut CopyEncoder,
+        _: &NativeRasterTextureBindings,
     ) -> Result<(), String> {
         Err("native raster is only supported on Windows".into())
     }

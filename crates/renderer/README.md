@@ -6,10 +6,11 @@
 immutable GPU-ready snapshot without blocking the frame-building thread.
 The same feature can consume a ready snapshot, a `Camera`, and a
 `BasicMaterial` in one deliberately closed headless `f32x3/u32` indexed draw
-and return opaque offscreen image metadata.
+and return opaque offscreen image metadata. It can also upload one immutable
+tight `Rgba8Unorm` image and use its opaque snapshot in a closed textured draw.
 
 It is intentionally not a complete GPU renderer: it does not lower draw lists,
-compile general material shaders, provide PBR/textures or a general
+compile general material shaders, provide samplers/PBR or a general
 pipeline/bind-group API, or present pixels.
 
 ## Optional GPU upload
@@ -17,7 +18,7 @@ pipeline/bind-group API, or present pixels.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.2"
+tag = "v0.2.3"
 features = ["gpu-upload"]
 ```
 
@@ -38,6 +39,16 @@ operation. `Complete` yields an opaque `FrameImage`; terminal or otherwise
 unproven accepted Raster work poisons that snapshot generation. Snapshot clones
 share the same single-in-flight state; no native texture or buffer handle is
 exposed.
+
+`Rgba8Image` validates a nonzero two-dimensional tight RGBA8 payload.
+`BaseColorTextureUpload::begin` borrows it and starts a non-blocking immutable
+upload; only proven completion publishes `BaseColorTextureSnapshot`.
+`TexturedBasicMaterial` couples that snapshot to `BasicMaterial`, and
+`FixedFrameRenderer::draw_textured` uses a fixed mip-zero `textureLoad` mapping
+derived from model-space `position.xy`. This deliberately exposes no sampler,
+filter/wrap/LOD, UV vertex attribute, sRGB, or PBR contract. The textured path
+accepts only finite, positive-w triangles wholly inside the clip volume, and
+mesh/texture generations share one atomic draw reservation outcome.
 
 ## Use today
 
@@ -74,6 +85,9 @@ on Windows DX12/Vulkan. The 0.2.2 U03 fixtures compare the Camera/material
 uniform fixed offscreen draw byte-for-byte with CPU pixel oracles on both
 backends under Required native validation. The renderer crate itself contains
 no `unsafe`.
+
+The 0.2.3 U04 fixtures compare this textured draw byte-for-byte with an
+independent CPU oracle on DX12 and Vulkan under Required validation.
 
 The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend

@@ -1,6 +1,6 @@
 # Fluxel Renderer design
 
-**Status: 0.2.2 fixed headless Camera/material indexed snapshot draw**
+**Status: 0.2.3 fixed headless textured indexed snapshot draw**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
@@ -100,7 +100,7 @@ Concurrent frames need queue ordering or an explicit GPU dependency; one global
 
 ## Fixed headless frame
 
-0.2.2 keeps one renderer-owned coordinator rather than general draw-list
+0.2.3 keeps one renderer-owned coordinator rather than general draw-list
 lowering. `FixedFrameRenderer::draw` accepts a ready `IndexedMeshSnapshot`, a
 `Camera`, a `BasicMaterial`, and an extent. It serializes the camera and
 material at start into one immutable 80-byte uniform: column-major
@@ -125,10 +125,20 @@ because the snapshot's native state is then not known.
 Polling never waits for the host or uses queue-idle as an ownership mechanism.
 Only opaque image extent/format/ownership becomes public after completion.
 
-This is evidence for one fixed Camera/material snapshot-to-plan-to-native
-path, not a claim that model transforms, `DrawList` lowering, textures,
-samplers, PBR, depth, blending, batching, general bindings, Surface, or Present
-are implemented.
+The textured variant adds a separately uploaded immutable `Rgba8Unorm` image.
+Only proven upload completion publishes an opaque snapshot. Its graph import
+uses the reported `CopyDestination` state, declares a whole Sampled read, and
+exports the texture back to `CopyDestination`. The shader derives planar UV
+from model-space position, uses perspective-center interpolation, and performs
+a fixed clamped mip-zero integer `textureLoad`. There is no sampler contract.
+The renderer fail-closes non-finite, non-positive-w, or clipped textured input.
+Mesh and texture reservations roll back together before acceptance and are
+released or poisoned together after it.
+
+This is evidence for one fixed textured snapshot-to-plan-to-native path, not a
+claim that model transforms, `DrawList` lowering, samplers, UV attributes,
+mips/LOD, sRGB, PBR, depth, blending, batching, general bindings, Surface, or
+Present are implemented.
 
 ## Evolution gates
 
@@ -142,7 +152,7 @@ The next renderer changes follow evidence from the native vertical slices:
 5. Surface/Present adds a visible frame boundary only after headless
    conformance is stable.
 
-Texture/PBR, GLTF, batching, culling, animation, and platform runtime
+Sampler/UV/PBR, GLTF, batching, culling, animation, and platform runtime
 unification remain later renderer features. Multi-queue scheduling, recording
 caches, and transient aliasing require profiling evidence and are not implied
 by this architecture.

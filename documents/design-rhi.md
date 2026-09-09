@@ -1,6 +1,6 @@
 # Fluxel RHI Design
 
-**Status: 0.1.4 fixed execution, plus 0.2.2 renderer Camera/material support**
+**Status: 0.2.0 RHI with 0.2.3 renderer texture support**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
 not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
@@ -28,6 +28,16 @@ portable identity includes the binding/layout recipe version. It does not
 expose configurable vertex layouts, index formats, shaders, pipeline
 descriptors, or general binding APIs. Renderer lowering remains outside the
 RHI; these artifacts only give that lowering safe native execution targets.
+
+0.2.3 adds one production immutable texture upload and one closed textured
+raster artifact. Upload accepts only whole tight D2 `Rgba8Unorm`, one
+mip/layer/sample, DeviceOnly CopyDestination+Sampled storage; the private RHI
+pads staging rows to 256 bytes and publishes only a proven-complete
+`UploadedTexture` in `CopyDestination`. The raster artifact adds one
+fragment-visible `texture_2d<f32>` at group 0/binding 1 beside the existing
+80-byte uniform. It uses no sampler and records its complete texture ABI and
+mapping version in the portable identity. Expanding the formerly exhaustive
+closed artifact enums is reflected by the RHI crate's 0.2.0 semver bump.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that

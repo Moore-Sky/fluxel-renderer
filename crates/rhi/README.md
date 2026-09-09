@@ -11,25 +11,28 @@ It is deliberately a narrow native boundary, not a general graphics API.
 adds only closed `ComputeKernel` artifacts and their single RW storage-buffer
 binding recipe. `RasterBackend` adds only the fixed R01/R02 raster artifacts,
 the closed U02 renderer snapshot recipe, its closed U03 Camera/material-uniform
-variant, and the closed X01 texture-pack
+variant, the closed 0.2.3 uniform-plus-texture raster variant, and the closed X01 texture-pack
 compute recipe needed for one
 Raster→Compute→Copy chain. It does **not** expose general mapping/readback,
 acquire or present a surface, a general shader/pipeline API, renderer lowering,
 multiple queues, or transient aliasing.
 
-`Device::upload_immutable_buffer` is the one production upload primitive. It
+`Device::upload_immutable_buffer` and the closed
+`Device::upload_immutable_texture` are the production upload primitives. They
 atomically creates a device-local destination and returns an owning pending
 operation. Only proven completion can yield `UploadedBuffer`; accepted-unknown
 work retains its target, staging allocation, command objects, and device rather
 than publishing guessed contents or state. The finalized incoming state is
-exactly `CopyDestination`.
+exactly `CopyDestination`. Texture upload accepts only a whole tight
+single-mip/layer/sample D2 `Rgba8Unorm` image with CopyDestination and Sampled
+usage; its private staging rows are padded to the native 256-byte requirement.
 
 ## Installation
 
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.2"
+tag = "v0.2.3"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -41,7 +44,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.2"
+tag = "v0.2.3"
 default-features = false
 features = ["dx12"]
 ```
@@ -110,7 +113,11 @@ static group-0/binding-0 uniform: column-major `projection * view` and linear
 RGBA base color, visible to both vertex and fragment stages. Its opaque binding
 is device- and pipeline-affine, retains matching pipeline and buffer leases
 through completion, and accepts no dynamic offset or configurable binding
-layout. Neither recipe makes those choices configurable. X01 samples that complete color texture in
+layout. The 0.2.3 variant adds a fragment-visible whole `texture_2d<f32>` at
+binding 1 and a fixed mip-zero integer `textureLoad` mapping; its portable
+identity explicitly records binding numbers, visibility, dimension, format,
+sample type, mip and mapping version. It does not add a sampler. Neither recipe
+makes those choices configurable. X01 samples that complete color texture in
 a closed compute artifact, packs row-major RGBA8 pixels into an RW storage
 buffer, and copies the result to an export. Texture-row padding is stripped for
 the exact CPU oracle. Readback consumes the exported outgoing state and lease

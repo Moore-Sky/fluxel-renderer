@@ -1,6 +1,6 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is a `0.2.2` workspace milestone for Fluxel's typed render graph,
+`fluxel-renderer` is a `0.2.3` workspace milestone for Fluxel's typed render graph,
 native RHI boundary, and renderer layer. It starts an independent release line
 from a pre-migration source snapshot and does not inherit prior version numbers
 or Git history.
@@ -13,12 +13,14 @@ The workspace is organised around three crates:
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | Headless DX12/Vulkan ownership plus fixed Raster, Compute, and Copy RenderGraph execution. |
-| `fluxel-renderer` | Scene/domain data, immutable indexed-mesh GPU snapshots, and one fixed Camera/material headless indexed draw. |
+| `fluxel-renderer` | Scene/domain data, immutable mesh/texture GPU snapshots, and fixed unlit headless indexed draws. |
 
 The renderer still does not lower a `DrawList` or general material pipeline.
 Its optional `gpu-upload` slice publishes a mesh generation after both native
 uploads complete and can submit one closed `f32x3/u32` indexed draw to an
-offscreen image. The default build remains the portable headless domain model.
+offscreen image, optionally modulated by one immutable RGBA8 base-color texture
+through a closed `textureLoad` recipe. The default build remains the portable
+headless domain model.
 
 Package READMEs are the detailed user documentation published with each crate;
 this file is only the workspace entry point.
@@ -75,13 +77,17 @@ completes non-blockingly before the owning operation submits Raster. It remains
 a single closed offscreen recipe, not `DrawList` lowering, PBR, textures, or a
 general pipeline/bind-group API. Snapshot clones share a single-in-flight gate;
 an unproven accepted Raster outcome poisons the generation instead of guessing
-its state.
+its state. The `0.2.3` slice adds tight immutable `Rgba8Unorm` upload, an opaque
+texture snapshot, and `draw_textured`. The fixed shader derives planar
+coordinates from model-space position and performs an integer mip-zero
+`textureLoad`; it adds no sampler, UV vertex layout, mip/LOD, sRGB, or PBR API.
+Mesh and texture generations are reserved and released or poisoned together.
 
 | Component | Next milestones |
 | --- | --- |
 | RHI / RenderGraph integration `0.1` | Complete: Windows DX12/Vulkan owned resources and fixed Copy → Compute → Raster→Compute→Copy exact-oracle execution |
 | Renderer / Shader / Assets `0.1` | Headless Camera/Mesh/Geometry/BasicMaterial/DrawList → minimal shader compile/reflection and resource lifetime/cache/handles |
-| Renderer `0.2` | In progress: GPU-ready indexed-mesh snapshot and fixed unlit draw → Camera/material binding → texture/basic PBR → one real static scene |
+| Renderer `0.2` | In progress: GPU-ready mesh/texture snapshots and fixed textured unlit draw → sampler/UV only when required → basic PBR → one real static scene |
 | RenderGraph `0.2` | WebGPU and WebGL2 compatibility adapters |
 | Renderer `0.3` / Assets `0.2` / Shader `0.2` | GLTF, loading/reuse, variants/layout metadata, caches, culling, batching |
 | RenderGraph `0.3` / Renderer `0.4` | Surface/Present/resize/lost, then a visible Windows/Web renderer |
