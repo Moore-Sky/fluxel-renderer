@@ -255,6 +255,9 @@ pub(super) struct NativeRasterPipeline(Arc<NativeRasterPipelineShared>);
 struct NativeRasterPipelineShared {
     native: Option<NativeRasterPipelineInner>,
     owner: Arc<OpenedDevice>,
+    // The safe layer selects the closed recipe, but this private copy lets
+    // every native binding boundary reject a mismatched opaque pipeline too.
+    kernel: crate::RasterKernel,
 }
 
 #[allow(
@@ -307,11 +310,15 @@ enum NativeRasterTextureBindingsInner {
     Dx12 {
         group: wgpu_hal::dx12::BindGroup,
         view: wgpu_hal::dx12::TextureView,
+        // The sampler is private to the closed linear-clamp recipe. It must
+        // outlive its bind group, and is destroyed after that group below.
+        sampler: Option<wgpu_hal::dx12::Sampler>,
     },
     #[cfg(feature = "vulkan")]
     Vulkan {
         group: wgpu_hal::vulkan::BindGroup,
         view: wgpu_hal::vulkan::TextureView,
+        sampler: Option<wgpu_hal::vulkan::Sampler>,
     },
 }
 
@@ -714,22 +721,36 @@ impl Drop for NativeRasterTextureBindings {
             #[cfg(feature = "dx12")]
             (
                 NativeDevice::Dx12 { device, .. },
-                NativeRasterTextureBindingsInner::Dx12 { group, view },
+                NativeRasterTextureBindingsInner::Dx12 {
+                    group,
+                    view,
+                    sampler,
+                },
             ) => unsafe {
                 // SAFETY: the retained pipeline owns this matching device and
                 // layout; ResourceLease keeps the group/view and their bound
                 // resources alive until terminal queue completion.
                 device.destroy_bind_group(group);
                 device.destroy_texture_view(view);
+                if let Some(sampler) = sampler {
+                    device.destroy_sampler(sampler);
+                }
             },
             #[cfg(feature = "vulkan")]
             (
                 NativeDevice::Vulkan { device, .. },
-                NativeRasterTextureBindingsInner::Vulkan { group, view },
+                NativeRasterTextureBindingsInner::Vulkan {
+                    group,
+                    view,
+                    sampler,
+                },
             ) => unsafe {
                 // SAFETY: same device/layout/lifetime proof as DX12.
                 device.destroy_bind_group(group);
                 device.destroy_texture_view(view);
+                if let Some(sampler) = sampler {
+                    device.destroy_sampler(sampler);
+                }
             },
             _ => unreachable!("textured raster bindings and device backend always match"),
         }
@@ -1315,7 +1336,8 @@ pub(super) fn create_raster_pipeline(
                 attributes: &position_f32x3_attributes,
             })]
         }
-        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv => vec![
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+        | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => vec![
             Some(wgpu_hal::VertexBufferLayout {
                 array_stride: 12,
                 step_mode: wgt::VertexStepMode::Vertex,
@@ -1354,12 +1376,40 @@ pub(super) fn create_raster_pipeline(
             count: None,
         },
     ];
+    let linear_clamp_textured_frame_entries = [
+        frame_uniform_entries[0],
+        wgt::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgt::ShaderStages::FRAGMENT,
+            ty: wgt::BindingType::Texture {
+                sample_type: wgt::TextureSampleType::Float { filterable: true },
+                view_dimension: wgt::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgt::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgt::ShaderStages::FRAGMENT,
+            ty: wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
+            count: None,
+        },
+    ];
     let raster_binding_entries: &[wgt::BindGroupLayoutEntry] = if matches!(
         kernel,
         crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
     ) {
         &textured_frame_entries
+    } else if kernel
+        == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+    {
+        if !owner.capabilities.rgba8_unorm_filterable {
+            return Err(RasterPipelineCreateError::NativeObjectCreation(
+                "Rgba8Unorm is not filterable on the selected adapter".into(),
+            ));
+        }
+        &linear_clamp_textured_frame_entries
     } else {
         &frame_uniform_entries
     };
@@ -1405,6 +1455,7 @@ pub(super) fn create_raster_pipeline(
                 crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
             ) {
                 match unsafe {
                     // SAFETY: the static one-entry descriptor is valid and
@@ -1565,6 +1616,7 @@ pub(super) fn create_raster_pipeline(
                 crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
             ) {
                 match unsafe {
                     // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.
@@ -1688,6 +1740,7 @@ pub(super) fn create_raster_pipeline(
     Ok(NativeRasterPipeline(Arc::new(NativeRasterPipelineShared {
         native: Some(native),
         owner: Arc::clone(owner),
+        kernel,
     })))
 }
 
@@ -1912,7 +1965,11 @@ pub(super) fn create_raster_texture_bindings(
             };
             match group {
                 Ok(group) => Ok(NativeRasterTextureBindings {
-                    native: Some(NativeRasterTextureBindingsInner::Dx12 { group, view }),
+                    native: Some(NativeRasterTextureBindingsInner::Dx12 {
+                        group,
+                        view,
+                        sampler: None,
+                    }),
                     pipeline: pipeline.clone(),
                     expected_uv_vertex_streams: None,
                 }),
@@ -1961,7 +2018,11 @@ pub(super) fn create_raster_texture_bindings(
             };
             match group {
                 Ok(group) => Ok(NativeRasterTextureBindings {
-                    native: Some(NativeRasterTextureBindingsInner::Vulkan { group, view }),
+                    native: Some(NativeRasterTextureBindingsInner::Vulkan {
+                        group,
+                        view,
+                        sampler: None,
+                    }),
                     pipeline: pipeline.clone(),
                     expected_uv_vertex_streams: None,
                 }),
@@ -2003,6 +2064,237 @@ pub(super) fn create_raster_uv_texture_bindings(
         texture_coordinate_size,
     ));
     Ok(bindings)
+}
+
+/// Creates the closed explicit-UV filtering binding. The sampler is owned by
+/// this opaque object: its bind group is destroyed first, followed by the
+/// view and sampler, so no native descriptor can outlive a dependency.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private native boundary receives each fixed binding and both independently checked stream identity/range pairs"
+)]
+pub(super) fn create_raster_uv_linear_clamp_texture_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    uniform: &OwnedBuffer,
+    texture: &OwnedTexture,
+    positions: fluxel_rendergraph::PhysicalResourceIdentity,
+    position_size: u64,
+    texture_coordinates: fluxel_rendergraph::PhysicalResourceIdentity,
+    texture_coordinate_size: u64,
+) -> Result<NativeRasterTextureBindings, String> {
+    if !owner.capabilities.rgba8_unorm_filterable {
+        return Err("Rgba8Unorm is not filterable on the selected adapter".into());
+    }
+    if pipeline.0.kernel
+        != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+        || !Arc::ptr_eq(owner, &pipeline.0.owner)
+        || !Arc::ptr_eq(owner, &uniform.owner)
+        || !Arc::ptr_eq(owner, &texture.owner)
+        || uniform.size != 80
+        || !uniform.allowed_usage.contains(BufferUsageKind::Uniform)
+        || texture.descriptor.dimension != TextureDimension::D2
+        || texture.descriptor.format != TextureFormat::Rgba8Unorm
+        || texture.descriptor.extent.depth != 1
+        || texture.descriptor.mip_levels != 1
+        || texture.descriptor.array_layers != 1
+        || texture.descriptor.sample_count != 1
+        || !texture.allowed_usage.contains(TextureUsageKind::Sampled)
+    {
+        return Err("invalid linear-clamp textured raster binding".into());
+    }
+    let view_desc = wgpu_hal::TextureViewDescriptor {
+        label: Some("fluxel linear-clamp textured raster Rgba8 view"),
+        format: wgt::TextureFormat::Rgba8Unorm,
+        dimension: wgt::TextureViewDimension::D2,
+        usage: wgt::TextureUses::RESOURCE,
+        range: wgt::ImageSubresourceRange {
+            aspect: wgt::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+        },
+    };
+    let sampler_desc = linear_clamp_sampler_descriptor();
+    let entries = [
+        wgpu_hal::BindGroupEntry {
+            binding: 0,
+            resource_index: 0,
+            count: 1,
+        },
+        wgpu_hal::BindGroupEntry {
+            binding: 1,
+            resource_index: 0,
+            count: 1,
+        },
+        wgpu_hal::BindGroupEntry {
+            binding: 2,
+            resource_index: 0,
+            count: 1,
+        },
+    ];
+    let size = NonZeroU64::new(80).expect("fixed uniform size");
+    match (
+        &owner.native,
+        pipeline.0.native.as_ref(),
+        uniform.native.as_ref(),
+        texture.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeDevice::Dx12 { device, .. },
+            Some(NativeRasterPipelineInner::Dx12 {
+                bind_group_layout: Some(layout),
+                ..
+            }),
+            Some(NativeBuffer::Dx12(buffer)),
+            Some(NativeTexture::Dx12(image)),
+        ) => {
+            // SAFETY: the checked texture is whole D2 Rgba8Unorm with RESOURCE
+            // use, and this device owns both the image and resulting view.
+            let view = unsafe { device.create_texture_view(image, &view_desc) }
+                .map_err(|e| format!("DX12 linear-clamp raster view creation failed: {e}"))?;
+            // SAFETY: the descriptor is fixed to filtering linear min/mag,
+            // nearest mip, clamp-to-edge on U/V/W, no compare and anisotropy 1.
+            let sampler = match unsafe { device.create_sampler(&sampler_desc) } {
+                Ok(sampler) => sampler,
+                Err(e) => {
+                    unsafe { device.destroy_texture_view(view) };
+                    return Err(format!("DX12 linear-clamp sampler creation failed: {e}"));
+                }
+            };
+            // SAFETY: all same-device resources and the exact three-entry
+            // layout were checked above and remain retained by the result.
+            let group = unsafe {
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel linear-clamp textured raster bindings"),
+                    layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, 0, size)],
+                    samplers: &[&sampler],
+                    textures: &[wgpu_hal::TextureBinding {
+                        view: &view,
+                        usage: wgt::TextureUses::RESOURCE,
+                    }],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            };
+            match group {
+                Ok(group) => Ok(NativeRasterTextureBindings {
+                    native: Some(NativeRasterTextureBindingsInner::Dx12 {
+                        group,
+                        view,
+                        sampler: Some(sampler),
+                    }),
+                    pipeline: pipeline.clone(),
+                    expected_uv_vertex_streams: Some((
+                        positions,
+                        position_size,
+                        texture_coordinates,
+                        texture_coordinate_size,
+                    )),
+                }),
+                Err(e) => {
+                    // SAFETY: creation failed before the group escaped; dispose
+                    // dependent objects in reverse creation order.
+                    unsafe {
+                        device.destroy_sampler(sampler);
+                        device.destroy_texture_view(view);
+                    }
+                    Err(format!(
+                        "DX12 linear-clamp raster binding creation failed: {e}"
+                    ))
+                }
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeDevice::Vulkan { device, .. },
+            Some(NativeRasterPipelineInner::Vulkan {
+                bind_group_layout: Some(layout),
+                ..
+            }),
+            Some(NativeBuffer::Vulkan(buffer)),
+            Some(NativeTexture::Vulkan(image)),
+        ) => {
+            // SAFETY: the same closed view descriptor and device-affinity proof
+            // as DX12 apply to this retained Vulkan image.
+            let view = unsafe { device.create_texture_view(image, &view_desc) }
+                .map_err(|e| format!("Vulkan linear-clamp raster view creation failed: {e}"))?;
+            // SAFETY: fixed descriptor semantics are identical on Vulkan.
+            let sampler = match unsafe { device.create_sampler(&sampler_desc) } {
+                Ok(sampler) => sampler,
+                Err(e) => {
+                    unsafe { device.destroy_texture_view(view) };
+                    return Err(format!("Vulkan linear-clamp sampler creation failed: {e}"));
+                }
+            };
+            // SAFETY: checked whole uniform/view/sampler inputs match the
+            // closed layout and are retained with the opaque result.
+            let group = unsafe {
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel linear-clamp textured raster bindings"),
+                    layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, 0, size)],
+                    samplers: &[&sampler],
+                    textures: &[wgpu_hal::TextureBinding {
+                        view: &view,
+                        usage: wgt::TextureUses::RESOURCE,
+                    }],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            };
+            match group {
+                Ok(group) => Ok(NativeRasterTextureBindings {
+                    native: Some(NativeRasterTextureBindingsInner::Vulkan {
+                        group,
+                        view,
+                        sampler: Some(sampler),
+                    }),
+                    pipeline: pipeline.clone(),
+                    expected_uv_vertex_streams: Some((
+                        positions,
+                        position_size,
+                        texture_coordinates,
+                        texture_coordinate_size,
+                    )),
+                }),
+                Err(e) => {
+                    // SAFETY: no group escaped, so the view/sampler are uniquely
+                    // consumable by this same device.
+                    unsafe {
+                        device.destroy_sampler(sampler);
+                        device.destroy_texture_view(view);
+                    }
+                    Err(format!(
+                        "Vulkan linear-clamp raster binding creation failed: {e}"
+                    ))
+                }
+            }
+        }
+        _ => Err("linear-clamp bindings do not match the linear-clamp pipeline".into()),
+    }
+}
+
+fn linear_clamp_sampler_descriptor() -> wgpu_hal::SamplerDescriptor<'static> {
+    wgpu_hal::SamplerDescriptor {
+        label: Some("fluxel fixed linear-clamp sampler"),
+        address_modes: [wgt::AddressMode::ClampToEdge; 3],
+        mag_filter: wgt::FilterMode::Linear,
+        min_filter: wgt::FilterMode::Linear,
+        mipmap_filter: wgt::MipmapFilterMode::Nearest,
+        // The WGSL has an explicit `textureSampleLevel(..., 0.0)`. Keep the
+        // native sampler unconstrained; shader semantics, not clamp repair,
+        // choose mip zero.
+        lod_clamp: 0.0..32.0,
+        compare: None,
+        anisotropy_clamp: 1,
+        border_color: None,
+    }
 }
 
 pub(super) fn set_raster_texture_bindings(
@@ -2057,6 +2349,21 @@ pub(super) fn set_raster_uv_texture_bindings(
     encoder: &mut CopyEncoder,
     bindings: &NativeRasterTextureBindings,
 ) -> Result<(), String> {
+    set_raster_texture_bindings(encoder, bindings)
+}
+
+/// The linear-clamp UV artifact has the same checked command-side binding
+/// lifetime as the integer UV artifact; its differing sampler ABI is fully
+/// captured by the opaque group created above.
+pub(super) fn set_raster_uv_linear_clamp_texture_bindings(
+    encoder: &mut CopyEncoder,
+    bindings: &NativeRasterTextureBindings,
+) -> Result<(), String> {
+    if bindings.pipeline.0.kernel
+        != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+    {
+        return Err("linear-clamp bindings require their linear-clamp raster pipeline".into());
+    }
     set_raster_texture_bindings(encoder, bindings)
 }
 
@@ -2616,7 +2923,11 @@ pub(super) fn set_vertex_buffer(
     actual_identity: fluxel_rendergraph::PhysicalResourceIdentity,
     uv_bindings: Option<&NativeRasterTextureBindings>,
 ) -> Result<(), String> {
-    if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv {
+    if matches!(
+        kernel,
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+    ) {
         if encoder.active_render_view.is_none() {
             return Err("explicit-UV vertex binding requires an active raster pass".into());
         }
@@ -2656,12 +2967,18 @@ pub(super) fn set_vertex_buffer(
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
         ) && offset != 0)
-        || (kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
-            && (slot > 1 || offset != 0 || size < if slot == 0 { 12 } else { 8 }))
+        || (matches!(
+            kernel,
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+        ) && (slot > 1 || offset != 0 || size < if slot == 0 { 12 } else { 8 }))
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
         || size
-            < if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
-                && slot == 1
+            < if matches!(
+            kernel,
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+        ) && slot == 1
             {
                 8
             } else {
@@ -4832,7 +5149,12 @@ fn open_dx12(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
                 available_adapters,
             })?;
     let hardware = hardware(Backend::Dx12, &exposed.info);
-    let capabilities = capabilities(exposed.features, &exposed.capabilities);
+    let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
+    let capabilities = capabilities(
+        exposed.features,
+        &exposed.capabilities,
+        rgba8_unorm_filterable,
+    );
     let requested_limits = required_limits(Backend::Dx12, &exposed.capabilities)?;
     let adapter = exposed.adapter;
     // SAFETY: features are empty and default limits are validated by the
@@ -4895,7 +5217,12 @@ fn open_vulkan(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
                 available_adapters,
             })?;
     let hardware = hardware(Backend::Vulkan, &exposed.info);
-    let capabilities = capabilities(exposed.features, &exposed.capabilities);
+    let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
+    let capabilities = capabilities(
+        exposed.features,
+        &exposed.capabilities,
+        rgba8_unorm_filterable,
+    );
     let requested_limits = required_limits(Backend::Vulkan, &exposed.capabilities)?;
     let adapter = exposed.adapter;
     // SAFETY: features are empty and default limits are validated by the
@@ -5018,8 +5345,20 @@ fn hardware(backend: Backend, info: &wgt::AdapterInfo) -> HardwareInfo {
         driver_info: info.driver_info.clone(),
     }
 }
-fn capabilities(_: wgt::Features, capabilities: &wgpu_hal::Capabilities) -> HardwareCapabilities {
+fn rgba8_unorm_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
+    // SAFETY: the selected adapter remains retained through device creation;
+    // this read-only format query has no resource or queue side effects.
+    unsafe { adapter.texture_format_capabilities(wgt::TextureFormat::Rgba8Unorm) }
+        .contains(wgpu_hal::TextureFormatCapabilities::SAMPLED_LINEAR)
+}
+
+fn capabilities(
+    _: wgt::Features,
+    capabilities: &wgpu_hal::Capabilities,
+    rgba8_unorm_filterable: bool,
+) -> HardwareCapabilities {
     HardwareCapabilities {
+        rgba8_unorm_filterable,
         max_texture_dimension_2d: capabilities.limits.max_texture_dimension_2d,
         max_bind_groups: capabilities.limits.max_bind_groups,
         min_uniform_buffer_offset_alignment: capabilities
@@ -5132,6 +5471,19 @@ mod tests {
         let _guard = lock_queue_operations(&lock);
         // The recovered guard is still held here, so a future caller remains
         // serialized even after an unrelated panic poisoned the mutex.
+    }
+
+    #[test]
+    fn linear_clamp_sampler_descriptor_is_closed_and_filtering() {
+        let descriptor = linear_clamp_sampler_descriptor();
+        assert_eq!(descriptor.address_modes, [wgt::AddressMode::ClampToEdge; 3]);
+        assert_eq!(descriptor.min_filter, wgt::FilterMode::Linear);
+        assert_eq!(descriptor.mag_filter, wgt::FilterMode::Linear);
+        assert_eq!(descriptor.mipmap_filter, wgt::MipmapFilterMode::Nearest);
+        assert_eq!(descriptor.lod_clamp, 0.0..32.0);
+        assert_eq!(descriptor.compare, None);
+        assert_eq!(descriptor.anisotropy_clamp, 1);
+        assert_eq!(descriptor.border_color, None);
     }
 
     #[test]

@@ -3,8 +3,9 @@
 //! This crate models cameras, geometry, meshes, basic materials, and ordered
 //! draw lists. Its opt-in `gpu-upload` feature publishes immutable indexed-mesh
 //! and RGBA8 texture snapshots after native completion. Its opt-in fixed-frame
-//! slice lowers closed constant-color or textureLoad indexed draws without
-//! exposing native resources.
+//! slice lowers closed constant-color, mip-zero `textureLoad`, or fixed
+//! linear-clamp `textureSampleLevel` indexed draws without exposing native
+//! resources or a configurable sampler.
 
 #![deny(missing_docs)]
 

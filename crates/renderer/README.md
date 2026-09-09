@@ -10,7 +10,7 @@ and return opaque offscreen image metadata. It can also upload one immutable
 tight `Rgba8Unorm` image and use its opaque snapshot in a closed textured draw.
 
 It is intentionally not a complete GPU renderer: it does not lower draw lists,
-compile general material shaders, provide samplers/PBR or a general
+compile general material shaders, expose configurable samplers/PBR or a general
 pipeline/bind-group API, or present pixels.
 
 ## Optional GPU upload
@@ -18,7 +18,7 @@ pipeline/bind-group API, or present pixels.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.4"
+tag = "v0.2.5"
 features = ["gpu-upload"]
 ```
 
@@ -48,9 +48,10 @@ upload; only proven completion publishes `BaseColorTextureSnapshot`.
 derived from model-space `position.xy`. `TexturedGeometry` and
 `TexturedIndexedMeshUpload` add an isolated three-stream position/index/UV
 generation; `draw_textured_uv` consumes its explicit finite `f32x2` coordinates
-through a closed second vertex slot. Both paths deliberately expose no sampler,
-filter/wrap/LOD, sRGB, or PBR contract. The textured paths
-accepts only finite, positive-w triangles wholly inside the clip volume, and
+through a closed second vertex slot. `draw_textured_uv_linear_clamp` adds a
+separate fixed `textureSampleLevel(..., 0.0)` path with private linear filtering
+and clamp-to-edge state. It exposes no configurable sampler, mip/LOD, sRGB, or
+general binding contract. The textured paths accept only finite, positive-w triangles wholly inside the clip volume, and
 mesh/texture generations share one atomic draw reservation outcome.
 
 ## Use today
@@ -93,6 +94,8 @@ The 0.2.3 U04 fixtures compare this textured draw byte-for-byte with an
 independent CPU oracle on DX12 and Vulkan under Required validation.
 The 0.2.4 U05 fixtures separately prove explicit UV perspective interpolation
 against position-derived and linear CPU counter-oracles on both backends.
+The 0.2.5 U06 fixtures additionally prove fixed linear filtering and independently
+observable U/V clamp behavior on DX12 and Vulkan.
 
 The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend

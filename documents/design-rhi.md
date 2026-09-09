@@ -1,6 +1,6 @@
 # Fluxel RHI Design
 
-**Status: 0.3.0 RHI with 0.2.4 explicit-UV renderer support**
+**Status: 0.4.0 RHI with 0.2.5 fixed linear-clamp renderer support**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
 not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
@@ -47,6 +47,22 @@ pipeline epoch and rejects swapped, repeated, missing, partial-range, wrong-
 usage, or stale roles before HAL calls; the native boundary repeats pass,
 pipeline, usage, identity, slot, and exact-range validation. Existing closed
 artifact identities and state machines are unchanged.
+
+0.4.0 adds a second explicit-UV kernel without changing the integer-load
+kernel. It fixes a filterable `Rgba8Unorm` texture plus an internally created
+linear-min/mag, nearest-mip, clamp-to-edge sampler and calls
+`textureSampleLevel` at level zero. The selected adapter's `SAMPLED_LINEAR`
+format fact is retained in `HardwareCapabilities`, propagated to RenderGraph's
+format capabilities and checked again before pipeline and binding creation.
+The opaque binding owns the sampler, view, bind group, pipeline and resource
+leases until terminal completion; sampler state is neither configurable nor a
+graph resource.
+
+The workspace temporarily vendors `wgpu-hal` 30.0.1 with upstream
+gfx-rs/wgpu#10221 backported. The published 30.0.1 DX12 lowering maps an absent
+comparison function to `ALWAYS`, which D3D12 validation rejects for a standard
+filter; the backport maps it to `D3D12_COMPARISON_FUNC_NONE`. This patch remains
+local only until a Rust-1.87-compatible upstream release contains the fix.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that

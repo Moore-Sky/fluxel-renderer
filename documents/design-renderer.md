@@ -1,6 +1,6 @@
 # Fluxel Renderer design
 
-**Status: 0.2.4 fixed headless explicit-UV indexed snapshot draw**
+**Status: 0.2.5 fixed headless explicit-UV linear-clamp draw**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
@@ -144,8 +144,23 @@ perspective-center interpolation before the same clamped integer mip-zero
 so equally sized generic buffers cannot be silently swapped. This still adds no
 sampler, filtering, mip selection, sRGB, normals, lighting, or PBR contract.
 
+0.2.5 keeps both integer `textureLoad` paths intact and adds a separate
+`draw_textured_uv_linear_clamp` policy. The renderer compiles each graph against
+the actual capability snapshot of the same `RasterBackend` moved into its
+executor. The new path preflights real `Rgba8Unorm` linear-filter support and
+uses a private linear-min/mag, nearest-mip, clamp-to-edge sampler with explicit
+level zero. The sampler remains an RHI-owned binding detail; the graph still
+declares only the texture's Sampled access.
+
+Required-validation fixtures reject every collected native diagnostic except
+the exact DX12 performance-information message #820 for a missing optimized
+clear value (severity 2, category 9, matching message text). That message does
+not report an invalid command or state. The exception is deliberately matched
+on severity, category, id, and text; any other DX12 or Vulkan diagnostic still
+fails the fixture.
+
 This is evidence for one fixed textured snapshot-to-plan-to-native path, not a
-claim that model transforms, `DrawList` lowering, samplers, UV attributes,
+claim that model transforms, `DrawList` lowering, configurable samplers, further UV attributes,
 mips/LOD, sRGB, PBR, depth, blending, batching, general bindings, Surface, or
 Present are implemented.
 

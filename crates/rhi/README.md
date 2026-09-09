@@ -32,7 +32,7 @@ usage; its private staging rows are padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.4"
+tag = "v0.2.5"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -44,7 +44,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.4"
+tag = "v0.2.5"
 default-features = false
 features = ["dx12"]
 ```
@@ -125,6 +125,19 @@ tightly packed `f32x2` texture coordinate at location 1. Its binding retains
 the expected physical identities for both streams, and safe/native recording
 rejects swapped, missing, repeated, partial, or foreign roles before submission.
 It preserves the same no-sampler mip-zero `textureLoad` fragment recipe.
+
+The 0.4.0 RHI API adds a separate explicit-UV linear-clamp artifact. Its
+binding layout fixes a filterable `Rgba8Unorm` texture and a private filtering
+sampler, while its shader uses explicit level zero. The opaque binding owns the
+sampler through terminal completion; it is neither a public descriptor nor a
+RenderGraph resource. Adapter `SAMPLED_LINEAR` support is reported as a raw
+fact, propagated into the graph fingerprint, and rechecked before native
+creation.
+
+For reproducible DX12 validation the workspace carries the upstream
+gfx-rs/wgpu#10221 fix on its vendored `wgpu-hal` 30.0.1 source. See
+`vendor/wgpu-hal-30.0.1/FLUXEL-PATCH.md`; the patch can be removed once a
+Rust-1.87-compatible release includes it.
 
 X01 samples that complete color texture in
 a closed compute artifact, packs row-major RGBA8 pixels into an RW storage

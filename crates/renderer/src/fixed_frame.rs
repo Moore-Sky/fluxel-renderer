@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use fluxel_rendergraph::{
     AttachmentOps, BindingResource, BindingSetId, BoundBuffer, BufferBindingId, BufferRange,
-    ColorAttachmentDesc, CompletionFailure, CompletionStatus, DeviceIdentity, ExecutionError,
-    ExportBufferContract, ExportTextureContract, Extent3d, ExternalOwnership, FrameBindingError,
-    FrameBindingErrorKind, FrameInputs, FrameResourceProvider, ImportBufferContract,
-    ImportTextureContract, IndexFormat, InitialContents, LoadOp, RasterPipelineId, RenderGraph,
-    ResourceAccessState, StoreOp, TextureBindingId, TextureDesc, TextureDimension, TextureFormat,
-    TextureRange, TextureReadUse, Viewport, WriteCoverage,
+    ColorAttachmentDesc, CompletionFailure, CompletionStatus, DeviceCapabilities, DeviceIdentity,
+    ExecutionError, ExportBufferContract, ExportTextureContract, Extent3d, ExternalOwnership,
+    FrameBindingError, FrameBindingErrorKind, FrameInputs, FrameResourceProvider,
+    ImportBufferContract, ImportTextureContract, IndexFormat, InitialContents, LoadOp,
+    RasterPipelineId, RenderGraph, ResourceAccessState, StoreOp, TextureBindingId, TextureDesc,
+    TextureDimension, TextureFormat, TextureRange, TextureReadUse, Viewport, WriteCoverage,
 };
 use fluxel_rhi::{
     Buffer, BufferDescriptor, BufferUploadError, Device, MemoryPolicy, PendingBufferUpload,
@@ -22,6 +22,12 @@ use crate::frame_uniform::{FRAME_UNIFORM_BYTES, FrameUniform};
 #[cfg(all(test, windows))]
 fn native_fixture_guard() -> std::sync::MutexGuard<'static, ()> {
     crate::native_fixture_guard()
+}
+
+#[cfg(all(test, windows))]
+fn actual_raster_capabilities(device: &Device) -> DeviceCapabilities {
+    let backend = RasterBackend::new(device.clone());
+    fluxel_rendergraph::ExecutionBackend::capabilities(&backend).clone()
 }
 
 #[cfg(test)]
@@ -63,7 +69,11 @@ mod u04 {
         let vk_mesh = ready_mesh(&vk);
         let vk_texture = ready_texture(&vk);
         // Both executions consume this exact allocation rather than equivalent recompilations.
-        let graph = Arc::new(build_textured_camera_graph(&dx_mesh, &dx_texture, [8, 8]).unwrap());
+        let dx_capabilities = actual_raster_capabilities(&dx);
+        assert_eq!(dx_capabilities, actual_raster_capabilities(&vk));
+        let graph = Arc::new(
+            build_textured_camera_graph(&dx_mesh, &dx_texture, [8, 8], &dx_capabilities).unwrap(),
+        );
         let fixture_geometry = mesh();
         let fixture_camera = camera();
         let fixture_image = image();
@@ -695,8 +705,18 @@ mod u05 {
         let vk_mesh = ready_mesh(&vk);
         let dx_texture = ready_texture(&dx);
         let vk_texture = ready_texture(&vk);
-        let graph =
-            Arc::new(build_uv_textured_camera_graph(&dx_mesh, &dx_texture, [8, 8]).unwrap());
+        let dx_capabilities = actual_raster_capabilities(&dx);
+        assert_eq!(dx_capabilities, actual_raster_capabilities(&vk));
+        let graph = Arc::new(
+            build_uv_textured_camera_graph(
+                &dx_mesh,
+                &dx_texture,
+                [8, 8],
+                &dx_capabilities,
+                DrawFlavor::UvTextureLoad,
+            )
+            .unwrap(),
+        );
         let expected = oracle(Interpolation::ExplicitPerspective);
         let distinction = distinguish(&expected);
         for (backend, device, mesh, texture) in [
@@ -1227,6 +1247,569 @@ mod u05 {
         actual.iter().zip(expected).position(|(a, b)| a != b)
     }
 }
+#[cfg(test)]
+mod u06 {
+    //! U06 deliberately uses endpoint-only RGBA8 values.  The two audited
+    //! samples make U and V clamp independently observable.
+    use super::*;
+    use crate::{
+        BaseColorTextureUpload, BaseColorTextureUploadStatus, BasicMaterial, Camera, Geometry,
+        Rgba8Image, TexturedBasicMaterial, TexturedGeometry, TexturedIndexedMeshSnapshot,
+        TexturedIndexedMeshUpload, TexturedIndexedMeshUploadStatus,
+    };
+    use fluxel_rhi::{
+        Backend, DeviceOptions, Validation, readback_exported_raster_texture_for_test,
+    };
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Windows DX12 device with required validation"]
+    fn u06_linear_clamp_dx12() {
+        run(Backend::Dx12);
+    }
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Windows Vulkan device with required validation"]
+    fn u06_linear_clamp_vulkan() {
+        run(Backend::Vulkan);
+    }
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires DX12 and Vulkan devices with required validation"]
+    fn u06_linear_clamp_paired_same_compiled_graph() {
+        let _guard = native_fixture_guard();
+        let dx = open(Backend::Dx12);
+        let vk = open(Backend::Vulkan);
+        assert_eq!(
+            actual_raster_capabilities(&dx),
+            actual_raster_capabilities(&vk)
+        );
+        let dx_mesh = mesh(&dx);
+        let vk_mesh = mesh(&vk);
+        let dx_tex = texture(&dx);
+        let vk_tex = texture(&vk);
+        let caps = actual_raster_capabilities(&dx);
+        let graph = Arc::new(
+            build_uv_textured_camera_graph(
+                &dx_mesh,
+                &dx_tex,
+                [8, 8],
+                &caps,
+                DrawFlavor::UvLinearClamp,
+            )
+            .unwrap(),
+        );
+        let expected = oracle();
+        let audit = audit(&expected);
+        let mut paired_actual: Option<Vec<u8>> = None;
+        for (backend, device, mesh, texture) in [
+            (Backend::Dx12, &dx, &dx_mesh, &dx_tex),
+            (Backend::Vulkan, &vk, &vk_mesh, &vk_tex),
+        ] {
+            fluxel_rhi::test_support::clear_validation_diagnostics(device);
+            let renderer = FixedFrameRenderer::new(device.clone());
+            let mut submission = renderer
+                .start_uv_with_flavor(
+                    mesh,
+                    texture,
+                    UvStartRequest {
+                        graph: Arc::clone(&graph),
+                        uniform: FrameUniform::new(&camera(), &BasicMaterial::default()).unwrap(),
+                        reservation: mesh.reserve_for_draw().unwrap(),
+                        texture_reservation: texture.reserve_for_draw().unwrap(),
+                        flavor: DrawFlavor::UvLinearClamp,
+                    },
+                )
+                .unwrap();
+            let actual = complete(device, &mut submission);
+            assert_witnesses(backend, &actual.tight, &expected, &audit);
+            if let Some(first) = &paired_actual {
+                assert_eq!(
+                    actual.tight,
+                    *first,
+                    "U06 paired full-readback difference {:?}",
+                    first_difference(&actual.tight, first),
+                );
+            } else {
+                paired_actual = Some(actual.tight.clone());
+            }
+            assert_required_validation_clean(device);
+            artifact(
+                "paired-same-compiled-graph",
+                backend,
+                device,
+                &graph,
+                &actual,
+                &expected,
+                &audit,
+                outgoing(&submission, &graph),
+            );
+        }
+    }
+    #[cfg(windows)]
+    fn open(backend: Backend) -> Device {
+        Device::open(
+            backend,
+            DeviceOptions {
+                validation: Validation::Required,
+                ..DeviceOptions::default()
+            },
+        )
+        .unwrap()
+    }
+    #[cfg(windows)]
+    fn geometry() -> TexturedGeometry {
+        // All clip w are positive and unequal: 0.95, 1.05, 1.0.
+        let positions =
+            Geometry::from_positions(vec![[-0.9, -0.9, -0.5], [0.8, -0.9, 0.5], [-0.9, 0.8, 0.0]])
+                .with_indices(vec![0, 1, 2])
+                .unwrap();
+        TexturedGeometry::new(positions, vec![[-0.28, 0.38], [1.28, 0.42], [0.46, 1.34]]).unwrap()
+    }
+    #[cfg(windows)]
+    fn camera() -> Camera {
+        Camera::new(
+            [
+                [1., 0., 0., 0.],
+                [0., 1., 0., 0.],
+                [0., 0., 1., 0.],
+                [0., 0., 0., 1.],
+            ],
+            [
+                [1., 0., 0., 0.],
+                [0., 1., 0., 0.],
+                [0., 0., 0.05, 0.1],
+                [0., 0., 0.5, 1.],
+            ],
+        )
+    }
+    #[cfg(windows)]
+    fn image() -> Rgba8Image {
+        Rgba8Image::new(
+            [3, 2],
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255, 255, 0, 255, 255,
+                0, 255, 255, 255,
+            ],
+        )
+        .unwrap()
+    }
+    #[cfg(windows)]
+    fn mesh(device: &Device) -> TexturedIndexedMeshSnapshot {
+        let mut upload = TexturedIndexedMeshUpload::begin(device, &geometry()).unwrap();
+        wait(10, || match upload.poll() {
+            TexturedIndexedMeshUploadStatus::Ready => Some(upload.ready_snapshot().unwrap()),
+            TexturedIndexedMeshUploadStatus::Pending => None,
+            TexturedIndexedMeshUploadStatus::Failed(e) => panic!("U06 mesh {e:?}"),
+        })
+    }
+    #[cfg(windows)]
+    fn texture(device: &Device) -> BaseColorTextureSnapshot {
+        let mut upload = BaseColorTextureUpload::begin(device, &image()).unwrap();
+        wait(10, || match upload.poll() {
+            BaseColorTextureUploadStatus::Ready => Some(upload.ready_snapshot().unwrap()),
+            BaseColorTextureUploadStatus::Pending => None,
+            BaseColorTextureUploadStatus::Failed(e) => panic!("U06 texture {e:?}"),
+        })
+    }
+    #[cfg(windows)]
+    fn wait<T>(seconds: u64, mut poll: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        loop {
+            if let Some(v) = poll() {
+                return v;
+            };
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    #[cfg(windows)]
+    fn run(backend: Backend) {
+        let _guard = native_fixture_guard();
+        let device = open(backend);
+        let mesh = mesh(&device);
+        let tex = texture(&device);
+        let material = TexturedBasicMaterial::new(BasicMaterial::default(), tex);
+        fluxel_rhi::test_support::clear_validation_diagnostics(&device);
+        let mut submission = FixedFrameRenderer::new(device.clone())
+            .draw_textured_uv_linear_clamp(&mesh, &camera(), &material, [8, 8])
+            .unwrap();
+        let actual = complete(&device, &mut submission);
+        let expected = oracle();
+        let evidence = audit(&expected);
+        assert_witnesses(backend, &actual.tight, &expected, &evidence);
+        let graph = submission.graph.as_ref().unwrap();
+        let states = outgoing(&submission, graph);
+        assert_required_validation_clean(&device);
+        artifact(
+            "independent-public-path",
+            backend,
+            &device,
+            graph,
+            &actual,
+            &expected,
+            &evidence,
+            states,
+        );
+    }
+    #[cfg(windows)]
+    fn complete(
+        device: &Device,
+        submission: &mut FixedFrameSubmission,
+    ) -> fluxel_rhi::RasterTextureReadback {
+        wait(10, || match submission.poll() {
+            FixedFrameStatus::Complete(_) => Some(()),
+            FixedFrameStatus::Pending | FixedFrameStatus::Busy => None,
+            FixedFrameStatus::Failed(e) => panic!("U06 completion {e:?}"),
+        });
+        readback_exported_raster_texture_for_test(
+            device,
+            submission
+                .completed
+                .as_ref()
+                .unwrap()
+                .exports
+                .texture(submission.target_export.unwrap())
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    #[cfg(windows)]
+    fn outgoing(
+        submission: &FixedFrameSubmission,
+        graph: &CameraGraph,
+    ) -> [ResourceAccessState; 4] {
+        let e = &submission.completed.as_ref().unwrap().exports;
+        let s = [
+            e.buffer(graph.position_export).unwrap().outgoing_state,
+            e.buffer(graph.index_export).unwrap().outgoing_state,
+            e.buffer(graph.texture_coordinate_export.unwrap())
+                .unwrap()
+                .outgoing_state,
+            e.texture(graph.texture_export.unwrap())
+                .unwrap()
+                .outgoing_state,
+        ];
+        assert_eq!(s, [ResourceAccessState::CopyDestination; 4]);
+        s
+    }
+    #[allow(
+        dead_code,
+        reason = "the complete audit record is emitted through Debug in the hardware artifact"
+    )]
+    #[derive(Clone, Debug)]
+    struct Sample {
+        pixel: [u32; 2],
+        winding: f32,
+        barycentric: [f32; 3],
+        uv: [f32; 2],
+        p: [f32; 2],
+        floor: [f32; 2],
+        texels: [[i32; 2]; 4],
+        weights: [f32; 4],
+        e: [u8; 4],
+        n: [u8; 4],
+        repeat: [u8; 4],
+        screen_linear: [u8; 4],
+        edge_margin: f32,
+    }
+    #[derive(Clone, Debug)]
+    struct Output {
+        pixels: Vec<u8>,
+        samples: Vec<Option<Sample>>,
+    }
+    #[cfg(windows)]
+    fn oracle() -> Output {
+        let g = geometry();
+        let im = image();
+        let positions = g.geometry().positions();
+        // Preserve f32 operation order from the fixed camera transform instead
+        // of baking decimal screen-coordinate approximations.
+        let vertex = |position: [f32; 3]| {
+            let w = 1.0 + position[2] * 0.1;
+            (
+                w,
+                ((position[0] / w + 1.0) * 4.0, (1.0 - position[1] / w) * 4.0),
+            )
+        };
+        let vertices = [
+            vertex(positions[0]),
+            vertex(positions[1]),
+            vertex(positions[2]),
+        ];
+        let ws = vertices.map(|vertex| vertex.0);
+        let ps = vertices.map(|vertex| vertex.1);
+        let uvs = g.texture_coordinates();
+        let edge = |a: (f32, f32), b: (f32, f32), p: (f32, f32)| {
+            (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
+        };
+        let area = edge(ps[0], ps[1], ps[2]);
+        let mut pixels = vec![0; 256];
+        for px in pixels.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0, 0, 0, 255])
+        }
+        let mut samples = vec![None; 64];
+        for y in 0..8 {
+            for x in 0..8 {
+                let p = (x as f32 + 0.5, y as f32 + 0.5);
+                let raw = [
+                    edge(ps[1], ps[2], p),
+                    edge(ps[2], ps[0], p),
+                    edge(ps[0], ps[1], p),
+                ];
+                if raw.iter().any(|v| *v <= 0.0) {
+                    continue;
+                };
+                let b = raw.map(|v| v / area);
+                let d: f32 = (0..3).map(|i| b[i] / ws[i]).sum();
+                let uv = [0, 1].map(|a| (0..3).map(|i| b[i] * uvs[i][a] / ws[i]).sum::<f32>() / d);
+                let screen_linear_uv =
+                    [0, 1].map(|a| (0..3).map(|i| b[i] * uvs[i][a]).sum::<f32>());
+                let e = sample(&im, uv, [false, false]);
+                let n = nearest(&im, uv);
+                let ru = sample(&im, uv, [true, false]);
+                let rv = sample(&im, uv, [false, true]);
+                let screen_linear = sample(&im, screen_linear_uv, [false, false]);
+                let ptex = [uv[0] * 3.0 - 0.5, uv[1] * 2.0 - 0.5];
+                let ix = ptex[0].floor() as i32;
+                let iy = ptex[1].floor() as i32;
+                let fx = ptex[0] - ix as f32;
+                let fy = ptex[1] - iy as f32;
+                let texels = [[ix, iy], [ix + 1, iy], [ix, iy + 1], [ix + 1, iy + 1]];
+                let weights = [
+                    (1.0 - fx) * (1.0 - fy),
+                    fx * (1.0 - fy),
+                    (1.0 - fx) * fy,
+                    fx * fy,
+                ];
+                let floor = [fx.min(1.0 - fx), fy.min(1.0 - fy)];
+                let edge_margin = raw
+                    .iter()
+                    .map(|v| (v / area).abs())
+                    .fold(f32::INFINITY, f32::min);
+                samples[y * 8 + x] = Some(Sample {
+                    pixel: [x as u32, y as u32],
+                    winding: area,
+                    barycentric: b,
+                    uv,
+                    p: ptex,
+                    floor,
+                    texels,
+                    weights,
+                    e,
+                    n,
+                    repeat: if uv[0] < 0.0 || uv[0] > 1.0 { ru } else { rv },
+                    screen_linear,
+                    edge_margin,
+                });
+                pixels[(y * 8 + x) * 4..][..4].copy_from_slice(&e);
+            }
+        }
+        Output { pixels, samples }
+    }
+    #[cfg(windows)]
+    fn texel(im: &Rgba8Image, x: i32, y: i32, repeat: [bool; 2]) -> [u8; 4] {
+        let x = if repeat[0] {
+            x.rem_euclid(3)
+        } else {
+            x.clamp(0, 2)
+        };
+        let y = if repeat[1] {
+            y.rem_euclid(2)
+        } else {
+            y.clamp(0, 1)
+        };
+        im.pixels()[((y * 3 + x) * 4) as usize..][..4]
+            .try_into()
+            .unwrap()
+    }
+    #[cfg(windows)]
+    fn sample(im: &Rgba8Image, uv: [f32; 2], repeat: [bool; 2]) -> [u8; 4] {
+        let p = [uv[0] * 3.0 - 0.5, uv[1] * 2.0 - 0.5];
+        let x = p[0].floor() as i32;
+        let y = p[1].floor() as i32;
+        let fx = p[0] - x as f32;
+        let fy = p[1] - y as f32;
+        let c = [
+            texel(im, x, y, repeat),
+            texel(im, x + 1, y, repeat),
+            texel(im, x, y + 1, repeat),
+            texel(im, x + 1, y + 1, repeat),
+        ];
+        [0, 1, 2, 3].map(|a| {
+            let value = (c[0][a] as f32 * (1.0 - fx) + c[1][a] as f32 * fx) * (1.0 - fy)
+                + (c[2][a] as f32 * (1.0 - fx) + c[3][a] as f32 * fx) * fy;
+            value.round().clamp(0.0, 255.0) as u8
+        })
+    }
+    #[cfg(windows)]
+    fn nearest(im: &Rgba8Image, uv: [f32; 2]) -> [u8; 4] {
+        texel(
+            im,
+            (uv[0] * 3.).floor() as i32,
+            (uv[1] * 2.).floor() as i32,
+            [false, false],
+        )
+    }
+    #[cfg(windows)]
+    fn audit(output: &Output) -> [Sample; 2] {
+        let mut u = None;
+        let mut v = None;
+        for s in output.samples.iter().flatten() {
+            let common = s.edge_margin > 0.01
+                && s.floor.iter().all(|m| *m > 0.01)
+                && channel_distance(s.e, s.n) > 2
+                && channel_distance(s.e, s.screen_linear) > 2;
+            if common
+                && s.uv[0] < 0.0
+                && s.uv[1] > 0.0
+                && s.uv[1] < 1.0
+                && s.e != s.repeat
+                && s.pixel == [0, 6]
+            {
+                u = Some(s.clone())
+            };
+            if common
+                && s.uv[1] > 1.0
+                && s.uv[0] > 0.0
+                && s.uv[0] < 1.0
+                && s.e != s.repeat
+                && s.pixel == [1, 2]
+            {
+                v = Some(s.clone())
+            }
+        }
+        let e = [
+            u.expect("U06 fixed U clamp witness"),
+            v.expect("U06 fixed V clamp witness"),
+        ];
+        assert_eq!(e[0].pixel, [0, 6]);
+        assert_eq!(e[1].pixel, [1, 2]);
+        e
+    }
+    #[cfg(windows)]
+    fn assert_witnesses(
+        backend: Backend,
+        actual: &[u8],
+        expected: &Output,
+        witnesses: &[Sample; 2],
+    ) {
+        for witness in witnesses {
+            let offset = (witness.pixel[1] as usize * 8 + witness.pixel[0] as usize) * 4;
+            assert!(
+                actual[offset..offset + 4]
+                    .iter()
+                    .zip(witness.e)
+                    .all(|(&a, e)| a.abs_diff(e) <= 1),
+                "U06 {backend:?} witness {:?}; actual={:?}; E={:?}; full-frame first difference {:?}",
+                witness.pixel,
+                &actual[offset..offset + 4],
+                witness.e,
+                first_difference(actual, &expected.pixels)
+            );
+            assert!(channel_distance(witness.e, witness.n) > 2);
+            assert!(channel_distance(witness.e, witness.repeat) > 2);
+            assert!(channel_distance(witness.e, witness.screen_linear) > 2);
+        }
+    }
+    #[cfg(windows)]
+    fn channel_distance(a: [u8; 4], b: [u8; 4]) -> u8 {
+        a.into_iter()
+            .zip(b)
+            .map(|(a, b)| a.abs_diff(b))
+            .max()
+            .unwrap()
+    }
+    #[cfg(windows)]
+    fn assert_required_validation_clean(device: &Device) {
+        let diagnostics = fluxel_rhi::test_support::validation_diagnostics(device);
+        // DX12 #820 only reports the known missing optimized clear value; it
+        // is a performance hint and does not describe an invalid command.
+        let unexpected: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                !(diagnostic.contains("severity=D3D12_MESSAGE_SEVERITY(2)")
+                    && diagnostic.contains("category=D3D12_MESSAGE_CATEGORY(9)")
+                    && diagnostic.contains("id=D3D12_MESSAGE_ID(820)")
+                    && diagnostic.contains(
+                        "The application did not pass any clear value to resource creation",
+                    ))
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "U06 validation diagnostics: {unexpected:?}"
+        );
+    }
+    #[cfg(windows)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "U06 artifact intentionally preserves all independent oracle evidence"
+    )]
+    fn artifact(
+        mode: &str,
+        backend: Backend,
+        device: &Device,
+        graph: &CameraGraph,
+        actual: &fluxel_rhi::RasterTextureReadback,
+        expected: &Output,
+        evidence: &[Sample; 2],
+        outgoing: [ResourceAccessState; 4],
+    ) {
+        let commit = std::env::var("FLUXEL_TEST_COMMIT").expect("U06 exact SHA required");
+        assert!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()));
+        println!(
+            "artifact schema=fluxel-u06-v1; case=U06; mode={mode}; commit={commit}; backend={backend:?}; hardware={:?}; driver={}; geometry={:?}; uvs={:?}; image={:?}; camera={:?}; identity={:?}; execution_plan={:?}; expected={:?}; actual={:?}; first_difference={:?}; u_sample={:?}; v_sample={:?}; u_actual={:?}; v_actual={:?}; u_abs_delta={:?}; v_abs_delta={:?}; position_outgoing={:?}; index_outgoing={:?}; uv_outgoing={:?}; texture_outgoing={:?}; target_outgoing=CopySource; pitch={}; completion=Complete; diagnostics={:?}",
+            device.hardware(),
+            device.hardware().driver,
+            geometry().geometry(),
+            geometry().texture_coordinates(),
+            image(),
+            camera(),
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+                .portable_identity(),
+            graph.compiled.execution_plan(),
+            expected.pixels,
+            actual.tight,
+            first_difference(&actual.tight, &expected.pixels),
+            evidence[0],
+            evidence[1],
+            actual_rgba(&actual.tight, evidence[0].pixel),
+            actual_rgba(&actual.tight, evidence[1].pixel),
+            rgba_delta(actual_rgba(&actual.tight, evidence[0].pixel), evidence[0].e),
+            rgba_delta(actual_rgba(&actual.tight, evidence[1].pixel), evidence[1].e),
+            outgoing[0],
+            outgoing[1],
+            outgoing[2],
+            outgoing[3],
+            actual.bytes_per_row,
+            fluxel_rhi::test_support::validation_diagnostics(device)
+        );
+    }
+    #[cfg(windows)]
+    fn actual_rgba(bytes: &[u8], pixel: [u32; 2]) -> [u8; 4] {
+        bytes[(pixel[1] as usize * 8 + pixel[0] as usize) * 4..][..4]
+            .try_into()
+            .unwrap()
+    }
+    #[cfg(windows)]
+    fn rgba_delta(actual: [u8; 4], expected: [u8; 4]) -> [u8; 4] {
+        [
+            actual[0].abs_diff(expected[0]),
+            actual[1].abs_diff(expected[1]),
+            actual[2].abs_diff(expected[2]),
+            actual[3].abs_diff(expected[3]),
+        ]
+    }
+    #[cfg(windows)]
+    fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
+        a.iter().zip(b).position(|(x, y)| x != y)
+    }
+}
 use crate::upload::{
     BaseColorTextureSnapshot, IndexedMeshSnapshot, SnapshotDrawReservation, SnapshotUseError,
     TexturedBasicMaterial, TexturedIndexedMeshSnapshot,
@@ -1269,6 +1852,12 @@ fn uv_textured_pipeline() -> RasterPipelineId {
 fn uv_textured_bindings() -> BindingSetId {
     BindingSetId::new(0x0240_0001)
 }
+fn uv_linear_clamp_pipeline() -> RasterPipelineId {
+    RasterPipelineId::new(0x0250_0001)
+}
+fn uv_linear_clamp_bindings() -> BindingSetId {
+    BindingSetId::new(0x0250_0001)
+}
 
 /// Coordinates the fixed headless `f32x3/u32` indexed draw slice.
 ///
@@ -1277,17 +1866,48 @@ fn uv_textured_bindings() -> BindingSetId {
 /// after non-blocking completion observation.
 pub struct FixedFrameRenderer {
     device: Device,
+    capabilities: DeviceCapabilities,
     executor: Arc<fluxel_rendergraph::FrameExecutor<RasterBackend>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrawFlavor {
+    Legacy,
+    TextureLoad,
+    UvTextureLoad,
+    UvLinearClamp,
+}
+
+/// Private accepted-draw inputs kept together so the lifecycle-bearing
+/// reservations cannot be accidentally separated from their graph and ABI.
+struct StartResources {
+    snapshot: FrameMeshSnapshot,
+    texture: Option<BaseColorTextureSnapshot>,
+    graph: Arc<CameraGraph>,
+    uniform: FrameUniform,
+    reservation: SnapshotDrawReservation,
+    texture_reservation: Option<SnapshotDrawReservation>,
+    flavor: DrawFlavor,
+}
+
+/// UV-specific front-end inputs before they are normalized into `StartResources`.
+struct UvStartRequest {
+    graph: Arc<CameraGraph>,
+    uniform: FrameUniform,
+    reservation: SnapshotDrawReservation,
+    texture_reservation: SnapshotDrawReservation,
+    flavor: DrawFlavor,
 }
 
 impl FixedFrameRenderer {
     /// Creates a renderer over an already-opened headless device.
     #[must_use]
     pub fn new(device: Device) -> Self {
+        let backend = RasterBackend::new(device.clone());
+        let capabilities = fluxel_rendergraph::ExecutionBackend::capabilities(&backend).clone();
         Self {
-            executor: Arc::new(fluxel_rendergraph::FrameExecutor::new(RasterBackend::new(
-                device.clone(),
-            ))),
+            executor: Arc::new(fluxel_rendergraph::FrameExecutor::new(backend)),
+            capabilities,
             device,
         }
     }
@@ -1318,7 +1938,7 @@ impl FixedFrameRenderer {
         let uniform = FrameUniform::new(camera, material)
             .map_err(|_| DrawStartError::InvalidCameraMaterial)?;
         let graph = Arc::new(
-            build_camera_graph(snapshot, extent)
+            build_camera_graph(snapshot, extent, &self.capabilities)
                 .map_err(|error| DrawStartError::Graph(error.to_string()))?,
         );
         self.start_camera(snapshot, graph, uniform)
@@ -1357,8 +1977,13 @@ impl FixedFrameRenderer {
             uniform.view_projection(),
         )?;
         let graph = Arc::new(
-            build_textured_camera_graph(snapshot, material.base_color_texture(), extent)
-                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+            build_textured_camera_graph(
+                snapshot,
+                material.base_color_texture(),
+                extent,
+                &self.capabilities,
+            )
+            .map_err(|error| DrawStartError::Graph(error.to_string()))?,
         );
         let (mesh_reservation, texture_reservation) = reserve_pair(
             snapshot.reserve_for_draw(),
@@ -1414,8 +2039,14 @@ impl FixedFrameRenderer {
             uniform.view_projection(),
         )?;
         let graph = Arc::new(
-            build_uv_textured_camera_graph(snapshot, material.base_color_texture(), extent)
-                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+            build_uv_textured_camera_graph(
+                snapshot,
+                material.base_color_texture(),
+                extent,
+                &self.capabilities,
+                DrawFlavor::UvTextureLoad,
+            )
+            .map_err(|error| DrawStartError::Graph(error.to_string()))?,
         );
         let (mesh_reservation, texture_reservation) = reserve_pair(
             snapshot.reserve_for_draw(),
@@ -1436,6 +2067,77 @@ impl FixedFrameRenderer {
         )
     }
 
+    /// Starts the closed explicit-UV, linear-filtering, clamp-to-edge sampler draw.
+    pub fn draw_textured_uv_linear_clamp(
+        &self,
+        snapshot: &TexturedIndexedMeshSnapshot,
+        camera: &crate::Camera,
+        material: &TexturedBasicMaterial,
+        extent: [u32; 2],
+    ) -> Result<FixedFrameSubmission, DrawStartError> {
+        if !rgba8_unorm_filterable(&self.capabilities) {
+            return Err(DrawStartError::TextureFormatNotFilterable {
+                format: TextureFormat::Rgba8Unorm,
+            });
+        }
+        if extent[0] == 0 || extent[1] == 0 {
+            return Err(DrawStartError::InvalidExtent);
+        }
+        if snapshot.positions().buffer().device_identity() != self.device.identity()
+            || snapshot.indices().buffer().device_identity() != self.device.identity()
+            || snapshot.texture_coordinates().buffer().device_identity() != self.device.identity()
+            || material
+                .base_color_texture()
+                .texture()
+                .texture()
+                .device_identity()
+                != self.device.identity()
+        {
+            return Err(DrawStartError::ForeignSnapshotDevice);
+        }
+        if snapshot.index_count() == 0 || !snapshot.index_count().is_multiple_of(3) {
+            return Err(DrawStartError::InvalidIndexCount);
+        }
+        let uniform = FrameUniform::new(camera, material.material())
+            .map_err(|_| DrawStartError::InvalidCameraMaterial)?;
+        validate_textured_clip(
+            snapshot.position_metadata(),
+            snapshot.index_metadata(),
+            snapshot.texture_coordinate_metadata(),
+            uniform.view_projection(),
+        )?;
+        let graph = Arc::new(
+            build_uv_textured_camera_graph(
+                snapshot,
+                material.base_color_texture(),
+                extent,
+                &self.capabilities,
+                DrawFlavor::UvLinearClamp,
+            )
+            .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+        );
+        let (mesh_reservation, texture_reservation) = reserve_pair(
+            snapshot.reserve_for_draw(),
+            || material.base_color_texture().reserve_for_draw(),
+            SnapshotDrawReservation::release_before_submit,
+        )
+        .map_err(|error| match error {
+            PairReservationError::First(error) => map_snapshot_use(error),
+            PairReservationError::Second(error) => map_texture_use(error),
+        })?;
+        self.start_uv_with_flavor(
+            snapshot,
+            material.base_color_texture(),
+            UvStartRequest {
+                graph,
+                uniform,
+                reservation: mesh_reservation,
+                texture_reservation,
+                flavor: DrawFlavor::UvLinearClamp,
+            },
+        )
+    }
+
     fn start_camera(
         &self,
         snapshot: &IndexedMeshSnapshot,
@@ -1443,14 +2145,15 @@ impl FixedFrameRenderer {
         uniform: FrameUniform,
     ) -> Result<FixedFrameSubmission, DrawStartError> {
         let reservation = snapshot.reserve_for_draw().map_err(map_snapshot_use)?;
-        self.start_with_resources(
-            FrameMeshSnapshot::Indexed(snapshot.clone()),
-            None,
+        self.start_with_resources(StartResources {
+            snapshot: FrameMeshSnapshot::Indexed(snapshot.clone()),
+            texture: None,
             graph,
             uniform,
             reservation,
-            None,
-        )
+            texture_reservation: None,
+            flavor: DrawFlavor::Legacy,
+        })
     }
 
     fn start_textured(
@@ -1462,14 +2165,15 @@ impl FixedFrameRenderer {
         reservation: SnapshotDrawReservation,
         texture_reservation: SnapshotDrawReservation,
     ) -> Result<FixedFrameSubmission, DrawStartError> {
-        self.start_with_resources(
-            FrameMeshSnapshot::Indexed(snapshot.clone()),
-            Some(texture.clone()),
+        self.start_with_resources(StartResources {
+            snapshot: FrameMeshSnapshot::Indexed(snapshot.clone()),
+            texture: Some(texture.clone()),
             graph,
             uniform,
             reservation,
-            Some(texture_reservation),
-        )
+            texture_reservation: Some(texture_reservation),
+            flavor: DrawFlavor::TextureLoad,
+        })
     }
 
     fn start_uv_textured(
@@ -1481,25 +2185,49 @@ impl FixedFrameRenderer {
         reservation: SnapshotDrawReservation,
         texture_reservation: SnapshotDrawReservation,
     ) -> Result<FixedFrameSubmission, DrawStartError> {
-        self.start_with_resources(
-            FrameMeshSnapshot::TexturedUv(snapshot.clone()),
-            Some(texture.clone()),
-            graph,
-            uniform,
-            reservation,
-            Some(texture_reservation),
+        self.start_uv_with_flavor(
+            snapshot,
+            texture,
+            UvStartRequest {
+                graph,
+                uniform,
+                reservation,
+                texture_reservation,
+                flavor: DrawFlavor::UvTextureLoad,
+            },
         )
+    }
+
+    fn start_uv_with_flavor(
+        &self,
+        snapshot: &TexturedIndexedMeshSnapshot,
+        texture: &BaseColorTextureSnapshot,
+        request: UvStartRequest,
+    ) -> Result<FixedFrameSubmission, DrawStartError> {
+        self.start_with_resources(StartResources {
+            snapshot: FrameMeshSnapshot::TexturedUv(snapshot.clone()),
+            texture: Some(texture.clone()),
+            graph: request.graph,
+            uniform: request.uniform,
+            reservation: request.reservation,
+            texture_reservation: Some(request.texture_reservation),
+            flavor: request.flavor,
+        })
     }
 
     fn start_with_resources(
         &self,
-        snapshot: FrameMeshSnapshot,
-        texture: Option<BaseColorTextureSnapshot>,
-        graph: Arc<CameraGraph>,
-        uniform: FrameUniform,
-        reservation: SnapshotDrawReservation,
-        texture_reservation: Option<SnapshotDrawReservation>,
+        resources: StartResources,
     ) -> Result<FixedFrameSubmission, DrawStartError> {
+        let StartResources {
+            snapshot,
+            texture,
+            graph,
+            uniform,
+            reservation,
+            texture_reservation,
+            flavor,
+        } = resources;
         let release = |reservation: SnapshotDrawReservation,
                        texture_reservation: Option<SnapshotDrawReservation>| {
             reservation.release_before_submit();
@@ -1507,7 +2235,9 @@ impl FixedFrameRenderer {
                 reservation.release_before_submit();
             }
         };
-        let kernel = if snapshot.texture_coordinates().is_some() {
+        let kernel = if flavor == DrawFlavor::UvLinearClamp {
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+        } else if snapshot.texture_coordinates().is_some() {
             RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
         } else if texture.is_some() {
             RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
@@ -1527,13 +2257,23 @@ impl FixedFrameRenderer {
             return Err(DrawStartError::Pipeline(error.to_string()));
         }
         let binding_result = if let Some(texture_coordinates) = snapshot.texture_coordinates() {
-            objects.register_raster_uv_textured_bindings(
-                graph.bindings,
-                graph.pipeline,
-                snapshot.positions().buffer(),
-                texture_coordinates.buffer(),
-                snapshot.position_count(),
-            )
+            if flavor == DrawFlavor::UvLinearClamp {
+                objects.register_raster_uv_linear_clamp_textured_bindings(
+                    graph.bindings,
+                    graph.pipeline,
+                    snapshot.positions().buffer(),
+                    texture_coordinates.buffer(),
+                    snapshot.position_count(),
+                )
+            } else {
+                objects.register_raster_uv_textured_bindings(
+                    graph.bindings,
+                    graph.pipeline,
+                    snapshot.positions().buffer(),
+                    texture_coordinates.buffer(),
+                    snapshot.position_count(),
+                )
+            }
         } else if texture.is_some() {
             objects.register_raster_textured_bindings(graph.bindings, graph.pipeline)
         } else {
@@ -1592,6 +2332,11 @@ impl fmt::Debug for FixedFrameRenderer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DrawStartError {
+    /// The selected device cannot filter the fixed RGBA8 sampler texture.
+    TextureFormatNotFilterable {
+        /// The required fixed texture format.
+        format: TextureFormat,
+    },
     /// The requested target dimensions contain zero.
     InvalidExtent,
     /// The ready snapshot belongs to another native device.
@@ -1629,6 +2374,12 @@ pub enum DrawStartError {
 impl fmt::Display for DrawStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TextureFormatNotFilterable { format } => {
+                write!(
+                    formatter,
+                    "fixed sampler texture format is not filterable: {format:?}"
+                )
+            }
             Self::InvalidExtent => formatter.write_str("fixed frame extent must be nonzero"),
             Self::ForeignSnapshotDevice => {
                 formatter.write_str("snapshot belongs to another device")
@@ -1661,6 +2412,12 @@ impl fmt::Display for DrawStartError {
             Self::Pipeline(error) => write!(formatter, "fixed frame pipeline rejected: {error}"),
         }
     }
+}
+
+fn rgba8_unorm_filterable(capabilities: &DeviceCapabilities) -> bool {
+    capabilities.texture_formats.iter().any(|format| {
+        format.format == TextureFormat::Rgba8Unorm && format.sampled && format.filterable
+    })
 }
 
 fn map_snapshot_use(error: SnapshotUseError) -> DrawStartError {
@@ -2396,6 +3153,7 @@ impl FrameResourceProvider<RasterBackend> for CameraResources {
 fn build_camera_graph(
     snapshot: &IndexedMeshSnapshot,
     extent: [u32; 2],
+    capabilities: &DeviceCapabilities,
 ) -> Result<CameraGraph, fluxel_rendergraph::CompileError> {
     let mut graph = RenderGraph::new();
     let positions = graph.import_buffer_slot(
@@ -2514,9 +3272,7 @@ fn build_camera_graph(
             final_state: ResourceAccessState::CopySource,
         },
     );
-    let compiled = graph
-        .compile(&RasterBackend::portable_capabilities())?
-        .graph;
+    let compiled = graph.compile(capabilities)?.graph;
     Ok(CameraGraph {
         compiled,
         position_slot: positions.slot,
@@ -2538,6 +3294,7 @@ fn build_textured_camera_graph(
     snapshot: &IndexedMeshSnapshot,
     texture: &BaseColorTextureSnapshot,
     extent: [u32; 2],
+    capabilities: &DeviceCapabilities,
 ) -> Result<CameraGraph, fluxel_rendergraph::CompileError> {
     let mut graph = RenderGraph::new();
     let positions = graph.import_buffer_slot(
@@ -2679,9 +3436,7 @@ fn build_textured_camera_graph(
             final_state: ResourceAccessState::CopySource,
         },
     );
-    let compiled = graph
-        .compile(&RasterBackend::portable_capabilities())?
-        .graph;
+    let compiled = graph.compile(capabilities)?.graph;
     Ok(CameraGraph {
         compiled,
         position_slot: positions.slot,
@@ -2703,7 +3458,14 @@ fn build_uv_textured_camera_graph(
     snapshot: &TexturedIndexedMeshSnapshot,
     texture: &BaseColorTextureSnapshot,
     extent: [u32; 2],
+    capabilities: &DeviceCapabilities,
+    flavor: DrawFlavor,
 ) -> Result<CameraGraph, fluxel_rendergraph::CompileError> {
+    let (pipeline, bindings) = match flavor {
+        DrawFlavor::UvTextureLoad => (uv_textured_pipeline(), uv_textured_bindings()),
+        DrawFlavor::UvLinearClamp => (uv_linear_clamp_pipeline(), uv_linear_clamp_bindings()),
+        _ => unreachable!("UV graph requires a UV draw flavor"),
+    };
     let mut graph = RenderGraph::new();
     let import_buffer = |graph: &mut RenderGraph, name: &str, buffer: &UploadedBuffer| {
         graph.import_buffer_slot(
@@ -2815,9 +3577,9 @@ fn build_uv_textured_camera_graph(
             )
         },
         move |commands, resolver, data, _| {
-            commands.set_pipeline(uv_textured_pipeline())?;
+            commands.set_pipeline(pipeline)?;
             let bindings = resolver.resolve_bindings(
-                uv_textured_bindings(),
+                bindings,
                 &[
                     BindingResource::BufferRead(&data.3),
                     BindingResource::TextureRead(&data.4),
@@ -2869,9 +3631,7 @@ fn build_uv_textured_camera_graph(
             final_state: ResourceAccessState::CopySource,
         },
     );
-    let compiled = graph
-        .compile(&RasterBackend::portable_capabilities())?
-        .graph;
+    let compiled = graph.compile(capabilities)?.graph;
     Ok(CameraGraph {
         compiled,
         position_slot: positions.slot,
@@ -2880,8 +3640,8 @@ fn build_uv_textured_camera_graph(
         texture_coordinate_slot: Some(texture_coordinates.slot),
         texture_slot: Some(sampled.slot),
         texture_export: Some(texture_export),
-        pipeline: uv_textured_pipeline(),
-        bindings: uv_textured_bindings(),
+        pipeline,
+        bindings,
         target_export,
         position_export,
         index_export,
@@ -2893,6 +3653,7 @@ fn build_uv_textured_camera_graph(
 fn build_graph(
     snapshot: &IndexedMeshSnapshot,
     extent: [u32; 2],
+    capabilities: &DeviceCapabilities,
 ) -> Result<FixedGraph, fluxel_rendergraph::CompileError> {
     let mut graph = RenderGraph::new();
     let positions = graph.import_buffer_slot(
@@ -2989,9 +3750,7 @@ fn build_graph(
             final_state: ResourceAccessState::CopySource,
         },
     );
-    let compiled = graph
-        .compile(&RasterBackend::portable_capabilities())?
-        .graph;
+    let compiled = graph.compile(capabilities)?.graph;
     Ok(FixedGraph {
         compiled,
         position_slot: positions.slot,
@@ -3037,7 +3796,9 @@ mod legacy_u02 {
         let geometry = geometry();
         let dx_snapshot = ready_snapshot(&dx12, &geometry);
         let vk_snapshot = ready_snapshot(&vulkan, &geometry);
-        let graph = build_graph(&dx_snapshot, [8, 8]).unwrap();
+        let dx_capabilities = actual_raster_capabilities(&dx12);
+        assert_eq!(dx_capabilities, actual_raster_capabilities(&vulkan));
+        let graph = build_graph(&dx_snapshot, [8, 8], &dx_capabilities).unwrap();
         let expected = oracle();
         let dx_actual = execute(&dx12, &dx_snapshot, &graph);
         assert_eq!(dx_actual, expected);
@@ -3069,7 +3830,8 @@ mod legacy_u02 {
         let device = open(backend);
         let geometry = geometry();
         let snapshot = ready_snapshot(&device, &geometry);
-        let graph = build_graph(&snapshot, [8, 8]).unwrap();
+        let capabilities = actual_raster_capabilities(&device);
+        let graph = build_graph(&snapshot, [8, 8], &capabilities).unwrap();
         let actual = execute(&device, &snapshot, &graph);
         let expected = oracle();
         assert_eq!(
@@ -3315,7 +4077,9 @@ mod u03 {
         let vk_snapshot = ready_snapshot(&vulkan, &geometry);
         // The Arc makes this the exact same compiled graph allocation, not a
         // backend-specific recompilation with equivalent contents.
-        let graph = Arc::new(build_camera_graph(&dx_snapshot, [8, 8]).unwrap());
+        let dx_capabilities = actual_raster_capabilities(&dx12);
+        assert_eq!(dx_capabilities, actual_raster_capabilities(&vulkan));
+        let graph = Arc::new(build_camera_graph(&dx_snapshot, [8, 8], &dx_capabilities).unwrap());
         fluxel_rhi::test_support::clear_validation_diagnostics(&dx12);
         let mut dx = start(&dx12, &dx_snapshot, Arc::clone(&graph), case);
         let expected = oracle(case);

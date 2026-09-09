@@ -5,3 +5,9 @@ members = ["crates/rendergraph", "crates/renderer", "crates/rhi"]
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+# wgpu-hal 30.0.1 lowers a non-comparison DX12 sampler's absent compare
+# function to ALWAYS, which triggers D3D12 validation error #1361. This local
+# source carries upstream fix gfx-rs/wgpu#10221 until a compatible crate release.
+wgpu-hal = { path = "vendor/wgpu-hal-30.0.1" }
