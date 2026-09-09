@@ -98,6 +98,7 @@ pub(super) struct OwnedBuffer {
     native: Option<NativeBuffer>,
     owner: Arc<OpenedDevice>,
     size: u64,
+    allowed_usage: BufferUsage,
 }
 
 pub(super) struct OwnedTexture {
@@ -121,6 +122,7 @@ pub(super) struct CopyEncoder {
     // A render attachment view must outlive its active pass. It is created at
     // begin and destroyed only after end_render_pass.
     active_render_view: Option<NativeRenderView>,
+    active_raster_pipeline: Option<usize>,
     // Ended passes are still referenced by the closed command buffer. Keep
     // their views until the buffer is discarded or terminal completion.
     render_views: Vec<NativeRenderView>,
@@ -261,6 +263,7 @@ enum NativeRasterPipelineInner {
     Dx12 {
         vertex_shader: wgpu_hal::dx12::ShaderModule,
         fragment_shader: wgpu_hal::dx12::ShaderModule,
+        bind_group_layout: Option<wgpu_hal::dx12::BindGroupLayout>,
         pipeline_layout: wgpu_hal::dx12::PipelineLayout,
         pipeline: wgpu_hal::dx12::RenderPipeline,
     },
@@ -268,9 +271,28 @@ enum NativeRasterPipelineInner {
     Vulkan {
         vertex_shader: wgpu_hal::vulkan::ShaderModule,
         fragment_shader: wgpu_hal::vulkan::ShaderModule,
+        bind_group_layout: Option<wgpu_hal::vulkan::BindGroupLayout>,
         pipeline_layout: wgpu_hal::vulkan::PipelineLayout,
         pipeline: wgpu_hal::vulkan::RenderPipeline,
     },
+}
+
+/// One closed group-0/binding-0 frame-uniform bind group. Its pipeline keeps
+/// the matching layout alive until the group is destroyed.
+pub(super) struct NativeRasterUniformBindings {
+    native: Option<NativeRasterUniformBindingsInner>,
+    pipeline: NativeRasterPipeline,
+}
+
+#[allow(
+    dead_code,
+    reason = "constructed only by the camera/material native binding path"
+)]
+enum NativeRasterUniformBindingsInner {
+    #[cfg(feature = "dx12")]
+    Dx12(wgpu_hal::dx12::BindGroup),
+    #[cfg(feature = "vulkan")]
+    Vulkan(wgpu_hal::vulkan::BindGroup),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -450,6 +472,7 @@ pub(super) fn create_buffer(
             native: Some(native),
             owner: Arc::clone(owner),
             size: descriptor.buffer.size,
+            allowed_usage: buffer_usage_from_native(native_usage),
         },
         buffer_usage_from_native(native_usage),
     ))
@@ -580,6 +603,7 @@ impl Drop for NativeRasterPipelineShared {
                 NativeRasterPipelineInner::Dx12 {
                     vertex_shader,
                     fragment_shader,
+                    bind_group_layout,
                     pipeline_layout,
                     pipeline,
                 },
@@ -588,6 +612,9 @@ impl Drop for NativeRasterPipelineShared {
                 // in-flight lease exists when the shared owner reaches Drop.
                 device.destroy_render_pipeline(pipeline);
                 device.destroy_pipeline_layout(pipeline_layout);
+                if let Some(layout) = bind_group_layout {
+                    device.destroy_bind_group_layout(layout);
+                }
                 device.destroy_shader_module(fragment_shader);
                 device.destroy_shader_module(vertex_shader);
             },
@@ -597,6 +624,7 @@ impl Drop for NativeRasterPipelineShared {
                 NativeRasterPipelineInner::Vulkan {
                     vertex_shader,
                     fragment_shader,
+                    bind_group_layout,
                     pipeline_layout,
                     pipeline,
                 },
@@ -605,10 +633,39 @@ impl Drop for NativeRasterPipelineShared {
                 // dependency destruction proof as the DX12 branch.
                 device.destroy_render_pipeline(pipeline);
                 device.destroy_pipeline_layout(pipeline_layout);
+                if let Some(layout) = bind_group_layout {
+                    device.destroy_bind_group_layout(layout);
+                }
                 device.destroy_shader_module(fragment_shader);
                 device.destroy_shader_module(vertex_shader);
             },
             _ => unreachable!("pipeline and device backend always match"),
+        }
+    }
+}
+
+impl Drop for NativeRasterUniformBindings {
+    fn drop(&mut self) {
+        let native = self
+            .native
+            .take()
+            .expect("raster uniform bindings destroyed once");
+        match (&self.pipeline.0.owner.native, native) {
+            #[cfg(feature = "dx12")]
+            (NativeDevice::Dx12 { device, .. }, NativeRasterUniformBindingsInner::Dx12(group)) => unsafe {
+                // SAFETY: the retained pipeline owns the matching BGL and all
+                // in-flight leases retain this group until terminal completion.
+                device.destroy_bind_group(group)
+            },
+            #[cfg(feature = "vulkan")]
+            (
+                NativeDevice::Vulkan { device, .. },
+                NativeRasterUniformBindingsInner::Vulkan(group),
+            ) => unsafe {
+                // SAFETY: same device/layout/lifetime proof as DX12.
+                device.destroy_bind_group(group)
+            },
+            _ => unreachable!("raster uniform binding and device backend always match"),
         }
     }
 }
@@ -1173,10 +1230,27 @@ pub(super) fn create_raster_pipeline(
             step_mode: wgt::VertexStepMode::Vertex,
             attributes: &position_f32x3_attributes,
         })],
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial => {
+            vec![Some(wgpu_hal::VertexBufferLayout {
+                array_stride: 12,
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: &position_f32x3_attributes,
+            })]
+        }
     };
     let color_targets = [Some(wgt::ColorTargetState::from(
         wgt::TextureFormat::Rgba8Unorm,
     ))];
+    let frame_uniform_entries = [wgt::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgt::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgt::BindingType::Buffer {
+            ty: wgt::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: Some(NonZeroU64::new(80).expect("fixed non-zero uniform size")),
+        },
+        count: None,
+    }];
     let constants = naga::back::PipelineConstants::default();
     let native = match &owner.native {
         #[cfg(feature = "dx12")]
@@ -1214,24 +1288,66 @@ pub(super) fn create_raster_pipeline(
                     )));
                 }
             };
-            let layouts: [Option<&wgpu_hal::dx12::BindGroupLayout>; 0] = [];
-            let layout = match unsafe {
-                // SAFETY: the zero-bind-group descriptor is internally valid
-                // and all referenced storage lives through this call.
-                device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
-                    label: Some("fluxel fixed raster pipeline layout"),
-                    flags: wgpu_hal::PipelineLayoutFlags::empty(),
-                    bind_group_layouts: &layouts,
-                    immediate_size: 0,
-                })
-            } {
+            let bind_group_layout =
+                if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial {
+                    match unsafe {
+                        // SAFETY: the static one-entry descriptor is valid and
+                        // its entries live through this creation call.
+                        device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+                            label: Some("fluxel fixed camera/material frame layout"),
+                            flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+                            entries: &frame_uniform_entries,
+                        })
+                    } {
+                        Ok(value) => Some(value),
+                        Err(e) => {
+                            unsafe {
+                                device.destroy_shader_module(fragment_shader);
+                                device.destroy_shader_module(vertex_shader)
+                            };
+                            return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
+                                "DX12 raster bind-group-layout creation failed: {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    None
+                };
+            let layout_result = if let Some(ref bgl) = bind_group_layout {
+                let layouts = [Some(bgl)];
+                unsafe {
+                    // SAFETY: this retained same-device BGL is live for the call.
+                    device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                        label: Some("fluxel fixed raster pipeline layout"),
+                        flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                        bind_group_layouts: &layouts,
+                        immediate_size: 0,
+                    })
+                }
+            } else {
+                let layouts: [Option<&wgpu_hal::dx12::BindGroupLayout>; 0] = [];
+                unsafe {
+                    // SAFETY: the zero-bind-group descriptor is internally valid
+                    // and all referenced storage lives through this call.
+                    device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                        label: Some("fluxel fixed raster pipeline layout"),
+                        flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                        bind_group_layouts: &layouts,
+                        immediate_size: 0,
+                    })
+                }
+            };
+            let layout = match layout_result {
                 Ok(v) => v,
                 Err(e) => {
                     unsafe {
                         // SAFETY: layout creation failed, so both same-device
                         // modules are unreferenced and uniquely consumed here.
                         device.destroy_shader_module(fragment_shader);
-                        device.destroy_shader_module(vertex_shader)
+                        device.destroy_shader_module(vertex_shader);
+                        if let Some(bgl) = bind_group_layout {
+                            device.destroy_bind_group_layout(bgl);
+                        }
                     };
                     return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
                         "DX12 raster pipeline-layout creation failed: {e}"
@@ -1274,6 +1390,9 @@ pub(super) fn create_raster_pipeline(
                         // SAFETY: pipeline creation failed; the same-device
                         // dependencies are uniquely consumed in reverse order.
                         device.destroy_pipeline_layout(layout);
+                        if let Some(bgl) = bind_group_layout {
+                            device.destroy_bind_group_layout(bgl);
+                        }
                         device.destroy_shader_module(fragment_shader);
                         device.destroy_shader_module(vertex_shader)
                     };
@@ -1285,6 +1404,7 @@ pub(super) fn create_raster_pipeline(
             NativeRasterPipelineInner::Dx12 {
                 vertex_shader,
                 fragment_shader,
+                bind_group_layout,
                 pipeline_layout: layout,
                 pipeline,
             }
@@ -1324,24 +1444,65 @@ pub(super) fn create_raster_pipeline(
                     )));
                 }
             };
-            let layouts: [Option<&wgpu_hal::vulkan::BindGroupLayout>; 0] = [];
-            let layout = match unsafe {
-                // SAFETY: the zero-group descriptor is valid and its borrowed
-                // storage remains live for the complete call.
-                device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
-                    label: Some("fluxel fixed raster pipeline layout"),
-                    flags: wgpu_hal::PipelineLayoutFlags::empty(),
-                    bind_group_layouts: &layouts,
-                    immediate_size: 0,
-                })
-            } {
+            let bind_group_layout =
+                if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial {
+                    match unsafe {
+                        // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.
+                        device.create_bind_group_layout(&wgpu_hal::BindGroupLayoutDescriptor {
+                            label: Some("fluxel fixed camera/material frame layout"),
+                            flags: wgpu_hal::BindGroupLayoutFlags::empty(),
+                            entries: &frame_uniform_entries,
+                        })
+                    } {
+                        Ok(value) => Some(value),
+                        Err(e) => {
+                            unsafe {
+                                device.destroy_shader_module(fragment_shader);
+                                device.destroy_shader_module(vertex_shader)
+                            };
+                            return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
+                                "Vulkan raster bind-group-layout creation failed: {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    None
+                };
+            let layout_result = if let Some(ref bgl) = bind_group_layout {
+                let layouts = [Some(bgl)];
+                unsafe {
+                    // SAFETY: the retained same-device BGL outlives layout creation.
+                    device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                        label: Some("fluxel fixed raster pipeline layout"),
+                        flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                        bind_group_layouts: &layouts,
+                        immediate_size: 0,
+                    })
+                }
+            } else {
+                let layouts: [Option<&wgpu_hal::vulkan::BindGroupLayout>; 0] = [];
+                unsafe {
+                    // SAFETY: the zero-group descriptor is valid and its borrowed
+                    // storage remains live for the complete call.
+                    device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                        label: Some("fluxel fixed raster pipeline layout"),
+                        flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                        bind_group_layouts: &layouts,
+                        immediate_size: 0,
+                    })
+                }
+            };
+            let layout = match layout_result {
                 Ok(v) => v,
                 Err(e) => {
                     unsafe {
                         // SAFETY: failed layout creation left both same-device
                         // modules unreferenced; consume them exactly once.
                         device.destroy_shader_module(fragment_shader);
-                        device.destroy_shader_module(vertex_shader)
+                        device.destroy_shader_module(vertex_shader);
+                        if let Some(bgl) = bind_group_layout {
+                            device.destroy_bind_group_layout(bgl);
+                        }
                     };
                     return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
                         "Vulkan raster pipeline-layout creation failed: {e}"
@@ -1384,6 +1545,9 @@ pub(super) fn create_raster_pipeline(
                         // SAFETY: no pipeline exists; destroy its uniquely owned
                         // same-device dependencies in reverse creation order.
                         device.destroy_pipeline_layout(layout);
+                        if let Some(bgl) = bind_group_layout {
+                            device.destroy_bind_group_layout(bgl);
+                        }
                         device.destroy_shader_module(fragment_shader);
                         device.destroy_shader_module(vertex_shader)
                     };
@@ -1395,6 +1559,7 @@ pub(super) fn create_raster_pipeline(
             NativeRasterPipelineInner::Vulkan {
                 vertex_shader,
                 fragment_shader,
+                bind_group_layout,
                 pipeline_layout: layout,
                 pipeline,
             }
@@ -1404,6 +1569,135 @@ pub(super) fn create_raster_pipeline(
         native: Some(native),
         owner: Arc::clone(owner),
     })))
+}
+
+pub(super) fn create_raster_uniform_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    buffer: &OwnedBuffer,
+) -> Result<NativeRasterUniformBindings, String> {
+    if !Arc::ptr_eq(owner, &pipeline.0.owner)
+        || !Arc::ptr_eq(owner, &buffer.owner)
+        || buffer.size != 80
+        || !buffer.allowed_usage.contains(BufferUsageKind::Uniform)
+    {
+        return Err("invalid camera/material uniform binding".into());
+    }
+    let entries = [wgpu_hal::BindGroupEntry {
+        binding: 0,
+        resource_index: 0,
+        count: 1,
+    }];
+    let size = NonZeroU64::new(80).expect("fixed uniform size");
+    match (
+        &owner.native,
+        pipeline.0.native.as_ref(),
+        buffer.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeDevice::Dx12 { device, .. },
+            Some(NativeRasterPipelineInner::Dx12 {
+                bind_group_layout: Some(layout),
+                ..
+            }),
+            Some(NativeBuffer::Dx12(buffer)),
+        ) => {
+            let group = unsafe {
+                // SAFETY: owner/pipeline/buffer identity, exact 80-byte range,
+                // Uniform usage and fixed non-dynamic layout were revalidated.
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel fixed camera/material bindings"),
+                    layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, 0, size)],
+                    samplers: &[],
+                    textures: &[],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            }
+            .map_err(|e| format!("DX12 raster uniform bind-group creation failed: {e}"))?;
+            Ok(NativeRasterUniformBindings {
+                native: Some(NativeRasterUniformBindingsInner::Dx12(group)),
+                pipeline: pipeline.clone(),
+            })
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeDevice::Vulkan { device, .. },
+            Some(NativeRasterPipelineInner::Vulkan {
+                bind_group_layout: Some(layout),
+                ..
+            }),
+            Some(NativeBuffer::Vulkan(buffer)),
+        ) => {
+            let group = unsafe {
+                // SAFETY: same fixed range/layout/device/lifetime proof as DX12.
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel fixed camera/material bindings"),
+                    layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, 0, size)],
+                    samplers: &[],
+                    textures: &[],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            }
+            .map_err(|e| format!("Vulkan raster uniform bind-group creation failed: {e}"))?;
+            Ok(NativeRasterUniformBindings {
+                native: Some(NativeRasterUniformBindingsInner::Vulkan(group)),
+                pipeline: pipeline.clone(),
+            })
+        }
+        _ => Err("raster uniform binding does not match the camera/material pipeline".into()),
+    }
+}
+
+pub(super) fn set_raster_uniform_bindings(
+    encoder: &mut CopyEncoder,
+    bindings: &NativeRasterUniformBindings,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &bindings.pipeline.0.owner) {
+        return Err("raster uniform bindings belong to another native device".into());
+    }
+    if encoder.active_render_view.is_none()
+        || encoder.active_raster_pipeline != Some(Arc::as_ptr(&bindings.pipeline.0) as usize)
+    {
+        return Err("raster uniform binding requires its active raster pipeline".into());
+    }
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        bindings.pipeline.0.native.as_ref(),
+        bindings.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            Some(NativeRasterPipelineInner::Dx12 {
+                pipeline_layout, ..
+            }),
+            Some(NativeRasterUniformBindingsInner::Dx12(group)),
+        ) => unsafe {
+            // SAFETY: active pass and exact active pipeline were checked above;
+            // group uses that pipeline's static group-zero layout.
+            encoder.set_bind_group(pipeline_layout, 0, group, &[])
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            Some(NativeRasterPipelineInner::Vulkan {
+                pipeline_layout, ..
+            }),
+            Some(NativeRasterUniformBindingsInner::Vulkan(group)),
+        ) => unsafe {
+            // SAFETY: same checked active-pass/static-layout proof as DX12.
+            encoder.set_bind_group(pipeline_layout, 0, group, &[])
+        },
+        _ => return Err("raster uniform bindings belong to another native backend".into()),
+    }
+    Ok(())
 }
 
 /// Creates the sole RW storage binding for a validated buffer subrange.
@@ -1715,6 +2009,9 @@ pub(super) fn begin_raster(
     if encoder.active_render_view.is_some() {
         return Err("a raster pass is already active".into());
     }
+    // A native binding is valid only after this pass selects its pipeline.
+    // Clear any terminal value left by a prior pass before creating the view.
+    encoder.active_raster_pipeline = None;
     if !Arc::ptr_eq(&encoder.owner, &texture.owner) {
         return Err("raster attachment belongs to another native device".into());
     }
@@ -1905,6 +2202,8 @@ pub(super) fn end_raster(encoder: &mut CopyEncoder) -> Result<(), String> {
         },
         _ => return Err("raster pass belongs to another native backend".into()),
     }
+    // The next pass must explicitly select a pipeline before any binding.
+    encoder.active_raster_pipeline = None;
     Ok(())
 }
 
@@ -1914,6 +2213,9 @@ pub(super) fn set_raster_pipeline(
 ) -> Result<(), String> {
     if !Arc::ptr_eq(&encoder.owner, &pipeline.0.owner) {
         return Err("raster pipeline belongs to another native device".into());
+    }
+    if encoder.active_render_view.is_none() {
+        return Err("raster pipeline requires an active raster pass".into());
     }
     match (
         encoder.native.as_mut().expect("live encoder"),
@@ -1936,6 +2238,7 @@ pub(super) fn set_raster_pipeline(
         },
         _ => return Err("raster pipeline belongs to another native backend".into()),
     };
+    encoder.active_raster_pipeline = Some(Arc::as_ptr(&pipeline.0) as usize);
     Ok(())
 }
 
@@ -1948,7 +2251,11 @@ pub(super) fn set_vertex_buffer(
 ) -> Result<(), String> {
     if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
         || !offset.is_multiple_of(4)
-        || (kernel == crate::RasterKernel::IndexedPositionFloat32x3 && offset != 0)
+        || matches!(
+            kernel,
+            crate::RasterKernel::IndexedPositionFloat32x3
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+        ) && offset != 0
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
         || size < 12
     {
@@ -2361,6 +2668,7 @@ pub(super) fn begin_copy_encoder(owner: &Arc<OpenedDevice>) -> Result<CopyEncode
         buffer_states: HashMap::new(),
         texture_states: HashMap::new(),
         active_render_view: None,
+        active_raster_pipeline: None,
         render_views: Vec::new(),
     })
 }
@@ -3543,6 +3851,7 @@ fn create_staging_buffer(
         native: Some(native),
         owner: Arc::clone(owner),
         size,
+        allowed_usage: buffer_usage_from_native(usage),
     })
 }
 

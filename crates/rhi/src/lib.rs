@@ -601,6 +601,7 @@ mod imp {
     pub(super) struct NativeComputeBindings;
     pub(super) struct NativeTexturePackBindings;
     pub(super) struct NativeRasterPipeline;
+    pub(super) struct NativeRasterUniformBindings;
     #[derive(Clone)]
     pub(super) struct NativeCompletion;
     pub(super) fn open(backend: Backend, _: DeviceOptions) -> Result<OpenedDevice, OpenError> {
@@ -714,6 +715,13 @@ mod imp {
     ) -> Result<NativeRasterPipeline, String> {
         Err("native raster is only supported on Windows".into())
     }
+    pub(super) fn create_raster_uniform_bindings(
+        _: &Arc<OpenedDevice>,
+        _: &NativeRasterPipeline,
+        _: &OwnedBuffer,
+    ) -> Result<NativeRasterUniformBindings, String> {
+        Err("native raster is only supported on Windows".into())
+    }
     pub(super) fn transition_texture(
         _: &mut CopyEncoder,
         _: &OwnedTexture,
@@ -773,6 +781,12 @@ mod imp {
     pub(super) fn set_raster_pipeline(
         _: &mut CopyEncoder,
         _: &NativeRasterPipeline,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn set_raster_uniform_bindings(
+        _: &mut CopyEncoder,
+        _: &NativeRasterUniformBindings,
     ) -> Result<(), String> {
         Err("native raster is only supported on Windows".into())
     }

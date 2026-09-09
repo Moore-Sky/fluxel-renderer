@@ -1,6 +1,6 @@
 # Fluxel Renderer design
 
-**Status: 0.2.1 fixed headless indexed snapshot draw**
+**Status: 0.2.2 fixed headless Camera/material indexed snapshot draw**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
@@ -100,25 +100,35 @@ Concurrent frames need queue ordering or an explicit GPU dependency; one global
 
 ## Fixed headless frame
 
-0.2.1 adds one renderer-owned coordinator rather than general draw-list
-lowering. `FixedFrameRenderer` accepts a ready `IndexedMeshSnapshot`, imports
-its tightly packed `f32x3` positions and `u32` indices using each upload's
-reported `CopyDestination` state, and declares one offscreen `Rgba8Unorm`
-Raster pass with a fixed opaque fragment color. The matching RHI artifact is a
-closed recipe; callers cannot choose arbitrary shaders, layouts, bindings, or
-pipeline state.
+0.2.2 keeps one renderer-owned coordinator rather than general draw-list
+lowering. `FixedFrameRenderer::draw` accepts a ready `IndexedMeshSnapshot`, a
+`Camera`, a `BasicMaterial`, and an extent. It serializes the camera and
+material at start into one immutable 80-byte uniform: column-major
+`projection * view` in bytes 0..64 and linear RGBA base color in bytes 64..80.
+Inputs and their matrix product must be finite; every color component is in
+`[0, 1]`. The operation owns a non-blocking uniform upload first, then submits
+the Raster work only after that upload completes—there is no host wait between
+the two phases.
+
+The Raster graph imports tightly packed `f32x3` positions and `u32` indices
+using each upload's reported `CopyDestination` state, and declares one
+offscreen `Rgba8Unorm` pass. Its closed RHI recipe has exactly one static
+group-0/binding-0, 80-byte uniform visible to vertex and fragment stages.
+Callers cannot choose arbitrary shaders, layouts, bindings, or pipeline state.
 
 The graph exports both immutable buffers back in `CopyDestination` after the
 draw and exports the target in `CopySource`. Clones of one snapshot generation
-share a single-in-flight reservation. A pre-submit rejection releases that
-reservation, proven completion permits reuse, and an accepted failure or early
-operation drop poisons the generation because its native state is not known.
+share a single-in-flight reservation. Uniform-phase failure or Drop and a
+pre-Raster-submit rejection release that reservation. Proven Raster completion
+permits reuse; only an accepted Raster failure or Drop poisons the generation
+because the snapshot's native state is then not known.
 Polling never waits for the host or uses queue-idle as an ownership mechanism.
 Only opaque image extent/format/ownership becomes public after completion.
 
-This is evidence for snapshot-to-plan-to-native correctness, not a claim that
-Camera, BasicMaterial, transforms, textures, depth, blending, batching,
-Surface, or Present are implemented.
+This is evidence for one fixed Camera/material snapshot-to-plan-to-native
+path, not a claim that model transforms, `DrawList` lowering, textures,
+samplers, PBR, depth, blending, batching, general bindings, Surface, or Present
+are implemented.
 
 ## Evolution gates
 

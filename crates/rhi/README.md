@@ -10,7 +10,8 @@ It is deliberately a narrow native boundary, not a general graphics API.
 `CopyBackend` implements only Copy commands; the distinct `ComputeBackend`
 adds only closed `ComputeKernel` artifacts and their single RW storage-buffer
 binding recipe. `RasterBackend` adds only the fixed R01/R02 raster artifacts,
-the closed U02 renderer snapshot recipe, and the closed X01 texture-pack
+the closed U02 renderer snapshot recipe, its closed U03 Camera/material-uniform
+variant, and the closed X01 texture-pack
 compute recipe needed for one
 Raster→Compute→Copy chain. It does **not** expose general mapping/readback,
 acquire or present a surface, a general shader/pipeline API, renderer lowering,
@@ -28,7 +29,7 @@ exactly `CopyDestination`.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.1"
+tag = "v0.2.2"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -40,7 +41,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.1"
+tag = "v0.2.2"
 default-features = false
 features = ["dx12"]
 ```
@@ -104,7 +105,12 @@ single-sampled, single-mip/layer `Rgba8Unorm` color target, fixed vertex/index
 recipes, exact load/store combinations, and R01 clear/triangle plus R02
 indexed viewport/scissor fixtures. U02 adds a separate renderer snapshot recipe
 with tightly packed `float32x3` positions, `uint32` indices, and a fixed opaque
-fragment color; it does not make those choices configurable. X01 samples that complete color texture in
+fragment color. U03 is a separate closed variant with exactly one 80-byte
+static group-0/binding-0 uniform: column-major `projection * view` and linear
+RGBA base color, visible to both vertex and fragment stages. Its opaque binding
+is device- and pipeline-affine, retains matching pipeline and buffer leases
+through completion, and accepts no dynamic offset or configurable binding
+layout. Neither recipe makes those choices configurable. X01 samples that complete color texture in
 a closed compute artifact, packs row-major RGBA8 pixels into an RW storage
 buffer, and copies the result to an export. Texture-row padding is stripped for
 the exact CPU oracle. Readback consumes the exported outgoing state and lease

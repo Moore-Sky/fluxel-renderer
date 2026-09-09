@@ -1,6 +1,6 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is a `0.2.1` workspace milestone for Fluxel's typed render graph,
+`fluxel-renderer` is a `0.2.2` workspace milestone for Fluxel's typed render graph,
 native RHI boundary, and renderer layer. It starts an independent release line
 from a pre-migration source snapshot and does not inherit prior version numbers
 or Git history.
@@ -13,7 +13,7 @@ The workspace is organised around three crates:
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | Headless DX12/Vulkan ownership plus fixed Raster, Compute, and Copy RenderGraph execution. |
-| `fluxel-renderer` | Scene/domain data, immutable indexed-mesh GPU snapshots, and one fixed headless indexed draw. |
+| `fluxel-renderer` | Scene/domain data, immutable indexed-mesh GPU snapshots, and one fixed Camera/material headless indexed draw. |
 
 The renderer still does not lower a `DrawList` or general material pipeline.
 Its optional `gpu-upload` slice publishes a mesh generation after both native
@@ -68,9 +68,14 @@ guessed as a draw state. This is not draw lowering, texture/PBR, surface/present
 or a general shader/pipeline API. The `0.2.1` slice consumes that ready snapshot
 through a renderer-private RenderGraph import, executes a fixed opaque-color
 indexed draw into offscreen `Rgba8Unorm`, and restores both immutable buffers to
-their reported `CopyDestination` state after proven completion. Snapshot clones
-share a single-in-flight gate; an unproven accepted outcome poisons the
-generation instead of guessing its state.
+their reported `CopyDestination` state after proven completion. The `0.2.2`
+fixed draw consumes a `Camera` view / projection and
+`BasicMaterial::base_color` through one immutable 80-byte uniform: upload
+completes non-blockingly before the owning operation submits Raster. It remains
+a single closed offscreen recipe, not `DrawList` lowering, PBR, textures, or a
+general pipeline/bind-group API. Snapshot clones share a single-in-flight gate;
+an unproven accepted Raster outcome poisons the generation instead of guessing
+its state.
 
 | Component | Next milestones |
 | --- | --- |

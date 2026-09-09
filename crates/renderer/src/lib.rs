@@ -9,6 +9,8 @@
 
 #[cfg(feature = "gpu-upload")]
 mod fixed_frame;
+#[cfg(feature = "gpu-upload")]
+mod frame_uniform;
 mod shader;
 #[cfg(feature = "gpu-upload")]
 mod upload;
@@ -17,7 +19,8 @@ use core::fmt;
 
 #[cfg(feature = "gpu-upload")]
 pub use fixed_frame::{
-    DrawStartError, FixedFrameRenderer, FixedFrameStatus, FixedFrameSubmission, FrameImage,
+    DrawStartError, FixedFrameFailure, FixedFrameRenderer, FixedFrameStatus, FixedFrameSubmission,
+    FrameImage,
 };
 #[cfg(feature = "gpu-upload")]
 pub use upload::{

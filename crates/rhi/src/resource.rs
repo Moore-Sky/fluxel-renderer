@@ -276,6 +276,14 @@ impl std::error::Error for ComputeCreateError {}
 pub enum RasterCreateError {
     /// The pipeline, attachment, or buffer operation crossed device identities.
     ForeignDevice,
+    /// The closed raster uniform recipe received an incompatible object.
+    BindingRecipeMismatch,
+    /// The uniform buffer is not exactly the fixed 80-byte whole binding.
+    InvalidBindingRange,
+    /// The buffer's native creation facts do not authorize uniform reads.
+    UniformUsageRequired,
+    /// Native creation of a validated fixed raster binding failed.
+    NativeFailure(String),
     /// The fixed WGSL artifact failed Naga parsing or validation.
     ShaderValidation(String),
     /// The backend rejected shader lowering or raster-pipeline compilation.
@@ -288,6 +296,16 @@ impl fmt::Display for RasterCreateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ForeignDevice => f.write_str("raster objects belong to different devices"),
+            Self::BindingRecipeMismatch => {
+                f.write_str("raster bindings do not match the fixed artifact")
+            }
+            Self::InvalidBindingRange => f.write_str("invalid fixed raster uniform range"),
+            Self::UniformUsageRequired => {
+                f.write_str("raster uniform binding requires uniform usage")
+            }
+            Self::NativeFailure(reason) => {
+                write!(f, "native raster binding creation failed: {reason}")
+            }
             Self::ShaderValidation(reason) => {
                 write!(f, "raster shader validation failed: {reason}")
             }
@@ -524,6 +542,9 @@ pub enum RasterKernel {
     /// An indexed clip-space mesh using `float32x3` positions and a fixed
     /// opaque fragment color.
     IndexedPositionFloat32x3,
+    /// An indexed model-identity mesh using `float32x3` positions and exactly
+    /// one 80-byte view-projection plus base-color uniform binding.
+    IndexedPositionFloat32x3CameraMaterial,
 }
 
 /// The non-configurable vertex layout selected by a fixed raster artifact.
@@ -542,7 +563,7 @@ pub enum RasterVertexLayout {
 ///
 /// It describes the source-level recipe shared by DX12 and Vulkan, rather
 /// than their intentionally different native binaries.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct RasterArtifactIdentity {
     /// Hash of the complete embedded WGSL module.
     pub module_source_hash: u64,
@@ -558,8 +579,43 @@ pub struct RasterArtifactIdentity {
     pub vertex_stride: u32,
     /// The required index element format, or `None` for the non-indexed recipe.
     pub index_format: Option<IndexFormat>,
+    /// Number of fixed bind-group entries; zero means no raster bindings.
+    pub binding_count: u32,
+    /// Minimum byte size of the sole fixed uniform binding, or zero when none.
+    pub uniform_binding_size: u64,
+    /// Version of the fixed binding layout; zero means no binding layout.
+    pub binding_recipe_version: u32,
     /// Version of the fixed vertex/index/target recipe.
     pub recipe_version: u32,
+}
+
+impl fmt::Debug for RasterArtifactIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut identity = formatter.debug_struct("RasterArtifactIdentity");
+        identity
+            .field("module_source_hash", &self.module_source_hash)
+            .field("vertex_entry_point", &self.vertex_entry_point)
+            .field("fragment_entry_point", &self.fragment_entry_point)
+            .field("target_format", &self.target_format)
+            .field("vertex_layout", &self.vertex_layout)
+            .field("vertex_stride", &self.vertex_stride)
+            .field("index_format", &self.index_format);
+        // Preserve the exact 0.2.1 U02 artifact representation. Binding facts
+        // are an additive 0.2.2 identity component only for artifacts that
+        // actually declare a binding recipe.
+        if self.binding_count != 0
+            || self.uniform_binding_size != 0
+            || self.binding_recipe_version != 0
+        {
+            identity
+                .field("binding_count", &self.binding_count)
+                .field("uniform_binding_size", &self.uniform_binding_size)
+                .field("binding_recipe_version", &self.binding_recipe_version);
+        }
+        identity
+            .field("recipe_version", &self.recipe_version)
+            .finish()
+    }
 }
 
 impl RasterKernel {
@@ -569,6 +625,7 @@ impl RasterKernel {
             Self::Triangle => "triangle_vertex",
             Self::IndexedPositionColor => "position_color_vertex",
             Self::IndexedPositionFloat32x3 => "position_f32x3_vertex",
+            Self::IndexedPositionFloat32x3CameraMaterial => "camera_material_vertex",
         }
     }
 
@@ -588,6 +645,7 @@ impl RasterKernel {
             Self::Triangle => 0,
             Self::IndexedPositionColor => 12,
             Self::IndexedPositionFloat32x3 => 12,
+            Self::IndexedPositionFloat32x3CameraMaterial => 12,
         }
     }
 
@@ -597,6 +655,7 @@ impl RasterKernel {
             Self::Triangle => None,
             Self::IndexedPositionColor => Some(IndexFormat::Uint16),
             Self::IndexedPositionFloat32x3 => Some(IndexFormat::Uint32),
+            Self::IndexedPositionFloat32x3CameraMaterial => Some(IndexFormat::Uint32),
         }
     }
 
@@ -606,6 +665,7 @@ impl RasterKernel {
             Self::Triangle => RasterVertexLayout::None,
             Self::IndexedPositionColor => RasterVertexLayout::PositionFloat32x2ColorUnorm8x4,
             Self::IndexedPositionFloat32x3 => RasterVertexLayout::PositionFloat32x3,
+            Self::IndexedPositionFloat32x3CameraMaterial => RasterVertexLayout::PositionFloat32x3,
         }
     }
 
@@ -619,6 +679,9 @@ impl RasterKernel {
             vertex_layout: self.vertex_layout(),
             vertex_stride: self.vertex_stride(),
             index_format: self.index_format(),
+            binding_count: if self.has_frame_uniform() { 1 } else { 0 },
+            uniform_binding_size: if self.has_frame_uniform() { 80 } else { 0 },
+            binding_recipe_version: if self.has_frame_uniform() { 1 } else { 0 },
             recipe_version: 1,
         }
     }
@@ -670,7 +733,26 @@ impl RasterKernel {
              return vec4(48.0 / 255.0, 176.0 / 255.0, 112.0 / 255.0, 1.0);\n\
          }"
             }
+            Self::IndexedPositionFloat32x3CameraMaterial => {
+                "struct FrameUniforms {\n\
+         view_projection: mat4x4<f32>,\n\
+         base_color: vec4<f32>,\n\
+         };\n\
+         @group(0) @binding(0) var<uniform> frame: FrameUniforms;\n\
+         struct VertexInput { @location(0) position: vec3<f32>, };\n\
+         struct VertexOutput { @builtin(position) position: vec4<f32>, };\n\
+         @vertex fn camera_material_vertex(input: VertexInput) -> VertexOutput {\n\
+             return VertexOutput(frame.view_projection * vec4(input.position, 1.0));\n\
+         }\n\
+         @fragment fn color_fragment(input: VertexOutput) -> @location(0) vec4<f32> {\n\
+             _ = input; return frame.base_color;\n\
+         }"
+            }
         }
+    }
+
+    const fn has_frame_uniform(self) -> bool {
+        matches!(self, Self::IndexedPositionFloat32x3CameraMaterial)
     }
 }
 
@@ -687,6 +769,32 @@ pub struct RasterPipeline(Arc<RasterPipelineShared>);
 /// A cloneable strong lease for a raster pipeline and its native artifacts.
 #[derive(Clone)]
 pub struct RasterPipelineLease(Arc<RasterPipelineShared>);
+
+struct RasterUniformBindingsShared {
+    _native: crate::imp::NativeRasterUniformBindings,
+    pipeline: RasterPipeline,
+    _buffer: BufferLease,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// Closed group-0/binding-0 80-byte frame uniform binding for the camera and
+/// material raster artifact only.
+#[derive(Clone)]
+pub struct RasterUniformBindings(Arc<RasterUniformBindingsShared>);
+
+/// A cloneable strong lease retaining the uniform bind group, pipeline, and buffer.
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "the lease is retained through ResourceLease for terminal native completion"
+)]
+pub struct RasterUniformBindingsLease(Arc<RasterUniformBindingsShared>);
+
+impl fmt::Debug for RasterUniformBindingsLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RasterUniformBindingsLease(..)")
+    }
+}
 
 struct TexturePackBindingsShared {
     _native: crate::imp::NativeTexturePackBindings,
@@ -721,6 +829,8 @@ pub enum ResourceLease {
     ComputeBindings(ComputeBindingsLease),
     /// Retains a native raster pipeline, module, and layout.
     RasterPipeline(RasterPipelineLease),
+    /// Retains the closed camera/material raster uniform binding.
+    RasterUniformBindings(RasterUniformBindingsLease),
     /// Retains the closed sampled-texture-to-storage-buffer binding object.
     TexturePackBindings(TexturePackBindingsLease),
 }
@@ -849,6 +959,12 @@ impl From<ComputeBindingsLease> for ResourceLease {
 impl From<RasterPipelineLease> for ResourceLease {
     fn from(value: RasterPipelineLease) -> Self {
         Self::RasterPipeline(value)
+    }
+}
+
+impl From<RasterUniformBindingsLease> for ResourceLease {
+    fn from(value: RasterUniformBindingsLease) -> Self {
+        Self::RasterUniformBindings(value)
     }
 }
 
@@ -1053,6 +1169,9 @@ impl RasterPipeline {
     pub fn kernel(&self) -> RasterKernel {
         self.0.kernel
     }
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     /// Returns the owning device identity.
     pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
         self.0.device
@@ -1062,6 +1181,24 @@ impl RasterPipeline {
         RasterPipelineLease(Arc::clone(&self.0))
     }
     pub(crate) fn native(&self) -> &crate::imp::NativeRasterPipeline {
+        &self.0._native
+    }
+}
+
+impl RasterUniformBindings {
+    /// Returns the sole camera/material pipeline accepted by this binding.
+    pub fn pipeline(&self) -> &RasterPipeline {
+        &self.0.pipeline
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a lease retaining the binding, pipeline, and uniform buffer.
+    pub fn lease(&self) -> RasterUniformBindingsLease {
+        RasterUniformBindingsLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeRasterUniformBindings {
         &self.0._native
     }
 }
@@ -1361,6 +1498,38 @@ impl Device {
             device: self.identity,
         })))
     }
+
+    /// Creates the only group-0/binding-0 uniform binding accepted by the
+    /// camera/material raster artifact.
+    pub fn create_raster_uniform_bindings(
+        &self,
+        pipeline: &RasterPipeline,
+        buffer: &Buffer,
+    ) -> Result<RasterUniformBindings, RasterCreateError> {
+        validate_raster_uniform_contract(
+            pipeline.kernel(),
+            buffer.descriptor().buffer.size,
+            buffer.allowed_usage(),
+        )?;
+        if pipeline.device_identity() != self.identity || buffer.device_identity() != self.identity
+        {
+            return Err(RasterCreateError::ForeignDevice);
+        }
+        let native = crate::imp::create_raster_uniform_bindings(
+            &self.inner,
+            pipeline.native(),
+            buffer.native(),
+        )
+        .map_err(RasterCreateError::NativeFailure)?;
+        Ok(RasterUniformBindings(Arc::new(
+            RasterUniformBindingsShared {
+                _native: native,
+                pipeline: pipeline.clone(),
+                _buffer: buffer.lease(),
+                device: self.identity,
+            },
+        )))
+    }
     /// Creates a native buffer after validating and lowering its portable contract.
     pub fn create_buffer(
         &self,
@@ -1402,6 +1571,23 @@ impl Device {
             device: self.identity,
         })))
     }
+}
+
+fn validate_raster_uniform_contract(
+    kernel: RasterKernel,
+    size: u64,
+    usage: BufferUsage,
+) -> Result<(), RasterCreateError> {
+    if kernel != RasterKernel::IndexedPositionFloat32x3CameraMaterial {
+        return Err(RasterCreateError::BindingRecipeMismatch);
+    }
+    if size != 80 {
+        return Err(RasterCreateError::InvalidBindingRange);
+    }
+    if !usage.contains(BufferUsageKind::Uniform) {
+        return Err(RasterCreateError::UniformUsageRequired);
+    }
+    Ok(())
 }
 
 fn validate_immutable_upload_descriptor(
@@ -1968,6 +2154,55 @@ mod tests {
             RasterVertexLayout::PositionFloat32x3
         );
         assert_ne!(indexed.module_source_hash, indexed_f32x3.module_source_hash);
+        // Pre-0.2.2 artifacts retain the no-binding identity facts exactly.
+        assert_eq!(triangle.binding_count, 0);
+        assert_eq!(triangle.uniform_binding_size, 0);
+        assert_eq!(triangle.binding_recipe_version, 0);
+        assert_eq!(indexed_f32x3.binding_count, 0);
+        assert_eq!(
+            format!("{indexed_f32x3:?}"),
+            "RasterArtifactIdentity { module_source_hash: 16318329126220124131, vertex_entry_point: \"position_f32x3_vertex\", fragment_entry_point: \"color_fragment\", target_format: Rgba8Unorm, vertex_layout: PositionFloat32x3, vertex_stride: 12, index_format: Some(Uint32), recipe_version: 1 }"
+        );
+        let camera = RasterKernel::IndexedPositionFloat32x3CameraMaterial.portable_identity();
+        assert_eq!(camera.binding_count, 1);
+        assert_eq!(camera.uniform_binding_size, 80);
+        assert_eq!(camera.binding_recipe_version, 1);
+        assert!(format!("{camera:?}").contains("binding_count: 1"));
+        assert_ne!(camera.module_source_hash, indexed_f32x3.module_source_hash);
+    }
+
+    #[test]
+    fn camera_material_uniform_contract_is_closed_and_fail_closed() {
+        let uniform =
+            BufferUsage::from_kinds([BufferUsageKind::Uniform, BufferUsageKind::CopyDestination]);
+        assert_eq!(
+            validate_raster_uniform_contract(
+                RasterKernel::IndexedPositionFloat32x3CameraMaterial,
+                80,
+                uniform,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_raster_uniform_contract(RasterKernel::IndexedPositionFloat32x3, 80, uniform),
+            Err(RasterCreateError::BindingRecipeMismatch)
+        );
+        assert_eq!(
+            validate_raster_uniform_contract(
+                RasterKernel::IndexedPositionFloat32x3CameraMaterial,
+                64,
+                uniform,
+            ),
+            Err(RasterCreateError::InvalidBindingRange)
+        );
+        assert_eq!(
+            validate_raster_uniform_contract(
+                RasterKernel::IndexedPositionFloat32x3CameraMaterial,
+                80,
+                BufferUsage::from_kinds([BufferUsageKind::CopyDestination]),
+            ),
+            Err(RasterCreateError::UniformUsageRequired)
+        );
     }
 
     #[test]

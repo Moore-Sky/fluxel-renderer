@@ -16,8 +16,8 @@ use fluxel_rendergraph::{
 
 use crate::{
     Buffer, BufferDescriptor, ComputeBindings, ComputeCreateError, ComputePipeline, Device,
-    MemoryPolicy, RasterPipeline, ResourceCreateError, ResourceLease, Texture, TextureDescriptor,
-    TexturePackBindings,
+    MemoryPolicy, RasterPipeline, RasterUniformBindings, ResourceCreateError, ResourceLease,
+    Texture, TextureDescriptor, TexturePackBindings,
 };
 
 /// Failure while lowering or executing the current native fixed command slice.
@@ -126,6 +126,7 @@ pub struct CopyEncoder {
     active_compute: Option<ComputePipeline>,
     bound_compute_pipeline: Option<ComputePipeline>,
     active_raster: Option<RasterPipeline>,
+    bound_raster_uniform: Option<RasterUniformBindings>,
     vertex_buffer: Option<(Buffer, u64)>,
     index_buffer: Option<(Buffer, u64, IndexFormat)>,
     raster_extent: Option<(u32, u32)>,
@@ -646,6 +647,29 @@ mod tests {
         let triangle = device
             .create_raster_pipeline(crate::RasterKernel::Triangle)
             .unwrap();
+        let camera_pipeline = device
+            .create_raster_pipeline(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial)
+            .unwrap();
+        let other_camera_pipeline = device
+            .create_raster_pipeline(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial)
+            .unwrap();
+        let uniform = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 80 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Uniform]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let camera_bindings = RasterBindings::RasterUniform(
+            device
+                .create_raster_uniform_bindings(&camera_pipeline, &uniform)
+                .unwrap(),
+        );
+        let other_camera_bindings = RasterBindings::RasterUniform(
+            device
+                .create_raster_uniform_bindings(&other_camera_pipeline, &uniform)
+                .unwrap(),
+        );
         let compute_pipeline = device
             .create_compute_pipeline(crate::ComputeKernel::WrappingAdd)
             .unwrap();
@@ -679,6 +703,58 @@ mod tests {
         assert_eq!(
             provider.register_raster_pipeline(RasterPipelineId::new(999), foreign_pipeline),
             Err(NativeExecutionError::ForeignResource)
+        );
+        let camera_pipeline_id = RasterPipelineId::new(997);
+        let camera_binding_id = BindingSetId::new(998);
+        provider
+            .register_raster_pipeline(camera_pipeline_id, camera_pipeline.clone())
+            .unwrap();
+        provider
+            .register_raster_uniform_bindings(camera_binding_id, camera_pipeline_id)
+            .unwrap();
+        let uniform_resource = [ResolvedBindingResource::Buffer {
+            physical: &uniform,
+            range: BufferRange::Whole,
+            semantic: fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                fluxel_rendergraph::BufferReadUse::Uniform,
+            ),
+        }];
+        assert!(
+            provider
+                .bindings(camera_binding_id, &uniform_resource, &[0])
+                .is_err()
+        );
+        let ranged_uniform = [ResolvedBindingResource::Buffer {
+            physical: &uniform,
+            range: BufferRange::Bytes {
+                offset: 0,
+                size: 80,
+            },
+            semantic: fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                fluxel_rendergraph::BufferReadUse::Uniform,
+            ),
+        }];
+        assert!(
+            provider
+                .bindings(camera_binding_id, &ranged_uniform, &[])
+                .is_err()
+        );
+        let wrong_uniform_semantic = [ResolvedBindingResource::Buffer {
+            physical: &uniform,
+            range: BufferRange::Whole,
+            semantic: fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                fluxel_rendergraph::BufferReadUse::Storage,
+            ),
+        }];
+        assert!(
+            provider
+                .bindings(camera_binding_id, &wrong_uniform_semantic, &[])
+                .is_err()
+        );
+        assert!(
+            provider
+                .bindings(camera_binding_id, &uniform_resource, &[])
+                .is_ok()
         );
 
         let color = raster_negative_color(&target);
@@ -1061,6 +1137,63 @@ mod tests {
             backend.draw_indexed(&mut encoder, 0..4, 0, 0..1),
             Err(mismatch)
         );
+        backend.end_raster(&mut encoder).unwrap();
+        drop(encoder);
+
+        // The camera/material recipe requires its exact binding in the active
+        // raster pass. A binding for an equivalent but different pipeline is
+        // rejected, and every rejection remains pre-submit.
+        let camera_vertex = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 36 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let camera_index = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 12 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Index]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        assert!(
+            backend
+                .set_bindings(&mut encoder, &camera_bindings)
+                .is_err()
+        );
+        backend
+            .transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentReadWrite,
+            )
+            .unwrap();
+        backend.begin_raster(&mut encoder, &descriptor).unwrap();
+        backend
+            .set_raster_pipeline(&mut encoder, &camera_pipeline)
+            .unwrap();
+        backend
+            .set_vertex_buffer(&mut encoder, 0, &camera_vertex, 0)
+            .unwrap();
+        backend
+            .set_index_buffer(&mut encoder, &camera_index, 0, IndexFormat::Uint32)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(NativeExecutionError::RasterStateMismatch)
+        );
+        assert_eq!(
+            backend.set_bindings(&mut encoder, &other_camera_bindings),
+            Err(NativeExecutionError::RasterStateMismatch)
+        );
+        backend
+            .set_bindings(&mut encoder, &camera_bindings)
+            .unwrap();
+        backend.draw_indexed(&mut encoder, 0..3, 0, 0..1).unwrap();
         backend.end_raster(&mut encoder).unwrap();
         drop(encoder);
 
@@ -2963,6 +3096,8 @@ pub enum RasterBindings {
     Compute(ComputeBindings),
     /// The closed sampled-Rgba8-to-RW-storage-buffer X01 binding.
     TexturePack(TexturePackBindings),
+    /// The closed camera/material raster uniform binding.
+    RasterUniform(RasterUniformBindings),
 }
 
 /// A serial DX12/Vulkan backend for the fixed Raster→Compute→Copy slice.
@@ -2983,6 +3118,10 @@ pub struct RasterObjectProvider {
         fluxel_rendergraph::BindingSetId,
         (fluxel_rendergraph::ComputePipelineId, ComputePipeline),
     >,
+    raster_bindings: HashMap<
+        fluxel_rendergraph::BindingSetId,
+        (fluxel_rendergraph::RasterPipelineId, RasterPipeline),
+    >,
 }
 
 impl RasterObjectProvider {
@@ -2994,6 +3133,7 @@ impl RasterObjectProvider {
             raster: HashMap::new(),
             compute: HashMap::new(),
             bindings: HashMap::new(),
+            raster_bindings: HashMap::new(),
         }
     }
 
@@ -3038,6 +3178,24 @@ impl RasterObjectProvider {
             .get(&expected_pipeline)
             .ok_or(NativeExecutionError::ComputeBindingMismatch)?;
         self.bindings
+            .insert(id, (expected_pipeline, pipeline.clone()));
+        Ok(())
+    }
+
+    /// Registers the closed frame-uniform recipe expected by a raster pipeline.
+    pub fn register_raster_uniform_bindings(
+        &mut self,
+        id: fluxel_rendergraph::BindingSetId,
+        expected_pipeline: fluxel_rendergraph::RasterPipelineId,
+    ) -> Result<(), NativeExecutionError> {
+        let pipeline = self
+            .raster
+            .get(&expected_pipeline)
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        if pipeline.kernel() != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        self.raster_bindings
             .insert(id, (expected_pipeline, pipeline.clone()));
         Ok(())
     }
@@ -3110,6 +3268,38 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
                 fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
                 "fixed bindings do not accept dynamic offsets",
             ));
+        }
+        if let Some((_, pipeline)) = self.raster_bindings.get(&id) {
+            let [
+                fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                    physical: buffer,
+                    range: BufferRange::Whole,
+                    semantic:
+                        fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                            fluxel_rendergraph::BufferReadUse::Uniform,
+                        ),
+                },
+            ] = resources
+            else {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "camera/material raster binding requires one whole Uniform buffer",
+                ));
+            };
+            let value = self
+                .owner
+                .create_raster_uniform_bindings(pipeline, buffer)
+                .map_err(|error| {
+                    provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        error.to_string(),
+                    )
+                })?;
+            return Ok(fluxel_rendergraph::BoundBindings {
+                device: self.device,
+                lease: value.lease().into(),
+                physical: RasterBindings::RasterUniform(value),
+            });
         }
         let (_, pipeline) = self.bindings.get(&id).ok_or_else(|| {
             provider_error(
@@ -3212,6 +3402,7 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
         let lease = match &bindings {
             RasterBindings::Compute(value) => value.lease().into(),
             RasterBindings::TexturePack(value) => value.lease().into(),
+            RasterBindings::RasterUniform(value) => value.lease().into(),
         };
         Ok(fluxel_rendergraph::BoundBindings {
             device: self.device,
@@ -3346,6 +3537,7 @@ impl ExecutionBackend for CopyBackend {
                 active_compute: None,
                 bound_compute_pipeline: None,
                 active_raster: None,
+                bound_raster_uniform: None,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -3737,6 +3929,7 @@ impl ExecutionBackend for ComputeBackend {
                 active_compute: None,
                 bound_compute_pipeline: None,
                 active_raster: None,
+                bound_raster_uniform: None,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -4121,6 +4314,7 @@ impl ExecutionBackend for RasterBackend {
                 active_compute: None,
                 bound_compute_pipeline: None,
                 active_raster: None,
+                bound_raster_uniform: None,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -4266,6 +4460,7 @@ impl ExecutionBackend for RasterBackend {
         crate::imp::set_raster_pipeline(&mut encoder.native, pipeline.native())
             .map_err(NativeExecutionError::Recording)?;
         encoder.active_raster = Some(pipeline.clone());
+        encoder.bound_raster_uniform = None;
         encoder.leases.push(pipeline.lease().into());
         Ok(())
     }
@@ -4296,6 +4491,27 @@ impl ExecutionBackend for RasterBackend {
         bindings: &RasterBindings,
     ) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if encoder.raster_extent.is_some() && !encoder.compute_open {
+            let pipeline = encoder
+                .active_raster
+                .as_ref()
+                .ok_or(NativeExecutionError::RasterStateMismatch)?;
+            match bindings {
+                RasterBindings::RasterUniform(value)
+                    if pipeline.kernel()
+                        == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+                        && value.device_identity() == self.device.identity()
+                        && value.pipeline().same_object(pipeline) =>
+                {
+                    crate::imp::set_raster_uniform_bindings(&mut encoder.native, value.native())
+                        .map_err(NativeExecutionError::Recording)?;
+                    encoder.bound_raster_uniform = Some(value.clone());
+                    encoder.leases.push(value.lease().into());
+                    return Ok(());
+                }
+                _ => return Err(NativeExecutionError::RasterStateMismatch),
+            }
+        }
         if !encoder.compute_open {
             return Err(NativeExecutionError::ComputeBindingMismatch);
         }
@@ -4469,6 +4685,7 @@ impl RasterBackend {
             pipeline.kernel(),
             crate::RasterKernel::IndexedPositionColor
                 | crate::RasterKernel::IndexedPositionFloat32x3
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
         ) || !raster_recipe_allows_vertex_offset(pipeline.kernel(), offset)
             || !offset.is_multiple_of(4)
             || (buffer.descriptor().buffer.size - offset)
@@ -4510,7 +4727,10 @@ impl RasterBackend {
         }
         let expected_format = match encoder.active_raster.as_ref().map(RasterPipeline::kernel) {
             Some(crate::RasterKernel::IndexedPositionColor) => IndexFormat::Uint16,
-            Some(crate::RasterKernel::IndexedPositionFloat32x3) => IndexFormat::Uint32,
+            Some(crate::RasterKernel::IndexedPositionFloat32x3)
+            | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial) => {
+                IndexFormat::Uint32
+            }
             _ => return Err(NativeExecutionError::RasterStateMismatch),
         };
         if format != expected_format
@@ -4656,9 +4876,13 @@ impl RasterBackend {
             .index_buffer
             .as_ref()
             .expect("checked index binding");
-        let expected_format = match encoder.active_raster.as_ref().map(RasterPipeline::kernel) {
+        let kernel = encoder.active_raster.as_ref().map(RasterPipeline::kernel);
+        let expected_format = match kernel {
             Some(crate::RasterKernel::IndexedPositionColor) => IndexFormat::Uint16,
-            Some(crate::RasterKernel::IndexedPositionFloat32x3) => IndexFormat::Uint32,
+            Some(crate::RasterKernel::IndexedPositionFloat32x3)
+            | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial) => {
+                IndexFormat::Uint32
+            }
             _ => return Err(NativeExecutionError::RasterStateMismatch),
         };
         let index_size = match expected_format {
@@ -4670,6 +4894,11 @@ impl RasterBackend {
             .and_then(|end| offset.checked_add(end))
             .ok_or(NativeExecutionError::RasterStateMismatch)?;
         if *format != expected_format || byte_end > buffer.descriptor().buffer.size {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        if kernel == Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial)
+            && encoder.bound_raster_uniform.is_none()
+        {
             return Err(NativeExecutionError::RasterStateMismatch);
         }
         crate::imp::draw_indexed(
@@ -4717,18 +4946,32 @@ fn valid_compute_dispatch(groups: [u32; 3], maximum: [u32; 3]) -> bool {
 /// Closed 0.2.1 mesh input recipes keep their binding base fixed at zero;
 /// R02 retains its established aligned-offset behavior.
 fn raster_recipe_allows_vertex_offset(kernel: crate::RasterKernel, offset: u64) -> bool {
-    kernel != crate::RasterKernel::IndexedPositionFloat32x3 || offset == 0
+    !matches!(
+        kernel,
+        crate::RasterKernel::IndexedPositionFloat32x3
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+    ) || offset == 0
 }
 
 /// The same fixed-base rule applies to the new Uint32 index recipe only.
 fn raster_recipe_allows_index_offset(kernel: crate::RasterKernel, offset: u64) -> bool {
-    kernel != crate::RasterKernel::IndexedPositionFloat32x3 || offset == 0
+    !matches!(
+        kernel,
+        crate::RasterKernel::IndexedPositionFloat32x3
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+    ) || offset == 0
 }
 
 /// The 0.2.1 recipe is one exact indexed draw beginning at zero; R02 remains
 /// able to select an aligned subrange.
 fn raster_recipe_allows_first_index(kernel: Option<crate::RasterKernel>, first_index: u32) -> bool {
-    kernel != Some(crate::RasterKernel::IndexedPositionFloat32x3) || first_index == 0
+    !matches!(
+        kernel,
+        Some(
+            crate::RasterKernel::IndexedPositionFloat32x3
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
+        )
+    ) || first_index == 0
 }
 
 impl ComputeBackend {
