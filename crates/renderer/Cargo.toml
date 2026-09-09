@@ -1,0 +1,13 @@
+[package]
+name = "fluxel-renderer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+description = "Headless renderer domain model for Fluxel"
+readme = "README.md"
+repository = "https://github.com/Moore-Sky/fluxel-renderer"
+keywords = ["renderer", "graphics", "headless"]
+categories = ["rendering", "graphics", "game-development"]
+
+[dependencies]

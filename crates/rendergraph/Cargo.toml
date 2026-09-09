@@ -1,0 +1,25 @@
+[package]
+name = "fluxel-rendergraph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+description = "A typed render graph for dependency-driven GPU resource planning and submission"
+readme = "README.md"
+repository = "https://github.com/Moore-Sky/fluxel-renderer"
+keywords = ["render-graph", "graphics", "gpu", "renderer", "rhi"]
+categories = ["rendering", "graphics", "game-development"]
+
+[dependencies]
+
+[dev-dependencies]
+clap = "=4.3.24"
+criterion = { version = "=0.5.1", default-features = false, features = ["html_reports"] }
+
+[[bench]]
+name = "compile"
+harness = false
+
+[[bench]]
+name = "execution"
+harness = false

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/rendergraph", "crates/renderer", "crates/rhi"]
+
+[profile.profiling]
+inherits = "release"
+debug = true
