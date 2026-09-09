@@ -1,5 +1,7 @@
 //! Raster-command argument checks.
 
+use std::ops::Range;
+
 use crate::pass::Viewport;
 
 pub(super) fn valid_viewport(viewport: Viewport) -> bool {
@@ -9,12 +11,23 @@ pub(super) fn valid_viewport(viewport: Viewport) -> bool {
         && viewport.height.is_finite()
         && viewport.min_depth.is_finite()
         && viewport.max_depth.is_finite()
-        && viewport.width >= 0.0
-        && viewport.height >= 0.0
+        && viewport.width > 0.0
+        && viewport.height > 0.0
+        && (0.0..=1.0).contains(&viewport.min_depth)
+        && (0.0..=1.0).contains(&viewport.max_depth)
         && viewport.min_depth <= viewport.max_depth
 }
 
-use std::ops::Range;
+pub(super) fn valid_scissor(scissor: ScissorRect) -> bool {
+    scissor.width != 0
+        && scissor.height != 0
+        && scissor.x.checked_add(scissor.width).is_some()
+        && scissor.y.checked_add(scissor.height).is_some()
+}
+
+fn non_empty(range: &Range<u32>) -> bool {
+    range.start < range.end
+}
 
 use crate::{
     access::{BufferRange, BufferReadUse},
@@ -125,12 +138,12 @@ where
             .map_err(|error| self.common.fail_backend(error))
     }
     fn set_scissor(&mut self, scissor: ScissorRect) -> RecordResult {
-        if scissor.width == 0 || scissor.height == 0 {
+        if !valid_scissor(scissor) {
             return Err(recording_error(
                 RecordingErrorKind::InvalidCommandArgument,
                 self.common.pass,
                 None,
-                "scissor rectangle must be non-empty",
+                "scissor rectangle must be non-empty and not overflow",
             ));
         }
         self.common
@@ -139,6 +152,14 @@ where
             .map_err(|error| self.common.fail_backend(error))
     }
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) -> RecordResult {
+        if !non_empty(&vertices) || !non_empty(&instances) {
+            return Err(recording_error(
+                RecordingErrorKind::InvalidCommandArgument,
+                self.common.pass,
+                None,
+                "draw vertex and instance ranges must be non-empty",
+            ));
+        }
         self.common
             .backend
             .draw(self.common.encoder, vertices, instances)
@@ -150,6 +171,14 @@ where
         base_vertex: i32,
         instances: Range<u32>,
     ) -> RecordResult {
+        if !non_empty(&indices) || !non_empty(&instances) {
+            return Err(recording_error(
+                RecordingErrorKind::InvalidCommandArgument,
+                self.common.pass,
+                None,
+                "indexed draw index and instance ranges must be non-empty",
+            ));
+        }
         self.common
             .backend
             .draw_indexed(self.common.encoder, indices, base_vertex, instances)

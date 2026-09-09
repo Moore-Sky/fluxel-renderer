@@ -1,15 +1,15 @@
 [package]
 name = "fluxel-rhi"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
-description = "Headless DX12 and Vulkan Copy plus fixed-Compute execution boundary for Fluxel"
+description = "Headless DX12 and Vulkan fixed Copy, Compute, and Raster execution for Fluxel"
 repository = "https://github.com/Moore-Sky/fluxel-renderer"
 readme = "README.md"
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.1.3" }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.1.4" }
 
 [features]
 default = ["dx12", "vulkan"]

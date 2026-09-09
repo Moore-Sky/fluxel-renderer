@@ -148,6 +148,148 @@ fn begin_raster_preserves_complete_color_and_depth_attachment_operations() {
 }
 
 #[test]
+fn raster_commands_reject_invalid_portable_arguments_before_draw_or_submit() {
+    enum InvalidCommand {
+        Viewport(Viewport),
+        Scissor(ScissorRect),
+        Draw {
+            vertices: std::ops::Range<u32>,
+            instances: std::ops::Range<u32>,
+        },
+        DrawIndexed {
+            indices: std::ops::Range<u32>,
+            instances: std::ops::Range<u32>,
+        },
+    }
+
+    let valid_viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    };
+    let cases = [
+        InvalidCommand::Viewport(Viewport {
+            x: f32::NAN,
+            ..valid_viewport
+        }),
+        InvalidCommand::Viewport(Viewport {
+            width: 0.0,
+            ..valid_viewport
+        }),
+        InvalidCommand::Viewport(Viewport {
+            height: -1.0,
+            ..valid_viewport
+        }),
+        InvalidCommand::Viewport(Viewport {
+            min_depth: -0.1,
+            ..valid_viewport
+        }),
+        InvalidCommand::Viewport(Viewport {
+            max_depth: 1.1,
+            ..valid_viewport
+        }),
+        InvalidCommand::Viewport(Viewport {
+            min_depth: 0.75,
+            max_depth: 0.25,
+            ..valid_viewport
+        }),
+        InvalidCommand::Scissor(ScissorRect {
+            x: u32::MAX,
+            y: 0,
+            width: 1,
+            height: 1,
+        }),
+        InvalidCommand::Scissor(ScissorRect {
+            x: 0,
+            y: u32::MAX,
+            width: 1,
+            height: 1,
+        }),
+        InvalidCommand::Draw {
+            vertices: 0..0,
+            instances: 0..1,
+        },
+        InvalidCommand::Draw {
+            vertices: 0..3,
+            instances: 0..0,
+        },
+        InvalidCommand::DrawIndexed {
+            indices: 0..0,
+            instances: 0..1,
+        },
+        InvalidCommand::DrawIndexed {
+            indices: 0..3,
+            instances: 0..0,
+        },
+    ];
+
+    for command in cases {
+        let mut graph = RenderGraph::new();
+        let color = graph.create_texture("color", texture(TextureFormat::Rgba8Unorm));
+        let pass = graph.add_raster_pass(
+            "invalid raster command",
+            |pass| {
+                let output = pass.color_attachment(
+                    color,
+                    ColorAttachmentDesc {
+                        index: 0,
+                        range: TextureRange::whole(),
+                        operations: AttachmentOps {
+                            load: LoadOp::Clear([0.0; 4]),
+                            store: StoreOp::Store,
+                            write_coverage: WriteCoverage::Full,
+                        },
+                    },
+                );
+                (output, ())
+            },
+            move |commands, _, _, _| match &command {
+                InvalidCommand::Viewport(viewport) => commands.set_viewport(*viewport),
+                InvalidCommand::Scissor(scissor) => commands.set_scissor(*scissor),
+                InvalidCommand::Draw {
+                    vertices,
+                    instances,
+                } => commands.draw(vertices.clone(), instances.clone()),
+                InvalidCommand::DrawIndexed { indices, instances } => {
+                    commands.draw_indexed(indices.clone(), 0, instances.clone())
+                }
+            },
+        );
+        graph.export_texture(
+            pass.output,
+            ExportTextureContract {
+                final_state: ResourceAccessState::ShaderSampledRead,
+            },
+        );
+        let compiled = graph.compile(&caps()).unwrap().graph;
+        let registry = TestRegistry::new(device());
+        let executor = executor();
+        assert!(matches!(
+            executor.execute(
+                &compiled,
+                compiled.instantiate_local(FrameInputs::new(())),
+                &registry,
+                &registry,
+            ),
+            Err(ExecutionError::Recording(error))
+                if error.kind == RecordingErrorKind::InvalidCommandArgument
+        ));
+        let trace = executor.try_backend().unwrap().trace().to_vec();
+        assert!(!trace.iter().any(|event| matches!(
+            event,
+            TestTraceEvent::SetViewport { .. }
+                | TestTraceEvent::SetScissor { .. }
+                | TestTraceEvent::Draw { .. }
+                | TestTraceEvent::DrawIndexed { .. }
+                | TestTraceEvent::Submit { .. }
+        )));
+    }
+}
+
+#[test]
 fn whole_buffer_copy_cannot_exceed_the_physical_descriptor() {
     let mut graph = RenderGraph::new();
     let source = graph.create_buffer("source", buffer(64));

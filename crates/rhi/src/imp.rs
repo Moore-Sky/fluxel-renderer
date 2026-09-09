@@ -114,6 +114,16 @@ pub(super) struct CopyEncoder {
     // transition that reaches the already-current state becomes a same-state
     // memory dependency rather than an invalid stale DX12 transition.
     buffer_states: HashMap<usize, ResourceAccessState>,
+    // This slice lowers texture barriers over one native allocation. Mirror
+    // the buffer tracker so stale `before` states fail before HAL and raster
+    // attachment state can be checked at the native boundary.
+    texture_states: HashMap<TextureStateKey, ResourceAccessState>,
+    // A render attachment view must outlive its active pass. It is created at
+    // begin and destroyed only after end_render_pass.
+    active_render_view: Option<NativeRenderView>,
+    // Ended passes are still referenced by the closed command buffer. Keep
+    // their views until the buffer is discarded or terminal completion.
+    render_views: Vec<NativeRenderView>,
 }
 
 #[allow(
@@ -125,6 +135,43 @@ enum NativeEncoder {
     Dx12(wgpu_hal::dx12::CommandEncoder),
     #[cfg(feature = "vulkan")]
     Vulkan(wgpu_hal::vulkan::CommandEncoder),
+}
+
+enum NativeRenderView {
+    #[cfg(feature = "dx12")]
+    Dx12(wgpu_hal::dx12::TextureView),
+    #[cfg(feature = "vulkan")]
+    Vulkan(wgpu_hal::vulkan::TextureView),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TextureStateKey {
+    allocation: usize,
+    mip_level: u32,
+    array_layer: u32,
+    aspect: TextureAspect,
+}
+
+fn destroy_render_views(owner: &OpenedDevice, views: Vec<NativeRenderView>) {
+    // SAFETY: callers invoke this only after discarding an unsubmitted encoder
+    // or after the command buffer's terminal completion/reset. Each temporary
+    // view was created by this retained device and is consumed exactly once.
+    for view in views {
+        match (&owner.native, view) {
+            #[cfg(feature = "dx12")]
+            (NativeDevice::Dx12 { device, .. }, NativeRenderView::Dx12(view)) => unsafe {
+                // SAFETY: the retained device created this uniquely consumed
+                // view, and its encoder was discarded or terminally reset.
+                device.destroy_texture_view(view)
+            },
+            #[cfg(feature = "vulkan")]
+            (NativeDevice::Vulkan { device, .. }, NativeRenderView::Vulkan(view)) => unsafe {
+                // SAFETY: same unique ownership and terminal-use proof as DX12.
+                device.destroy_texture_view(view)
+            },
+            _ => unreachable!("render view and device backend always match"),
+        }
+    }
 }
 
 /// One fixed, device-affine compute pipeline. This remains private because the
@@ -165,11 +212,69 @@ pub(super) struct NativeComputeBindings {
     pipeline: NativeComputePipeline,
 }
 
+/// Private holder for the closed X01 bind group.  The concrete group is added
+/// below with backend-specific ownership so it cannot outlive its pipeline.
+pub(super) struct NativeTexturePackBindings {
+    native: Option<NativeTexturePackBindingsInner>,
+    pipeline: NativeComputePipeline,
+}
+
+enum NativeTexturePackBindingsInner {
+    #[cfg(feature = "dx12")]
+    Dx12 {
+        group: wgpu_hal::dx12::BindGroup,
+        view: wgpu_hal::dx12::TextureView,
+    },
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        group: wgpu_hal::vulkan::BindGroup,
+        view: wgpu_hal::vulkan::TextureView,
+    },
+}
+
 /// Pipeline setup stages exposed only to the safe RHI mapping layer. Keeping
 /// this private prevents backend or compiler types from entering the public
 /// contract while preserving a stable failure category for callers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ComputePipelineCreateError {
+    ShaderValidation(String),
+    ShaderCompilation(String),
+    NativeObjectCreation(String),
+}
+
+/// Fixed Rgba8Unorm graphics pipeline.  It deliberately has no public raw
+/// handle: all command recording goes through the checked RHI layer.
+#[derive(Clone)]
+pub(super) struct NativeRasterPipeline(Arc<NativeRasterPipelineShared>);
+
+struct NativeRasterPipelineShared {
+    native: Option<NativeRasterPipelineInner>,
+    owner: Arc<OpenedDevice>,
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one infrequent pipeline owns its backend objects"
+)]
+enum NativeRasterPipelineInner {
+    #[cfg(feature = "dx12")]
+    Dx12 {
+        vertex_shader: wgpu_hal::dx12::ShaderModule,
+        fragment_shader: wgpu_hal::dx12::ShaderModule,
+        pipeline_layout: wgpu_hal::dx12::PipelineLayout,
+        pipeline: wgpu_hal::dx12::RenderPipeline,
+    },
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        vertex_shader: wgpu_hal::vulkan::ShaderModule,
+        fragment_shader: wgpu_hal::vulkan::ShaderModule,
+        pipeline_layout: wgpu_hal::vulkan::PipelineLayout,
+        pipeline: wgpu_hal::vulkan::RenderPipeline,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RasterPipelineCreateError {
     ShaderValidation(String),
     ShaderCompilation(String),
     NativeObjectCreation(String),
@@ -196,12 +301,14 @@ enum NativeFinished {
         owner: Arc<OpenedDevice>,
         encoder: wgpu_hal::dx12::CommandEncoder,
         command_buffer: wgpu_hal::dx12::CommandBuffer,
+        render_views: Vec<NativeRenderView>,
     },
     #[cfg(feature = "vulkan")]
     Vulkan {
         owner: Arc<OpenedDevice>,
         encoder: wgpu_hal::vulkan::CommandEncoder,
         command_buffer: wgpu_hal::vulkan::CommandBuffer,
+        render_views: Vec<NativeRenderView>,
     },
 }
 
@@ -220,6 +327,7 @@ enum NativeSubmission {
         command_buffer: Option<wgpu_hal::dx12::CommandBuffer>,
         fence: Option<wgpu_hal::dx12::Fence>,
         leases: Vec<ResourceLease>,
+        render_views: Vec<NativeRenderView>,
         failure: Option<CompletionFailure>,
     },
     #[cfg(feature = "vulkan")]
@@ -229,6 +337,7 @@ enum NativeSubmission {
         command_buffer: Option<wgpu_hal::vulkan::CommandBuffer>,
         fence: Option<wgpu_hal::vulkan::Fence>,
         leases: Vec<ResourceLease>,
+        render_views: Vec<NativeRenderView>,
         failure: Option<CompletionFailure>,
     },
     TerminalFailure(CompletionFailure),
@@ -456,6 +565,52 @@ impl Drop for NativeComputePipelineShared {
     }
 }
 
+impl Drop for NativeRasterPipelineShared {
+    fn drop(&mut self) {
+        // SAFETY: every object was made by `owner`, which is retained here;
+        // pipeline dependencies are destroyed in reverse creation order.
+        let native = self.native.take().expect("raster pipeline destroyed once");
+        #[allow(unreachable_patterns, reason = "single-backend build")]
+        match (&self.owner.native, native) {
+            #[cfg(feature = "dx12")]
+            (
+                NativeDevice::Dx12 { device, .. },
+                NativeRasterPipelineInner::Dx12 {
+                    vertex_shader,
+                    fragment_shader,
+                    pipeline_layout,
+                    pipeline,
+                },
+            ) => unsafe {
+                // SAFETY: `owner` created every object, remains live, and no
+                // in-flight lease exists when the shared owner reaches Drop.
+                device.destroy_render_pipeline(pipeline);
+                device.destroy_pipeline_layout(pipeline_layout);
+                device.destroy_shader_module(fragment_shader);
+                device.destroy_shader_module(vertex_shader);
+            },
+            #[cfg(feature = "vulkan")]
+            (
+                NativeDevice::Vulkan { device, .. },
+                NativeRasterPipelineInner::Vulkan {
+                    vertex_shader,
+                    fragment_shader,
+                    pipeline_layout,
+                    pipeline,
+                },
+            ) => unsafe {
+                // SAFETY: same retained-device, terminal-lifetime, and reverse
+                // dependency destruction proof as the DX12 branch.
+                device.destroy_render_pipeline(pipeline);
+                device.destroy_pipeline_layout(pipeline_layout);
+                device.destroy_shader_module(fragment_shader);
+                device.destroy_shader_module(vertex_shader);
+            },
+            _ => unreachable!("pipeline and device backend always match"),
+        }
+    }
+}
+
 impl Drop for NativeComputeBindings {
     fn drop(&mut self) {
         let native = self.native.take().expect("compute bindings destroyed once");
@@ -479,6 +634,41 @@ impl Drop for NativeComputeBindings {
     }
 }
 
+impl Drop for NativeTexturePackBindings {
+    fn drop(&mut self) {
+        let native = self
+            .native
+            .take()
+            .expect("texture-pack bindings destroyed once");
+        // SAFETY: `pipeline` retains the matching device and layout until the
+        // bind group is destroyed; resource leases are held by the safe owner.
+        #[allow(unreachable_patterns, reason = "single-backend build")]
+        match (&self.pipeline.0.owner.native, native) {
+            #[cfg(feature = "dx12")]
+            (
+                NativeDevice::Dx12 { device, .. },
+                NativeTexturePackBindingsInner::Dx12 { group, view },
+            ) => unsafe {
+                // SAFETY: the retained pipeline owns the matching live device;
+                // the uniquely consumed group is destroyed before its view.
+                device.destroy_bind_group(group);
+                device.destroy_texture_view(view)
+            },
+            #[cfg(feature = "vulkan")]
+            (
+                NativeDevice::Vulkan { device, .. },
+                NativeTexturePackBindingsInner::Vulkan { group, view },
+            ) => unsafe {
+                // SAFETY: same device ownership, terminal lifetime, and reverse
+                // dependency destruction order as DX12.
+                device.destroy_bind_group(group);
+                device.destroy_texture_view(view)
+            },
+            _ => unreachable!("bindings and device backend always match"),
+        }
+    }
+}
+
 impl Drop for CopyEncoder {
     fn drop(&mut self) {
         if let Some(mut native) = self.native.take() {
@@ -493,6 +683,11 @@ impl Drop for CopyEncoder {
                 }
             }
         }
+        let mut views = std::mem::take(&mut self.render_views);
+        if let Some(view) = self.active_render_view.take() {
+            views.push(view);
+        }
+        destroy_render_views(&self.owner, views);
     }
 }
 
@@ -508,23 +703,27 @@ fn reset_finished(finished: NativeFinished) {
     match finished {
         #[cfg(feature = "dx12")]
         NativeFinished::Dx12 {
+            owner,
             mut encoder,
             command_buffer,
-            ..
+            render_views,
         } => {
             // SAFETY: encoder is closed, the command buffer was never accepted
             // or has completed, and it is the only live buffer from this encoder.
             unsafe { encoder.reset_all(core::iter::once(command_buffer)) };
+            destroy_render_views(&owner, render_views);
         }
         #[cfg(feature = "vulkan")]
         NativeFinished::Vulkan {
+            owner,
             mut encoder,
             command_buffer,
-            ..
+            render_views,
         } => {
             // SAFETY: same closed-encoder and complete/unsubmitted ownership
             // proof as the DX12 branch.
             unsafe { encoder.reset_all(core::iter::once(command_buffer)) };
+            destroy_render_views(&owner, render_views);
         }
     }
 }
@@ -539,6 +738,7 @@ impl Drop for NativeSubmission {
                 command_buffer,
                 fence,
                 leases,
+                render_views,
                 failure,
             } => {
                 let (
@@ -561,16 +761,33 @@ impl Drop for NativeSubmission {
                 // process lifetime rather than resetting storage still in use.
                 if failure.is_some() {
                     let retained = std::mem::take(leases);
-                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                    let retained_views = std::mem::take(render_views);
+                    std::mem::forget((
+                        owner.clone(),
+                        encoder,
+                        command_buffer,
+                        fence,
+                        retained,
+                        retained_views,
+                    ));
                 } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
                     // SAFETY: the sole command buffer completed at fence value 1.
                     unsafe {
                         encoder.reset_all(core::iter::once(command_buffer));
                         device.destroy_fence(fence);
                     }
+                    destroy_render_views(owner, std::mem::take(render_views));
                 } else {
                     let retained = std::mem::take(leases);
-                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                    let retained_views = std::mem::take(render_views);
+                    std::mem::forget((
+                        owner.clone(),
+                        encoder,
+                        command_buffer,
+                        fence,
+                        retained,
+                        retained_views,
+                    ));
                 }
             }
             #[cfg(feature = "vulkan")]
@@ -580,6 +797,7 @@ impl Drop for NativeSubmission {
                 command_buffer,
                 fence,
                 leases,
+                render_views,
                 failure,
             } => {
                 let (
@@ -598,16 +816,33 @@ impl Drop for NativeSubmission {
                 };
                 if failure.is_some() {
                     let retained = std::mem::take(leases);
-                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                    let retained_views = std::mem::take(render_views);
+                    std::mem::forget((
+                        owner.clone(),
+                        encoder,
+                        command_buffer,
+                        fence,
+                        retained,
+                        retained_views,
+                    ));
                 } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
                     // SAFETY: the sole command buffer completed at fence value 1.
                     unsafe {
                         encoder.reset_all(core::iter::once(command_buffer));
                         device.destroy_fence(fence);
                     }
+                    destroy_render_views(owner, std::mem::take(render_views));
                 } else {
                     let retained = std::mem::take(leases);
-                    std::mem::forget((owner.clone(), encoder, command_buffer, fence, retained));
+                    let retained_views = std::mem::take(render_views);
+                    std::mem::forget((
+                        owner.clone(),
+                        encoder,
+                        command_buffer,
+                        fence,
+                        retained,
+                        retained_views,
+                    ));
                 }
             }
             Self::TerminalFailure(_) => {}
@@ -640,16 +875,42 @@ pub(super) fn create_compute_pipeline(
         info,
         debug_source: None,
     };
-    let layout_entries = [wgt::BindGroupLayoutEntry {
-        binding: 0,
-        visibility: wgt::ShaderStages::COMPUTE,
-        ty: wgt::BindingType::Buffer {
-            ty: wgt::BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }];
+    let texture_pack = source.contains("texture_2d<");
+    let layout_entries = if texture_pack {
+        vec![
+            wgt::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgt::ShaderStages::COMPUTE,
+                ty: wgt::BindingType::Texture {
+                    sample_type: wgt::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgt::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgt::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgt::ShaderStages::COMPUTE,
+                ty: wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]
+    } else {
+        vec![wgt::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgt::ShaderStages::COMPUTE,
+            ty: wgt::BindingType::Buffer {
+                ty: wgt::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }]
+    };
 
     // Each arm creates objects in dependency order and eagerly tears down any
     // prefix on failure. This prevents a failed setup from retaining native
@@ -849,6 +1110,282 @@ pub(super) fn create_compute_pipeline(
     )))
 }
 
+/// Creates the only graphics shape admitted by 0.1.4: a D2 Rgba8Unorm target
+/// and one `float32x2 + unorm8x4` per-vertex buffer.  Source is parsed and
+/// validated before any unsafe HAL call; callers cannot pass a raw module.
+pub(super) fn create_raster_pipeline(
+    owner: &Arc<OpenedDevice>,
+    source: &str,
+    vertex_entry: &str,
+    fragment_entry: &str,
+    uses_vertex_buffer: bool,
+) -> Result<NativeRasterPipeline, RasterPipelineCreateError> {
+    let module = naga::front::wgsl::Frontend::new()
+        .parse(source)
+        .map_err(|e| {
+            RasterPipelineCreateError::ShaderValidation(format!("WGSL parse failed: {e}"))
+        })?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map_err(|e| {
+        RasterPipelineCreateError::ShaderValidation(format!("WGSL validation failed: {e}"))
+    })?;
+    let attributes = [
+        wgt::VertexAttribute {
+            format: wgt::VertexFormat::Float32x2,
+            offset: 0,
+            shader_location: 0,
+        },
+        wgt::VertexAttribute {
+            format: wgt::VertexFormat::Unorm8x4,
+            offset: 8,
+            shader_location: 1,
+        },
+    ];
+    let buffers = if uses_vertex_buffer {
+        vec![Some(wgpu_hal::VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgt::VertexStepMode::Vertex,
+            attributes: &attributes,
+        })]
+    } else {
+        vec![]
+    };
+    let color_targets = [Some(wgt::ColorTargetState::from(
+        wgt::TextureFormat::Rgba8Unorm,
+    ))];
+    let constants = naga::back::PipelineConstants::default();
+    let native = match &owner.native {
+        #[cfg(feature = "dx12")]
+        NativeDevice::Dx12 { device, .. } => {
+            let make_shader = |label| unsafe {
+                // SAFETY: WGSL was parsed and validated into owned Naga IR;
+                // runtime checks are enabled and `device` stays retained.
+                device.create_shader_module(
+                    &wgpu_hal::ShaderModuleDescriptor {
+                        label: Some(label),
+                        runtime_checks: wgt::ShaderRuntimeChecks::checked(),
+                    },
+                    wgpu_hal::ShaderInput::Naga(wgpu_hal::NagaShader {
+                        module: Cow::Owned(module.clone()),
+                        info: info.clone(),
+                        debug_source: None,
+                    }),
+                )
+            };
+            let vertex_shader = make_shader("fluxel fixed raster vertex shader").map_err(|e| {
+                RasterPipelineCreateError::ShaderCompilation(format!(
+                    "DX12 vertex shader creation failed: {e}"
+                ))
+            })?;
+            let fragment_shader = match make_shader("fluxel fixed raster fragment shader") {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: this device uniquely owns the live module;
+                        // no pipeline was created after fragment creation failed.
+                        device.destroy_shader_module(vertex_shader)
+                    };
+                    return Err(RasterPipelineCreateError::ShaderCompilation(format!(
+                        "DX12 fragment shader creation failed: {e}"
+                    )));
+                }
+            };
+            let layouts: [Option<&wgpu_hal::dx12::BindGroupLayout>; 0] = [];
+            let layout = match unsafe {
+                // SAFETY: the zero-bind-group descriptor is internally valid
+                // and all referenced storage lives through this call.
+                device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                    label: Some("fluxel fixed raster pipeline layout"),
+                    flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                    bind_group_layouts: &layouts,
+                    immediate_size: 0,
+                })
+            } {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: layout creation failed, so both same-device
+                        // modules are unreferenced and uniquely consumed here.
+                        device.destroy_shader_module(fragment_shader);
+                        device.destroy_shader_module(vertex_shader)
+                    };
+                    return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
+                        "DX12 raster pipeline-layout creation failed: {e}"
+                    )));
+                }
+            };
+            let desc = wgpu_hal::RenderPipelineDescriptor {
+                label: Some("fluxel fixed Rgba8Unorm raster pipeline"),
+                layout: &layout,
+                vertex_processor: wgpu_hal::VertexProcessor::Standard {
+                    vertex_buffers: &buffers,
+                    vertex_stage: wgpu_hal::ProgrammableStage {
+                        module: &vertex_shader,
+                        entry_point: vertex_entry,
+                        constants: &constants,
+                        zero_initialize_workgroup_memory: true,
+                    },
+                },
+                primitive: wgt::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgt::MultisampleState::default(),
+                fragment_stage: Some(wgpu_hal::ProgrammableStage {
+                    module: &fragment_shader,
+                    entry_point: fragment_entry,
+                    constants: &constants,
+                    zero_initialize_workgroup_memory: true,
+                }),
+                color_targets: &color_targets,
+                multiview_mask: None,
+                cache: None,
+            };
+            let pipeline = match unsafe {
+                // SAFETY: descriptor modules/layout/entries are validated,
+                // live, same-device objects and outlive this creation call.
+                device.create_render_pipeline(&desc)
+            } {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: pipeline creation failed; the same-device
+                        // dependencies are uniquely consumed in reverse order.
+                        device.destroy_pipeline_layout(layout);
+                        device.destroy_shader_module(fragment_shader);
+                        device.destroy_shader_module(vertex_shader)
+                    };
+                    return Err(RasterPipelineCreateError::ShaderCompilation(format!(
+                        "DX12 raster pipeline creation failed: {e}"
+                    )));
+                }
+            };
+            NativeRasterPipelineInner::Dx12 {
+                vertex_shader,
+                fragment_shader,
+                pipeline_layout: layout,
+                pipeline,
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        NativeDevice::Vulkan { device, .. } => {
+            let make_shader = |label| unsafe {
+                // SAFETY: same validated owned Naga IR and retained-device
+                // proof as the DX12 shader creation branch.
+                device.create_shader_module(
+                    &wgpu_hal::ShaderModuleDescriptor {
+                        label: Some(label),
+                        runtime_checks: wgt::ShaderRuntimeChecks::checked(),
+                    },
+                    wgpu_hal::ShaderInput::Naga(wgpu_hal::NagaShader {
+                        module: Cow::Owned(module.clone()),
+                        info: info.clone(),
+                        debug_source: None,
+                    }),
+                )
+            };
+            let vertex_shader = make_shader("fluxel fixed raster vertex shader").map_err(|e| {
+                RasterPipelineCreateError::ShaderCompilation(format!(
+                    "Vulkan vertex shader creation failed: {e}"
+                ))
+            })?;
+            let fragment_shader = match make_shader("fluxel fixed raster fragment shader") {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: fragment creation failed before any pipeline;
+                        // this same-device vertex module is uniquely consumed.
+                        device.destroy_shader_module(vertex_shader)
+                    };
+                    return Err(RasterPipelineCreateError::ShaderCompilation(format!(
+                        "Vulkan fragment shader creation failed: {e}"
+                    )));
+                }
+            };
+            let layouts: [Option<&wgpu_hal::vulkan::BindGroupLayout>; 0] = [];
+            let layout = match unsafe {
+                // SAFETY: the zero-group descriptor is valid and its borrowed
+                // storage remains live for the complete call.
+                device.create_pipeline_layout(&wgpu_hal::PipelineLayoutDescriptor {
+                    label: Some("fluxel fixed raster pipeline layout"),
+                    flags: wgpu_hal::PipelineLayoutFlags::empty(),
+                    bind_group_layouts: &layouts,
+                    immediate_size: 0,
+                })
+            } {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: failed layout creation left both same-device
+                        // modules unreferenced; consume them exactly once.
+                        device.destroy_shader_module(fragment_shader);
+                        device.destroy_shader_module(vertex_shader)
+                    };
+                    return Err(RasterPipelineCreateError::NativeObjectCreation(format!(
+                        "Vulkan raster pipeline-layout creation failed: {e}"
+                    )));
+                }
+            };
+            let desc = wgpu_hal::RenderPipelineDescriptor {
+                label: Some("fluxel fixed Rgba8Unorm raster pipeline"),
+                layout: &layout,
+                vertex_processor: wgpu_hal::VertexProcessor::Standard {
+                    vertex_buffers: &buffers,
+                    vertex_stage: wgpu_hal::ProgrammableStage {
+                        module: &vertex_shader,
+                        entry_point: vertex_entry,
+                        constants: &constants,
+                        zero_initialize_workgroup_memory: true,
+                    },
+                },
+                primitive: wgt::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgt::MultisampleState::default(),
+                fragment_stage: Some(wgpu_hal::ProgrammableStage {
+                    module: &fragment_shader,
+                    entry_point: fragment_entry,
+                    constants: &constants,
+                    zero_initialize_workgroup_memory: true,
+                }),
+                color_targets: &color_targets,
+                multiview_mask: None,
+                cache: None,
+            };
+            let pipeline = match unsafe {
+                // SAFETY: validated same-device modules and layout are live;
+                // vertex/color descriptors satisfy the fixed pipeline recipe.
+                device.create_render_pipeline(&desc)
+            } {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: no pipeline exists; destroy its uniquely owned
+                        // same-device dependencies in reverse creation order.
+                        device.destroy_pipeline_layout(layout);
+                        device.destroy_shader_module(fragment_shader);
+                        device.destroy_shader_module(vertex_shader)
+                    };
+                    return Err(RasterPipelineCreateError::ShaderCompilation(format!(
+                        "Vulkan raster pipeline creation failed: {e}"
+                    )));
+                }
+            };
+            NativeRasterPipelineInner::Vulkan {
+                vertex_shader,
+                fragment_shader,
+                pipeline_layout: layout,
+                pipeline,
+            }
+        }
+    };
+    Ok(NativeRasterPipeline(Arc::new(NativeRasterPipelineShared {
+        native: Some(native),
+        owner: Arc::clone(owner),
+    })))
+}
+
 /// Creates the sole RW storage binding for a validated buffer subrange.
 pub(super) fn create_compute_bindings(
     owner: &Arc<OpenedDevice>,
@@ -940,6 +1477,163 @@ pub(super) fn create_compute_bindings(
     })
 }
 
+/// Creates X01's sampled-texture plus RW-storage-buffer binding.  This check
+/// intentionally remains at the unsafe boundary as well as the safe layer:
+/// constructing unchecked HAL views or bindings from a foreign resource would
+/// violate HAL's device/lifetime contract.
+pub(super) fn create_texture_pack_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeComputePipeline,
+    texture: &OwnedTexture,
+    buffer: &OwnedBuffer,
+    offset: u64,
+    size: u64,
+) -> Result<NativeTexturePackBindings, String> {
+    if !Arc::ptr_eq(owner, &pipeline.0.owner)
+        || !Arc::ptr_eq(owner, &texture.owner)
+        || !Arc::ptr_eq(owner, &buffer.owner)
+    {
+        return Err("texture-pack objects belong to another native device".into());
+    }
+    validate_native_compute_binding_range(
+        offset,
+        size,
+        buffer.size,
+        owner.capabilities.min_storage_buffer_offset_alignment,
+        owner.capabilities.max_storage_buffer_binding_size,
+    )?;
+    let view_desc = wgpu_hal::TextureViewDescriptor {
+        label: Some("fluxel X01 sampled Rgba8Unorm view"),
+        format: wgt::TextureFormat::Rgba8Unorm,
+        dimension: wgt::TextureViewDimension::D2,
+        usage: wgt::TextureUses::RESOURCE,
+        range: wgt::ImageSubresourceRange {
+            aspect: wgt::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+        },
+    };
+    let entries = [
+        wgpu_hal::BindGroupEntry {
+            binding: 0,
+            resource_index: 0,
+            count: 1,
+        },
+        wgpu_hal::BindGroupEntry {
+            binding: 1,
+            resource_index: 0,
+            count: 1,
+        },
+    ];
+    let size = NonZeroU64::new(size).expect("validated non-zero storage size");
+    match (
+        &owner.native,
+        pipeline.0.native.as_ref(),
+        texture.native.as_ref(),
+        buffer.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeDevice::Dx12 { device, .. },
+            Some(NativeComputePipelineInner::Dx12 {
+                bind_group_layout, ..
+            }),
+            Some(NativeTexture::Dx12(texture)),
+            Some(NativeBuffer::Dx12(buffer)),
+        ) => {
+            let view = unsafe {
+                // SAFETY: safe and native checks prove same-device ownership,
+                // complete Rgba8 range, SAMPLE usage, and retained lifetime.
+                device.create_texture_view(texture, &view_desc)
+            }
+            .map_err(|e| format!("DX12 texture-pack view creation failed: {e}"))?;
+            let group = unsafe {
+                // SAFETY: BGL/resources are live and same-device; the unchecked
+                // buffer range was revalidated for bounds and alignment above.
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel X01 texture-pack bindings"),
+                    layout: bind_group_layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size)],
+                    samplers: &[],
+                    textures: &[wgpu_hal::TextureBinding {
+                        view: &view,
+                        usage: wgt::TextureUses::RESOURCE,
+                    }],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            };
+            match group {
+                Ok(group) => Ok(NativeTexturePackBindings {
+                    native: Some(NativeTexturePackBindingsInner::Dx12 { group, view }),
+                    pipeline: pipeline.clone(),
+                }),
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: group creation failed, so this same-device
+                        // uniquely owned view has no remaining native users.
+                        device.destroy_texture_view(view)
+                    };
+                    Err(format!("DX12 texture-pack bind-group creation failed: {e}"))
+                }
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeDevice::Vulkan { device, .. },
+            Some(NativeComputePipelineInner::Vulkan {
+                bind_group_layout, ..
+            }),
+            Some(NativeTexture::Vulkan(texture)),
+            Some(NativeBuffer::Vulkan(buffer)),
+        ) => {
+            let view = unsafe {
+                // SAFETY: same validated descriptor, device identity, usage,
+                // and retained texture lifetime as the DX12 branch.
+                device.create_texture_view(texture, &view_desc)
+            }
+            .map_err(|e| format!("Vulkan texture-pack view creation failed: {e}"))?;
+            let group = unsafe {
+                // SAFETY: fixed entries match the live same-device BGL; buffer
+                // bounds/alignment and texture view range were revalidated.
+                device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                    label: Some("fluxel X01 texture-pack bindings"),
+                    layout: bind_group_layout,
+                    buffers: &[wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size)],
+                    samplers: &[],
+                    textures: &[wgpu_hal::TextureBinding {
+                        view: &view,
+                        usage: wgt::TextureUses::RESOURCE,
+                    }],
+                    entries: &entries,
+                    acceleration_structures: &[],
+                    external_textures: &[],
+                })
+            };
+            match group {
+                Ok(group) => Ok(NativeTexturePackBindings {
+                    native: Some(NativeTexturePackBindingsInner::Vulkan { group, view }),
+                    pipeline: pipeline.clone(),
+                }),
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: no group was created; consume this unreferenced
+                        // same-device view exactly once.
+                        device.destroy_texture_view(view)
+                    };
+                    Err(format!(
+                        "Vulkan texture-pack bind-group creation failed: {e}"
+                    ))
+                }
+            }
+        }
+        _ => Err("texture-pack objects belong to another native backend".into()),
+    }
+}
+
 /// Rechecks the range immediately before constructing an unchecked HAL binding.
 fn validate_native_compute_binding_range(
     offset: u64,
@@ -983,6 +1677,465 @@ pub(super) fn begin_compute(encoder: &mut CopyEncoder, label: &str) -> Result<()
             });
         },
     }
+    Ok(())
+}
+
+/// Begins the sole supported color pass. `clear=Some` selects clear; otherwise
+/// `load` selects Load and false selects DontCare. `store=false` is explicit
+/// discard. The safe caller validates the attachment's full D2 Rgba8 range.
+pub(super) fn begin_raster(
+    encoder: &mut CopyEncoder,
+    texture: &OwnedTexture,
+    desc: TextureDesc,
+    clear: Option<[f32; 4]>,
+    load: bool,
+    store: bool,
+    label: &str,
+) -> Result<(), String> {
+    if encoder.active_render_view.is_some() {
+        return Err("a raster pass is already active".into());
+    }
+    if !Arc::ptr_eq(&encoder.owner, &texture.owner) {
+        return Err("raster attachment belongs to another native device".into());
+    }
+    let expected_state = if load {
+        ResourceAccessState::ColorAttachmentReadWrite
+    } else {
+        ResourceAccessState::ColorAttachmentWrite
+    };
+    let key = TextureStateKey {
+        allocation: core::ptr::from_ref(texture).addr(),
+        mip_level: 0,
+        array_layer: 0,
+        aspect: TextureAspect::Color,
+    };
+    if encoder.texture_states.get(&key).copied() != Some(expected_state) {
+        return Err(format!(
+            "raster attachment requires encoder state {expected_state:?}"
+        ));
+    }
+    let ops = match clear {
+        Some(_) => wgpu_hal::AttachmentOps::LOAD_CLEAR,
+        None if load => wgpu_hal::AttachmentOps::LOAD,
+        None => wgpu_hal::AttachmentOps::LOAD_DONT_CARE,
+    } | if store {
+        wgpu_hal::AttachmentOps::STORE
+    } else {
+        wgpu_hal::AttachmentOps::STORE_DISCARD
+    };
+    let clear_value = clear.unwrap_or([0.0; 4]);
+    let view_desc = wgpu_hal::TextureViewDescriptor {
+        label: Some("fluxel fixed raster color view"),
+        format: wgt::TextureFormat::Rgba8Unorm,
+        dimension: wgt::TextureViewDimension::D2,
+        usage: wgt::TextureUses::COLOR_TARGET,
+        range: wgt::ImageSubresourceRange {
+            aspect: wgt::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+        },
+    };
+    let extent = wgt::Extent3d {
+        width: desc.extent.width,
+        height: desc.extent.height,
+        depth_or_array_layers: 1,
+    };
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        &encoder.owner.native,
+        texture.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(command),
+            NativeDevice::Dx12 { device, .. },
+            Some(NativeTexture::Dx12(texture)),
+        ) => {
+            let view = unsafe {
+                // SAFETY: the safe layer fixed the full single-sample Rgba8
+                // descriptor/usage and the encoder tracker proves color state.
+                device.create_texture_view(texture, &view_desc)
+            }
+            .map_err(|e| format!("DX12 raster view creation failed: {e}"))?;
+            let colors = [Some(wgpu_hal::ColorAttachment {
+                target: wgpu_hal::Attachment {
+                    view: &view,
+                    usage: wgt::TextureUses::COLOR_TARGET,
+                },
+                depth_slice: None,
+                resolve_target: None,
+                ops,
+                clear_value: wgt::Color {
+                    r: f64::from(clear_value[0]),
+                    g: f64::from(clear_value[1]),
+                    b: f64::from(clear_value[2]),
+                    a: f64::from(clear_value[3]),
+                },
+            })];
+            if let Err(e) = unsafe {
+                // SAFETY: encoder is recording outside another pass; attachment
+                // view/state/extent/ops are validated and remain retained.
+                command.begin_render_pass(&wgpu_hal::RenderPassDescriptor {
+                    label: Some(label),
+                    extent,
+                    sample_count: 1,
+                    color_attachments: &colors,
+                    depth_stencil_attachment: None,
+                    multiview_mask: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+            } {
+                unsafe {
+                    // SAFETY: begin failed and did not retain the uniquely owned
+                    // same-device view, so it may be destroyed immediately.
+                    device.destroy_texture_view(view)
+                };
+                return Err(format!("DX12 begin raster pass failed: {e}"));
+            }
+            encoder.active_render_view = Some(NativeRenderView::Dx12(view));
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(command),
+            NativeDevice::Vulkan { device, .. },
+            Some(NativeTexture::Vulkan(texture)),
+        ) => {
+            let view = unsafe {
+                // SAFETY: same validated full Rgba8 attachment and tracked
+                // color state/lifetime proof as DX12.
+                device.create_texture_view(texture, &view_desc)
+            }
+            .map_err(|e| format!("Vulkan raster view creation failed: {e}"))?;
+            let colors = [Some(wgpu_hal::ColorAttachment {
+                target: wgpu_hal::Attachment {
+                    view: &view,
+                    usage: wgt::TextureUses::COLOR_TARGET,
+                },
+                depth_slice: None,
+                resolve_target: None,
+                ops,
+                clear_value: wgt::Color {
+                    r: f64::from(clear_value[0]),
+                    g: f64::from(clear_value[1]),
+                    b: f64::from(clear_value[2]),
+                    a: f64::from(clear_value[3]),
+                },
+            })];
+            if let Err(e) = unsafe {
+                // SAFETY: the recording encoder has no active pass and all
+                // attachment descriptor/state/lifetime requirements hold.
+                command.begin_render_pass(&wgpu_hal::RenderPassDescriptor {
+                    label: Some(label),
+                    extent,
+                    sample_count: 1,
+                    color_attachments: &colors,
+                    depth_stencil_attachment: None,
+                    multiview_mask: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+            } {
+                unsafe {
+                    // SAFETY: failed begin left this same-device view
+                    // unreferenced; it is consumed exactly once here.
+                    device.destroy_texture_view(view)
+                };
+                return Err(format!("Vulkan begin raster pass failed: {e}"));
+            }
+            encoder.active_render_view = Some(NativeRenderView::Vulkan(view));
+        }
+        _ => return Err("raster attachment belongs to another native backend".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn end_raster(encoder: &mut CopyEncoder) -> Result<(), String> {
+    let view = encoder
+        .active_render_view
+        .take()
+        .ok_or_else(|| "no active raster pass".to_owned())?;
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        &encoder.owner.native,
+        view,
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(command),
+            NativeDevice::Dx12 { .. },
+            view @ NativeRenderView::Dx12(_),
+        ) => unsafe {
+            // SAFETY: the safe layer established one active raster pass; its
+            // view is moved into command-buffer retention after this call.
+            command.end_render_pass();
+            encoder.render_views.push(view);
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(command),
+            NativeDevice::Vulkan { .. },
+            view @ NativeRenderView::Vulkan(_),
+        ) => unsafe {
+            // SAFETY: same active-pass and retained-view proof as DX12.
+            command.end_render_pass();
+            encoder.render_views.push(view);
+        },
+        _ => return Err("raster pass belongs to another native backend".into()),
+    }
+    Ok(())
+}
+
+pub(super) fn set_raster_pipeline(
+    encoder: &mut CopyEncoder,
+    pipeline: &NativeRasterPipeline,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &pipeline.0.owner) {
+        return Err("raster pipeline belongs to another native device".into());
+    }
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        pipeline.0.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeEncoder::Dx12(encoder), Some(NativeRasterPipelineInner::Dx12 { pipeline, .. })) => unsafe {
+            // SAFETY: safe checks prove same device and an active compatible
+            // raster pass; the pipeline lease survives command completion.
+            encoder.set_render_pipeline(pipeline)
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            Some(NativeRasterPipelineInner::Vulkan { pipeline, .. }),
+        ) => unsafe {
+            // SAFETY: same device, active-pass, compatibility, and lifetime
+            // proof as the DX12 branch.
+            encoder.set_render_pipeline(pipeline)
+        },
+        _ => return Err("raster pipeline belongs to another native backend".into()),
+    };
+    Ok(())
+}
+
+pub(super) fn set_vertex_buffer(
+    encoder: &mut CopyEncoder,
+    buffer: &OwnedBuffer,
+    offset: u64,
+    size: u64,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
+        || offset.checked_add(size).is_none_or(|end| end > buffer.size)
+        || size == 0
+    {
+        return Err("invalid raster vertex buffer range".into());
+    }
+    let size = NonZeroU64::new(size).expect("checked non-zero vertex range");
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        buffer.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeEncoder::Dx12(encoder), Some(NativeBuffer::Dx12(buffer))) => unsafe {
+            // SAFETY: safe and native checks prove same device, active raster
+            // pass, aligned in-bounds non-empty range, and retained buffer life.
+            encoder.set_vertex_buffer(
+                0,
+                wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
+            )
+        },
+        #[cfg(feature = "vulkan")]
+        (NativeEncoder::Vulkan(encoder), Some(NativeBuffer::Vulkan(buffer))) => unsafe {
+            // SAFETY: same pass/device/range/alignment/lifetime proof as DX12.
+            encoder.set_vertex_buffer(
+                0,
+                wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
+            )
+        },
+        _ => return Err("vertex buffer belongs to another native backend".into()),
+    };
+    Ok(())
+}
+
+pub(super) fn set_index_buffer(
+    encoder: &mut CopyEncoder,
+    buffer: &OwnedBuffer,
+    offset: u64,
+    size: u64,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
+        || !offset.is_multiple_of(2)
+        || !size.is_multiple_of(2)
+        || offset.checked_add(size).is_none_or(|end| end > buffer.size)
+        || size == 0
+    {
+        return Err("invalid Uint16 raster index buffer range".into());
+    }
+    let size = NonZeroU64::new(size).expect("checked non-zero index range");
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        buffer.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (NativeEncoder::Dx12(encoder), Some(NativeBuffer::Dx12(buffer))) => unsafe {
+            // SAFETY: safe and native checks prove active pass, Uint16 alignment,
+            // in-bounds non-empty range, same device, and retained lifetime.
+            encoder.set_index_buffer(
+                wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
+                wgt::IndexFormat::Uint16,
+            )
+        },
+        #[cfg(feature = "vulkan")]
+        (NativeEncoder::Vulkan(encoder), Some(NativeBuffer::Vulkan(buffer))) => unsafe {
+            // SAFETY: same active-pass, Uint16 range, device, and lifetime proof.
+            encoder.set_index_buffer(
+                wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
+                wgt::IndexFormat::Uint16,
+            )
+        },
+        _ => return Err("index buffer belongs to another native backend".into()),
+    };
+    Ok(())
+}
+
+pub(super) fn set_viewport(
+    encoder: &mut CopyEncoder,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    min_depth: f32,
+    max_depth: f32,
+) -> Result<(), String> {
+    if ![x, y, width, height, min_depth, max_depth]
+        .iter()
+        .all(|v| v.is_finite())
+        || width <= 0.0
+        || height <= 0.0
+        || !(0.0..=1.0).contains(&min_depth)
+        || !(0.0..=1.0).contains(&max_depth)
+        || min_depth > max_depth
+    {
+        return Err("invalid raster viewport".into());
+    }
+    let rect = wgpu_hal::Rect {
+        x,
+        y,
+        w: width,
+        h: height,
+    };
+    match encoder.native.as_mut().expect("live encoder") {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(e) => unsafe {
+            // SAFETY: finite positive extent and ordered [0,1] depth range were
+            // checked twice; safe layer proves an active raster pass.
+            e.set_viewport(&rect, min_depth..max_depth)
+        },
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(e) => unsafe {
+            // SAFETY: same active-pass and validated numeric range as DX12.
+            e.set_viewport(&rect, min_depth..max_depth)
+        },
+    };
+    Ok(())
+}
+
+pub(super) fn set_scissor(
+    encoder: &mut CopyEncoder,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("invalid raster scissor".into());
+    }
+    let rect = wgpu_hal::Rect {
+        x,
+        y,
+        w: width,
+        h: height,
+    };
+    match encoder.native.as_mut().expect("live encoder") {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(e) => unsafe {
+            // SAFETY: safe layer bounds this non-empty rectangle to the active
+            // attachment and proves an active raster pass.
+            e.set_scissor_rect(&rect)
+        },
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(e) => unsafe {
+            // SAFETY: same active-pass and validated rectangle proof as DX12.
+            e.set_scissor_rect(&rect)
+        },
+    };
+    Ok(())
+}
+
+pub(super) fn draw(
+    encoder: &mut CopyEncoder,
+    first_vertex: u32,
+    vertex_count: u32,
+    first_instance: u32,
+    instance_count: u32,
+) -> Result<(), String> {
+    if vertex_count == 0 || instance_count == 0 {
+        return Err("empty raster draw".into());
+    }
+    match encoder.native.as_mut().expect("live encoder") {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(e) => unsafe {
+            // SAFETY: safe fixed recipe proves active compatible pipeline and
+            // non-empty exact vertex/instance ranges; leases retain all objects.
+            e.draw(first_vertex, vertex_count, first_instance, instance_count)
+        },
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(e) => unsafe {
+            // SAFETY: same fixed draw/pass/pipeline/lifetime proof as DX12.
+            e.draw(first_vertex, vertex_count, first_instance, instance_count)
+        },
+    };
+    Ok(())
+}
+
+pub(super) fn draw_indexed(
+    encoder: &mut CopyEncoder,
+    first_index: u32,
+    index_count: u32,
+    base_vertex: i32,
+    first_instance: u32,
+    instance_count: u32,
+) -> Result<(), String> {
+    if index_count == 0 || instance_count == 0 {
+        return Err("empty indexed raster draw".into());
+    }
+    match encoder.native.as_mut().expect("live encoder") {
+        #[cfg(feature = "dx12")]
+        NativeEncoder::Dx12(e) => unsafe {
+            // SAFETY: safe fixed recipe proves active compatible pipeline,
+            // bound vertex/index ranges, and non-empty validated draw ranges.
+            e.draw_indexed(
+                first_index,
+                index_count,
+                base_vertex,
+                first_instance,
+                instance_count,
+            )
+        },
+        #[cfg(feature = "vulkan")]
+        NativeEncoder::Vulkan(e) => unsafe {
+            // SAFETY: same active indexed recipe, range, and retained-lifetime
+            // proof as the DX12 branch.
+            e.draw_indexed(
+                first_index,
+                index_count,
+                base_vertex,
+                first_instance,
+                instance_count,
+            )
+        },
+    };
     Ok(())
 }
 
@@ -1073,6 +2226,49 @@ pub(super) fn set_compute_bindings(
     Ok(())
 }
 
+/// Selects the closed X01 two-entry group. The group itself retains its view,
+/// pipeline and safe-layer resource leases, so no raw object can be destroyed
+/// while the encoder records or the accepted submission is pending.
+pub(super) fn set_texture_pack_bindings(
+    encoder: &mut CopyEncoder,
+    bindings: &NativeTexturePackBindings,
+) -> Result<(), String> {
+    if !Arc::ptr_eq(&encoder.owner, &bindings.pipeline.0.owner) {
+        return Err("texture-pack bindings belong to another native device".into());
+    }
+    match (
+        encoder.native.as_mut().expect("live encoder"),
+        bindings.pipeline.0.native.as_ref(),
+        bindings.native.as_ref(),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            Some(NativeComputePipelineInner::Dx12 {
+                pipeline_layout, ..
+            }),
+            Some(NativeTexturePackBindingsInner::Dx12 { group, .. }),
+        ) => unsafe {
+            // SAFETY: matching device/layout and active compute-pass are
+            // enforced by the safe execution layer.
+            encoder.set_bind_group(pipeline_layout, 0, group, &[]);
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            Some(NativeComputePipelineInner::Vulkan {
+                pipeline_layout, ..
+            }),
+            Some(NativeTexturePackBindingsInner::Vulkan { group, .. }),
+        ) => unsafe {
+            // SAFETY: same fixed-layout and active-pass proof as DX12.
+            encoder.set_bind_group(pipeline_layout, 0, group, &[]);
+        },
+        _ => return Err("texture-pack bindings belong to another native backend".into()),
+    }
+    Ok(())
+}
+
 pub(super) fn dispatch(encoder: &mut CopyEncoder, workgroups: [u32; 3]) -> Result<(), String> {
     if workgroups.contains(&0) {
         return Err("compute dispatch dimensions must be non-zero".into());
@@ -1128,6 +2324,9 @@ pub(super) fn begin_copy_encoder(owner: &Arc<OpenedDevice>) -> Result<CopyEncode
         native: Some(native),
         owner: Arc::clone(owner),
         buffer_states: HashMap::new(),
+        texture_states: HashMap::new(),
+        active_render_view: None,
+        render_views: Vec::new(),
     })
 }
 
@@ -1186,30 +2385,53 @@ pub(super) fn transition_texture(
     before: ResourceAccessState,
     after: ResourceAccessState,
 ) -> Result<(), String> {
-    let from = texture_state(before)?;
+    let selected = texture_subresources(texture, descriptor, range)?;
+    let mut prepared = Vec::with_capacity(selected.len());
+    for (key, range) in selected {
+        let effective_before = match encoder.texture_states.get(&key).copied() {
+            Some(current) if current == after && before != after => current,
+            Some(current) if current != before => {
+                return Err(format!(
+                    "planned texture transition {before:?}->{after:?} conflicts with encoder state {current:?}"
+                ));
+            }
+            _ => before,
+        };
+        prepared.push((key, texture_state(effective_before)?, range));
+    }
     let to = texture_state(after)?;
-    let range = texture_range(descriptor, range)?;
     match (
         encoder.native.as_mut().expect("recording encoder"),
         texture.native.as_ref().expect("live texture"),
     ) {
         #[cfg(feature = "dx12")]
         (NativeEncoder::Dx12(encoder), NativeTexture::Dx12(texture)) => unsafe {
-            encoder.transition_textures(core::iter::once(wgpu_hal::TextureBarrier {
-                texture,
-                range,
-                usage: wgpu_hal::StateTransition { from, to },
+            // SAFETY: every expanded barrier names a validated live subresource
+            // on this same-device texture and uses the tracked actual old state.
+            encoder.transition_textures(prepared.iter().map(|(_, from, range)| {
+                wgpu_hal::TextureBarrier {
+                    texture,
+                    range: *range,
+                    usage: wgpu_hal::StateTransition { from: *from, to },
+                }
             }));
         },
         #[cfg(feature = "vulkan")]
         (NativeEncoder::Vulkan(encoder), NativeTexture::Vulkan(texture)) => unsafe {
-            encoder.transition_textures(core::iter::once(wgpu_hal::TextureBarrier {
-                texture,
-                range,
-                usage: wgpu_hal::StateTransition { from, to },
+            // SAFETY: same validated subresource, tracked-state, same-device,
+            // and retained-lifetime proof as DX12.
+            encoder.transition_textures(prepared.iter().map(|(_, from, range)| {
+                wgpu_hal::TextureBarrier {
+                    texture,
+                    range: *range,
+                    usage: wgpu_hal::StateTransition { from: *from, to },
+                }
             }));
         },
         _ => return Err("texture and encoder backend mismatch".into()),
+    }
+    for (key, _, _) in prepared {
+        encoder.texture_states.insert(key, after);
     }
     Ok(())
 }
@@ -1340,6 +2562,7 @@ pub(super) fn finish_copy_encoder(mut encoder: CopyEncoder) -> Result<CopyComman
                 owner: Arc::clone(&encoder.owner),
                 encoder: native,
                 command_buffer,
+                render_views: std::mem::take(&mut encoder.render_views),
             }
         }
         #[cfg(feature = "vulkan")]
@@ -1350,6 +2573,7 @@ pub(super) fn finish_copy_encoder(mut encoder: CopyEncoder) -> Result<CopyComman
                 owner: Arc::clone(&encoder.owner),
                 encoder: native,
                 command_buffer,
+                render_views: std::mem::take(&mut encoder.render_views),
             }
         }
     };
@@ -1363,12 +2587,22 @@ pub(super) fn submit_copy(
     leases: Vec<ResourceLease>,
 ) -> Result<NativeCompletion, String> {
     let finished = buffer.native.take().expect("finished command buffer");
+    #[cfg(test)]
+    let injected_submit_fault = TEST_SUBMIT_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(test))]
+    let injected_submit_fault = 0;
+    if injected_submit_fault == 1 {
+        reset_finished(finished);
+        return Err("injected pre-submit rejection".into());
+    }
+    let inject_accepted_unknown = injected_submit_fault == 2;
     let submission = match finished {
         #[cfg(feature = "dx12")]
         NativeFinished::Dx12 {
             owner,
             mut encoder,
             command_buffer,
+            render_views,
         } => {
             // Keep this guard through both submit and the accepted-unknown
             // recovery `wait_for_idle` below. HAL requires those operations to
@@ -1379,7 +2613,16 @@ pub(super) fn submit_copy(
                 unreachable!()
             };
             // SAFETY: device is live and owns the new unsignaled fence.
-            let fence = unsafe { device.create_fence() }.map_err(|e| e.to_string())?;
+            let fence = match unsafe { device.create_fence() } {
+                Ok(fence) => fence,
+                Err(error) => {
+                    // No submission occurred. Reset first, then release views
+                    // whose descriptors are recorded by this command buffer.
+                    unsafe { encoder.reset_all(core::iter::once(command_buffer)) };
+                    destroy_render_views(&owner, render_views);
+                    return Err(error.to_string());
+                }
+            };
             // SAFETY: command buffer and encoder belong to this device/queue and
             // remain owned by the returned completion until fence value 1.
             match unsafe { queue.submit(&[&command_buffer], &[], (&fence, 1)) } {
@@ -1389,7 +2632,8 @@ pub(super) fn submit_copy(
                     command_buffer: Some(command_buffer),
                     fence: Some(fence),
                     leases,
-                    failure: None,
+                    render_views,
+                    failure: inject_accepted_unknown.then_some(CompletionFailure::DeviceLost),
                 },
                 Err(error) => {
                     let failure = completion_failure(&error);
@@ -1401,6 +2645,7 @@ pub(super) fn submit_copy(
                             encoder.reset_all(core::iter::once(command_buffer));
                             device.destroy_fence(fence);
                         }
+                        destroy_render_views(&owner, render_views);
                         NativeSubmission::TerminalFailure(failure)
                     } else {
                         NativeSubmission::Dx12 {
@@ -1409,6 +2654,7 @@ pub(super) fn submit_copy(
                             command_buffer: Some(command_buffer),
                             fence: Some(fence),
                             leases,
+                            render_views,
                             failure: Some(CompletionFailure::DeviceLost),
                         }
                     }
@@ -1420,6 +2666,7 @@ pub(super) fn submit_copy(
             owner,
             mut encoder,
             command_buffer,
+            render_views,
         } => {
             // See the DX12 arm: this is also held across error-path idle wait.
             let queue_owner = Arc::clone(&owner);
@@ -1428,7 +2675,16 @@ pub(super) fn submit_copy(
                 unreachable!()
             };
             // SAFETY: device is live and owns the new unsignaled fence.
-            let fence = unsafe { device.create_fence() }.map_err(|e| e.to_string())?;
+            let fence = match unsafe { device.create_fence() } {
+                Ok(fence) => fence,
+                Err(error) => {
+                    // No submission occurred; this command allocator and every
+                    // temporary render view may now be released exactly once.
+                    unsafe { encoder.reset_all(core::iter::once(command_buffer)) };
+                    destroy_render_views(&owner, render_views);
+                    return Err(error.to_string());
+                }
+            };
             // SAFETY: all submitted objects remain retained to completion.
             match unsafe { queue.submit(&[&command_buffer], &[], (&fence, 1)) } {
                 Ok(()) => NativeSubmission::Vulkan {
@@ -1437,7 +2693,8 @@ pub(super) fn submit_copy(
                     command_buffer: Some(command_buffer),
                     fence: Some(fence),
                     leases,
-                    failure: None,
+                    render_views,
+                    failure: inject_accepted_unknown.then_some(CompletionFailure::DeviceLost),
                 },
                 Err(error) => {
                     let failure = completion_failure(&error);
@@ -1446,6 +2703,7 @@ pub(super) fn submit_copy(
                             encoder.reset_all(core::iter::once(command_buffer));
                             device.destroy_fence(fence);
                         }
+                        destroy_render_views(&owner, render_views);
                         NativeSubmission::TerminalFailure(failure)
                     } else {
                         NativeSubmission::Vulkan {
@@ -1454,6 +2712,7 @@ pub(super) fn submit_copy(
                             command_buffer: Some(command_buffer),
                             fence: Some(fence),
                             leases,
+                            render_views,
                             failure: Some(CompletionFailure::DeviceLost),
                         }
                     }
@@ -1544,6 +2803,10 @@ pub(super) fn wait_completion(
     completion: &NativeCompletion,
     timeout: core::time::Duration,
 ) -> Result<CompletionStatus, String> {
+    #[cfg(test)]
+    if TEST_WAIT_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(CompletionStatus::Pending);
+    }
     let mut submission = completion
         .0
         .lock()
@@ -1610,6 +2873,26 @@ pub(super) fn wait_completion(
 }
 
 #[cfg(test)]
+static TEST_SUBMIT_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(test)]
+static TEST_WAIT_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn inject_submit_rejected_once() {
+    TEST_SUBMIT_FAULT.store(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn inject_submit_accepted_unknown_once() {
+    TEST_SUBMIT_FAULT.store(2, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn inject_wait_pending_once() {
+    TEST_WAIT_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
 struct ValidationLogger;
 
 #[cfg(test)]
@@ -1672,7 +2955,8 @@ pub(super) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
     if let NativeDevice::Dx12 { device, .. } = &owner.native {
         use windows::{
             Win32::Graphics::Direct3D12::{
-                D3D12_MESSAGE, D3D12_MESSAGE_SEVERITY_CORRUPTION, D3D12_MESSAGE_SEVERITY_ERROR,
+                D3D12_MESSAGE, D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+                D3D12_MESSAGE_SEVERITY_CORRUPTION, D3D12_MESSAGE_SEVERITY_ERROR,
                 D3D12_MESSAGE_SEVERITY_WARNING, ID3D12InfoQueue,
             },
             core::Interface as _,
@@ -1720,6 +3004,15 @@ pub(super) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
                     "DX12 InfoQueue severity={:?} category={:?} id={:?}: {description}",
                     message.Severity, message.Category, message.ID,
                 );
+                if message.ID == D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE {
+                    // wgpu-hal's portable TextureDescriptor exposes no D3D12
+                    // optimized-clear value, and upstream wgpu-hal 30 filters
+                    // #820 as non-actionable performance spam. The clear is
+                    // still semantically correct, so keep it observable without
+                    // classifying it as a correctness diagnostic.
+                    eprintln!("ignored {rendered}");
+                    continue;
+                }
                 let blocking = matches!(
                     message.Severity,
                     D3D12_MESSAGE_SEVERITY_CORRUPTION
@@ -2223,6 +3516,86 @@ fn copy_base(mip_level: u32, origin: [u32; 3]) -> wgpu_hal::TextureCopyBase {
         },
         aspect: wgpu_hal::FormatAspects::COLOR,
     }
+}
+
+fn canonical_texture_range(descriptor: TextureDesc, range: TextureRange) -> TextureRange {
+    match range {
+        TextureRange::Whole => TextureRange::Subresources {
+            base_mip_level: 0,
+            mip_level_count: descriptor.mip_levels,
+            base_array_layer: 0,
+            array_layer_count: descriptor.array_layers,
+            aspect: match descriptor.format {
+                TextureFormat::Depth32Float => TextureAspect::Depth,
+                TextureFormat::Rgba8Unorm => TextureAspect::Color,
+                _ => TextureAspect::Color,
+            },
+        },
+        range => range,
+    }
+}
+
+fn texture_subresources(
+    texture: &OwnedTexture,
+    descriptor: TextureDesc,
+    range: TextureRange,
+) -> Result<Vec<(TextureStateKey, wgt::ImageSubresourceRange)>, String> {
+    let canonical = canonical_texture_range(descriptor, range);
+    let TextureRange::Subresources {
+        base_mip_level,
+        mip_level_count,
+        base_array_layer,
+        array_layer_count,
+        aspect,
+    } = canonical
+    else {
+        unreachable!("whole ranges are canonicalized")
+    };
+    let mip_end = base_mip_level
+        .checked_add(mip_level_count)
+        .ok_or_else(|| "texture mip range overflows".to_owned())?;
+    let layer_end = base_array_layer
+        .checked_add(array_layer_count)
+        .ok_or_else(|| "texture layer range overflows".to_owned())?;
+    let compatible_aspect = matches!(
+        (descriptor.format, aspect),
+        (TextureFormat::Rgba8Unorm, TextureAspect::Color)
+            | (TextureFormat::Depth32Float, TextureAspect::Depth)
+    );
+    if mip_level_count == 0
+        || array_layer_count == 0
+        || mip_end > descriptor.mip_levels
+        || layer_end > descriptor.array_layers
+        || !compatible_aspect
+    {
+        return Err("invalid texture subresource range".into());
+    }
+    let allocation = core::ptr::from_ref(texture).addr();
+    let mut output = Vec::with_capacity(
+        usize::try_from(u64::from(mip_level_count) * u64::from(array_layer_count))
+            .map_err(|_| "texture subresource count is too large".to_owned())?,
+    );
+    for mip_level in base_mip_level..mip_end {
+        for array_layer in base_array_layer..layer_end {
+            let single = TextureRange::Subresources {
+                base_mip_level: mip_level,
+                mip_level_count: 1,
+                base_array_layer: array_layer,
+                array_layer_count: 1,
+                aspect,
+            };
+            output.push((
+                TextureStateKey {
+                    allocation,
+                    mip_level,
+                    array_layer,
+                    aspect,
+                },
+                texture_range(descriptor, single)?,
+            ));
+        }
+    }
+    Ok(output)
 }
 
 fn texture_range(

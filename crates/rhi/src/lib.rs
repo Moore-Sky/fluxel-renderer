@@ -1,9 +1,9 @@
-//! Native GPU ownership plus Copy and fixed-artifact Compute execution for Fluxel.
+//! Native GPU ownership plus fixed-artifact Copy, Compute, and Raster execution for Fluxel.
 //!
 //! This crate exposes no `wgpu-hal` types. It opens one headless DX12 or Vulkan
-//! device, owns buffers and 2D textures, and executes Copy plus a deliberately
-//! fixed Compute subset of a portable RenderGraph plan through barriers, one
-//! submission, completion, and lease-backed retirement. Raster, surfaces, and
+//! device, owns buffers and 2D textures, and executes deliberately fixed Copy,
+//! Compute, and Raster subsets of a portable RenderGraph plan through barriers,
+//! one submission, completion, and lease-backed retirement. Surfaces and
 //! presentation remain outside this milestone.
 
 #![deny(missing_docs)]
@@ -125,7 +125,7 @@ pub struct HardwareCapabilities {
     pub max_compute_invocations_per_workgroup: u32,
 }
 
-/// A headless native device that owns resources and copy-queue execution.
+/// A headless native device that owns resources and serial graphics-queue execution.
 pub struct Device {
     #[allow(
         dead_code,
@@ -484,6 +484,8 @@ mod imp {
     pub(super) struct CopyCommandBuffer;
     pub(super) struct NativeComputePipeline;
     pub(super) struct NativeComputeBindings;
+    pub(super) struct NativeTexturePackBindings;
+    pub(super) struct NativeRasterPipeline;
     #[derive(Clone)]
     pub(super) struct NativeCompletion;
     pub(super) fn open(backend: Backend, _: DeviceOptions) -> Result<OpenedDevice, OpenError> {
@@ -526,6 +528,25 @@ mod imp {
     ) -> Result<NativeComputeBindings, String> {
         Err("native compute is only supported on Windows".into())
     }
+    pub(super) fn create_texture_pack_bindings(
+        _: &Arc<OpenedDevice>,
+        _: &NativeComputePipeline,
+        _: &OwnedTexture,
+        _: &OwnedBuffer,
+        _: u64,
+        _: u64,
+    ) -> Result<NativeTexturePackBindings, String> {
+        Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn create_raster_pipeline(
+        _: &Arc<OpenedDevice>,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> Result<NativeRasterPipeline, String> {
+        Err("native raster is only supported on Windows".into())
+    }
     pub(super) fn transition_texture(
         _: &mut CopyEncoder,
         _: &OwnedTexture,
@@ -547,6 +568,20 @@ mod imp {
     pub(super) fn begin_compute(_: &mut CopyEncoder, _: &str) -> Result<(), String> {
         Err("native compute is only supported on Windows".into())
     }
+    pub(super) fn begin_raster(
+        _: &mut CopyEncoder,
+        _: &OwnedTexture,
+        _: TextureDesc,
+        _: Option<[f32; 4]>,
+        _: bool,
+        _: bool,
+        _: &str,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn end_raster(_: &mut CopyEncoder) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
     pub(super) fn end_compute(_: &mut CopyEncoder) -> Result<(), String> {
         Err("native compute is only supported on Windows".into())
     }
@@ -561,6 +596,67 @@ mod imp {
         _: &NativeComputeBindings,
     ) -> Result<(), String> {
         Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn set_texture_pack_bindings(
+        _: &mut CopyEncoder,
+        _: &NativeTexturePackBindings,
+    ) -> Result<(), String> {
+        Err("native compute is only supported on Windows".into())
+    }
+    pub(super) fn set_raster_pipeline(
+        _: &mut CopyEncoder,
+        _: &NativeRasterPipeline,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn set_vertex_buffer(
+        _: &mut CopyEncoder,
+        _: &OwnedBuffer,
+        _: u64,
+        _: u64,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn set_index_buffer(
+        _: &mut CopyEncoder,
+        _: &OwnedBuffer,
+        _: u64,
+        _: u64,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn set_viewport(
+        _: &mut CopyEncoder,
+        _: f32,
+        _: f32,
+        _: f32,
+        _: f32,
+        _: f32,
+        _: f32,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn set_scissor(
+        _: &mut CopyEncoder,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: u32,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn draw(_: &mut CopyEncoder, _: u32, _: u32, _: u32, _: u32) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    pub(super) fn draw_indexed(
+        _: &mut CopyEncoder,
+        _: u32,
+        _: u32,
+        _: i32,
+        _: u32,
+        _: u32,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
     }
     pub(super) fn dispatch(_: &mut CopyEncoder, _: [u32; 3]) -> Result<(), String> {
         Err("native compute is only supported on Windows".into())

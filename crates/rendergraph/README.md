@@ -11,16 +11,18 @@ The current release supplies the declaration/compiler contract and a
 single-queue execution SPI verified by the deterministic CPU-only `TestRhi`.
 The companion
 [`fluxel-rhi`](https://github.com/Moore-Sky/fluxel-renderer/tree/main/crates/rhi)
-crate implements its Copy subset and a fixed Compute subset on native DX12 and
-Vulkan. Raster, surfaces, renderer lowering, and a general shader API remain
-outside that native slice.
+crate implements fixed Raster, Compute, and Copy subsets on native DX12 and
+Vulkan through the same immutable plan. The 0.1.4 native profile is limited to
+R01 clear/triangle, R02 indexed viewport/scissor, and X01's closed
+Raster→Compute→Copy recipe; surfaces, renderer lowering, and a general shader
+or pipeline API remain outside it.
 
 ## Installation
 
 ```toml
 [dependencies.fluxel-rendergraph]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.3"
+tag = "v0.1.4"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -138,10 +140,12 @@ one graph instantiated with distinct frame inputs.
 provided `TestRhi` validates protocol order, transitions, binding checks, and
 completion-based retirement; it does not run shaders or emulate GPU memory.
 On Windows, `fluxel-rhi` separately executes the same immutable plan on DX12
-and Vulkan for Copy and fixed Compute conformance. Its Compute support is not a
-general graph shader surface: a renderer/RHI provider registers opaque fixed
-pipeline and binding objects, while the graph continues to own only declared
-resource accesses, ordering, states, and dispatch validation.
+and Vulkan for fixed Raster, Compute, and Copy release fixtures. Its support
+is not a general graph shader surface: a renderer/RHI provider registers opaque
+fixed pipeline and binding objects, while the graph continues to own only
+declared resource accesses, ordering, states, and dispatch validation. X01 is
+one closed sampled `Rgba8Unorm` texture-to-packed-storage-buffer recipe, not a
+general texture-compute feature.
 [`20_headless_frame_pipeline.rs`](examples/20_headless_frame_pipeline.rs) is
 the full CPU-only Raster → Compute → Copy integration fixture.
 
@@ -182,8 +186,9 @@ crate and its drivers.
 
 ## Current limits
 
-- Real-GPU execution is limited to Copy and a closed fixed-Compute subset on
-  Windows DX12/Vulkan; it is not raster support or a general shader API.
+- Real-GPU execution is limited to the fixed Raster, Compute, and Copy profile
+  on Windows DX12/Vulkan. R01/R02/X01 pass their exact CPU oracles on both
+  backends with Required validation on the recorded 0.1.4 release hardware.
 - No surface acquisition, resize/recreation, or present execution.
 - No native multi-queue lowering, resource aliasing, or GPU conformance claim.
 - The execution SPI is provisional while the first native backend is built;

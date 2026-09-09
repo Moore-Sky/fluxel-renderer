@@ -1,14 +1,14 @@
 # Fluxel RHI Design
 
-**Status: 0.1.3 Copy + fixed Compute correctness vertical slices**
+**Status: 0.1.4 fixed Raster + Compute + Copy correctness vertical slices**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
-not a promise of a complete RHI. In 0.1.3 the crate opens one headless DX12 or
+not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
 Vulkan device on Windows, creates lease-backed owned resources, and implements
-Copy plus one fixed Compute portion of `ExecutionBackend`: semantic transition
-lowering, recording, one submission, completion, retirement, and crate-private
-test readback. It does not implement raster, surfaces, presentation, or a
-general shader API.
+a fixed Raster + Compute + Copy portion of `ExecutionBackend`: semantic
+transition lowering, recording, one submission, completion, retirement, and
+crate-private exact test readback. It does not implement surfaces,
+presentation, renderer lowering, or a general shader/pipeline API.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that
@@ -28,7 +28,7 @@ fluxel-rendergraph                    fluxel-rhi
 graph declaration                     explicit DX12/Vulkan selection
 compile / immutable plan              headless adapter enumeration
 creation-usage requirements           native device and queue ownership
-ExecutionBackend contract       -->   Copy + fixed Compute implementation
+ExecutionBackend contract       -->   fixed Raster + Compute + Copy implementation
 TestRhi deterministic execution       native GPU execution subset
 ```
 
@@ -110,6 +110,22 @@ invocations. RenderGraph rejects zero or excessive dispatch dimensions before
 backend recording, and the RHI rechecks the fixed shader's workgroup
 requirements before native creation.
 
+`RasterBackend` is a third, fixed profile. It retains Copy and the closed
+Compute artifacts only because X01 needs one real Raster→Compute→Copy chain in
+one encoder and one submission; it does not turn those APIs into a general
+graphics interface. Its raster scope is a single `Rgba8Unorm`, D2,
+single-mip/layer/sample color attachment, fixed vertex/index recipes, and the
+R01 clear/triangle and R02 indexed viewport/scissor fixtures. X01 samples the
+complete attachment through a closed binding recipe, packs row-major RGBA8
+pixels into an RW storage buffer, then copies it to an exported buffer.
+Raster artifacts, bindings, views, attachment resources, encoder, command
+buffer, and submission retain device-affine leases until terminal completion.
+Structured creation/recording/submission errors distinguish known rejection
+from accepted-unknown completion failure; no error path may release native
+objects early. `src/imp.rs` remains the sole unsafe boundary, whose rationale
+covers device identity, states, ranges, alignment, thread serialization, and
+lifetime for the fixed Raster path as well as earlier slices.
+
 All HAL calls and all `unsafe` are contained in `src/imp.rs`. Each unsafe block
 documents the validity and lifetime condition it relies on. The safe public
 layer has no `unsafe`, native pointers, or HAL types. This is an intentional
@@ -187,29 +203,36 @@ to be empty. The 0.1.3 K01 fixture executes a fixed in-place wrapping add;
 K02 executes ordered wrapping add then multiply on the same read/write storage
 buffer, exercising a same-state RW-to-RW dependency. Each runs separately on
 DX12 and Vulkan, compares with its CPU integer oracle, and requires collected
-diagnostics to be empty. This establishes only Copy and fixed Compute
-correctness, not raster or presentation conformance.
+diagnostics to be empty. Those earlier fixtures establish only Copy and fixed
+Compute correctness, not Raster or presentation conformance. The 0.1.4 release gate additionally
+requires R01 clear/triangle, R02 indexed viewport/scissor, and X01
+Raster→Compute→Copy to run as separate DX12 and Vulkan fixtures and compare
+exact texture/buffer readback bytes with their CPU pixel/packing oracles.
+Readback must use the export's actual outgoing state and strip texture-row
+padding. Required-validation diagnostics are collected and empty on the
+recorded exact-SHA DX12/Vulkan release fixtures.
 
 ## Evolution constraints
 
-Further work remains vertical rather than speculative. The copy-only native
+Further work remains vertical rather than speculative. The fixed native
 `ExecutionBackend` honors the current core contract end to end:
 
 1. Allocate transient resources from the compiled usage summary and report the
    actual allowed operation set for every transient and import, allowing core
    frame resolution to validate the required subset.
 2. Map compiled state transitions to backend-correct barriers or ordering.
-3. Record declared Copy work and resolve only authorized pass-local resources.
+3. Record only declared fixed Raster, Compute, and Copy work and resolve only
+   authorized pass-local resources.
 4. Submit work, expose completion, retain leases until completion, and validate
    crate-private readback against native conformance oracles.
-5. Add raster, surface acquisition/presentation, and multi-queue only with
-   explicit ownership and synchronization semantics.
+5. Add surface acquisition/presentation and multi-queue only with explicit
+   ownership and synchronization semantics.
 
-The current user model is: `fluxel-rhi` executes Copy plans and the fixed
-Compute artifact subset on native DX12/Vulkan; `TestRhi` remains the
-deterministic CPU contract backend. The crate must not imply raster, surface,
-renderer, texture-compute, or general shader support in its API, examples,
-benchmarks, or release notes.
+The current user model is: `fluxel-rhi` executes the fixed Raster, Compute,
+and Copy artifact subset on native DX12/Vulkan; `TestRhi` remains the
+deterministic CPU contract backend. The crate must not imply surface/present,
+renderer, general texture-compute, or general shader/pipeline support in its
+API, examples, benchmarks, or release notes.
 
 ## Portable lowering constraints
 

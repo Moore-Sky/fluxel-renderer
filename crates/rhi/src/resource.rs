@@ -125,6 +125,8 @@ pub enum ComputeCreateError {
     InvalidBindingRange,
     /// The buffer's actual native usage cannot provide read-write storage access.
     StorageUsageRequired,
+    /// The selected fixed artifact does not accept this binding recipe.
+    BindingRecipeMismatch,
     /// The fixed WGSL artifact failed Naga parsing or validation.
     ShaderValidation(String),
     /// The backend rejected shader lowering or compute-pipeline compilation.
@@ -146,6 +148,9 @@ impl fmt::Display for ComputeCreateError {
             Self::StorageUsageRequired => {
                 f.write_str("compute bindings require read-write storage usage")
             }
+            Self::BindingRecipeMismatch => {
+                f.write_str("compute bindings do not match the fixed artifact recipe")
+            }
             Self::ShaderValidation(reason) => {
                 write!(f, "compute shader validation failed: {reason}")
             }
@@ -163,6 +168,38 @@ impl fmt::Display for ComputeCreateError {
 }
 impl std::error::Error for ComputeCreateError {}
 
+/// Why creation of a fixed raster artifact was rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RasterCreateError {
+    /// The pipeline, attachment, or buffer operation crossed device identities.
+    ForeignDevice,
+    /// The fixed WGSL artifact failed Naga parsing or validation.
+    ShaderValidation(String),
+    /// The backend rejected shader lowering or raster-pipeline compilation.
+    ShaderCompilation(String),
+    /// The backend could not create a fixed layout or another non-shader object.
+    NativeObjectCreation(String),
+}
+
+impl fmt::Display for RasterCreateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ForeignDevice => f.write_str("raster objects belong to different devices"),
+            Self::ShaderValidation(reason) => {
+                write!(f, "raster shader validation failed: {reason}")
+            }
+            Self::ShaderCompilation(reason) => {
+                write!(f, "raster shader compilation failed: {reason}")
+            }
+            Self::NativeObjectCreation(reason) => {
+                write!(f, "native raster object creation failed: {reason}")
+            }
+        }
+    }
+}
+impl std::error::Error for RasterCreateError {}
+
 #[cfg(windows)]
 fn map_compute_pipeline_create_error(
     error: crate::imp::ComputePipelineCreateError,
@@ -176,6 +213,23 @@ fn map_compute_pipeline_create_error(
         }
         crate::imp::ComputePipelineCreateError::NativeObjectCreation(reason) => {
             ComputeCreateError::NativeObjectCreation(reason)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn map_raster_pipeline_create_error(
+    error: crate::imp::RasterPipelineCreateError,
+) -> RasterCreateError {
+    match error {
+        crate::imp::RasterPipelineCreateError::ShaderValidation(reason) => {
+            RasterCreateError::ShaderValidation(reason)
+        }
+        crate::imp::RasterPipelineCreateError::ShaderCompilation(reason) => {
+            RasterCreateError::ShaderCompilation(reason)
+        }
+        crate::imp::RasterPipelineCreateError::NativeObjectCreation(reason) => {
+            RasterCreateError::NativeObjectCreation(reason)
         }
     }
 }
@@ -219,6 +273,8 @@ pub enum ComputeKernel {
     WrappingAdd,
     /// Multiplies every addressed `u32` by three with wrapping arithmetic.
     WrappingMultiply,
+    /// Packs every texel of one `Rgba8Unorm` texture into row-major `u32`s.
+    TexturePackRgba8,
 }
 
 /// Portable identity of one fixed compute artifact.
@@ -244,12 +300,16 @@ impl ComputeKernel {
         match self {
             Self::WrappingAdd => "wrapping_add",
             Self::WrappingMultiply => "wrapping_multiply",
+            Self::TexturePackRgba8 => "pack_rgba8",
         }
     }
 
     /// Returns the fixed workgroup shape baked into this artifact.
     pub const fn workgroup_size(self) -> [u32; 3] {
-        [64, 1, 1]
+        match self {
+            Self::WrappingAdd | Self::WrappingMultiply => [64, 1, 1],
+            Self::TexturePackRgba8 => [8, 8, 1],
+        }
     }
 
     /// Returns the source hash recorded by conformance fixtures.
@@ -272,11 +332,16 @@ impl ComputeKernel {
 
     /// Returns the version of this slice's one read-write storage binding recipe.
     pub const fn binding_recipe_version(self) -> u32 {
-        1
+        match self {
+            Self::WrappingAdd | Self::WrappingMultiply => 1,
+            Self::TexturePackRgba8 => 2,
+        }
     }
 
     pub(crate) const fn wgsl_source(self) -> &'static str {
-        "@group(0) @binding(0) var<storage, read_write> values: array<u32>;\n\
+        match self {
+            Self::WrappingAdd | Self::WrappingMultiply => {
+                "@group(0) @binding(0) var<storage, read_write> values: array<u32>;\n\
          @compute @workgroup_size(64)\n\
          fn wrapping_add(@builtin(global_invocation_id) id: vec3<u32>) {\n\
              if (id.x < arrayLength(&values)) { values[id.x] = values[id.x] + 1u; }\n\
@@ -285,6 +350,23 @@ impl ComputeKernel {
          fn wrapping_multiply(@builtin(global_invocation_id) id: vec3<u32>) {\n\
              if (id.x < arrayLength(&values)) { values[id.x] = values[id.x] * 3u; }\n\
          }"
+            }
+            Self::TexturePackRgba8 => {
+                "@group(0) @binding(0) var source: texture_2d<f32>;\n\
+         @group(0) @binding(1) var<storage, read_write> destination: array<u32>;\n\
+         @compute @workgroup_size(8, 8, 1)\n\
+         fn pack_rgba8(@builtin(global_invocation_id) id: vec3<u32>) {\n\
+             let dimensions = textureDimensions(source);\n\
+             if (id.x >= dimensions.x || id.y >= dimensions.y) { return; }\n\
+             let pixel = textureLoad(source, vec2<i32>(id.xy), 0);\n\
+             let r = u32(round(pixel.r * 255.0));\n\
+             let g = u32(round(pixel.g * 255.0));\n\
+             let b = u32(round(pixel.b * 255.0));\n\
+             let a = u32(round(pixel.a * 255.0));\n\
+             destination[id.y * dimensions.x + id.x] = r | (g << 8u) | (b << 16u) | (a << 24u);\n\
+         }"
+            }
+        }
     }
 }
 
@@ -330,6 +412,164 @@ pub struct ComputeBindings(Arc<ComputeBindingsShared>);
 #[derive(Clone)]
 pub struct ComputeBindingsLease(Arc<ComputeBindingsShared>);
 
+/// The two deterministic raster artifacts supported by this milestone.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterKernel {
+    /// A fixed, non-indexed triangle with no resource bindings.
+    Triangle,
+    /// An indexed mesh using `float32x2 position + unorm8x4 color` vertices.
+    IndexedPositionColor,
+}
+
+/// The non-configurable vertex layout selected by a fixed raster artifact.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterVertexLayout {
+    /// The vertex shader derives its three fixed positions from `vertex_index`.
+    None,
+    /// One vertex is `float32x2 position` at byte zero followed by
+    /// `unorm8x4 color` at byte eight, for a 12-byte stride.
+    PositionFloat32x2ColorUnorm8x4,
+}
+
+/// Portable identity of one fixed raster artifact.
+///
+/// It describes the source-level recipe shared by DX12 and Vulkan, rather
+/// than their intentionally different native binaries.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RasterArtifactIdentity {
+    /// Hash of the complete embedded WGSL module.
+    pub module_source_hash: u64,
+    /// Selected vertex entry point.
+    pub vertex_entry_point: &'static str,
+    /// Selected fragment entry point.
+    pub fragment_entry_point: &'static str,
+    /// Target format required by this artifact.
+    pub target_format: TextureFormat,
+    /// Complete non-configurable vertex layout of this artifact.
+    pub vertex_layout: RasterVertexLayout,
+    /// Bytes between vertices; zero means the fixed shader uses vertex index.
+    pub vertex_stride: u32,
+    /// Version of the fixed vertex/index/target recipe.
+    pub recipe_version: u32,
+}
+
+impl RasterKernel {
+    /// Returns the fixed vertex entry point.
+    pub const fn vertex_entry_point(self) -> &'static str {
+        match self {
+            Self::Triangle => "triangle_vertex",
+            Self::IndexedPositionColor => "position_color_vertex",
+        }
+    }
+
+    /// Returns the shared fixed fragment entry point.
+    pub const fn fragment_entry_point(self) -> &'static str {
+        "color_fragment"
+    }
+
+    /// Returns the target format supported by every fixed artifact.
+    pub const fn target_format(self) -> TextureFormat {
+        TextureFormat::Rgba8Unorm
+    }
+
+    /// Returns the byte stride of the fixed vertex recipe.
+    pub const fn vertex_stride(self) -> u32 {
+        match self {
+            Self::Triangle => 0,
+            Self::IndexedPositionColor => 12,
+        }
+    }
+
+    /// Returns the complete non-configurable vertex layout.
+    pub const fn vertex_layout(self) -> RasterVertexLayout {
+        match self {
+            Self::Triangle => RasterVertexLayout::None,
+            Self::IndexedPositionColor => RasterVertexLayout::PositionFloat32x2ColorUnorm8x4,
+        }
+    }
+
+    /// Returns the portable identity recorded by conformance fixtures.
+    pub const fn portable_identity(self) -> RasterArtifactIdentity {
+        RasterArtifactIdentity {
+            module_source_hash: fnv1a64(self.wgsl_source().as_bytes()),
+            vertex_entry_point: self.vertex_entry_point(),
+            fragment_entry_point: self.fragment_entry_point(),
+            target_format: self.target_format(),
+            vertex_layout: self.vertex_layout(),
+            vertex_stride: self.vertex_stride(),
+            recipe_version: 1,
+        }
+    }
+
+    pub(crate) const fn wgsl_source(self) -> &'static str {
+        match self {
+            Self::Triangle => {
+                "struct VertexOutput {\n\
+         @builtin(position) position: vec4<f32>,\n\
+         @location(0) color: vec4<f32>,\n\
+         };\n\
+         @vertex fn triangle_vertex(@builtin(vertex_index) index: u32) -> VertexOutput {\n\
+             if (index == 0u) {\n\
+                 return VertexOutput(vec4(-0.70, -0.60, 0.0, 1.0), vec4(64.0 / 255.0, 160.0 / 255.0, 1.0, 1.0));\n\
+             } else if (index == 1u) {\n\
+                 return VertexOutput(vec4(0.70, -0.60, 0.0, 1.0), vec4(64.0 / 255.0, 160.0 / 255.0, 1.0, 1.0));\n\
+             } else {\n\
+                 return VertexOutput(vec4(0.0, 0.70, 0.0, 1.0), vec4(64.0 / 255.0, 160.0 / 255.0, 1.0, 1.0));\n\
+             }\n\
+         }\n\
+         @fragment fn color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { return input.color; }"
+            }
+            Self::IndexedPositionColor => {
+                "struct VertexInput {\n\
+         @location(0) position: vec2<f32>,\n\
+         @location(1) color: vec4<f32>,\n\
+         };\n\
+         struct VertexOutput {\n\
+         @builtin(position) position: vec4<f32>,\n\
+         @location(0) color: vec4<f32>,\n\
+         };\n\
+         @vertex fn position_color_vertex(input: VertexInput) -> VertexOutput {\n\
+             return VertexOutput(vec4(input.position, 0.0, 1.0), input.color);\n\
+         }\n\
+         @fragment fn color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { return input.color; }"
+            }
+        }
+    }
+}
+
+struct RasterPipelineShared {
+    _native: crate::imp::NativeRasterPipeline,
+    kernel: RasterKernel,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// An opaque, device-affine pipeline for one fixed raster artifact.
+#[derive(Clone)]
+pub struct RasterPipeline(Arc<RasterPipelineShared>);
+
+/// A cloneable strong lease for a raster pipeline and its native artifacts.
+#[derive(Clone)]
+pub struct RasterPipelineLease(Arc<RasterPipelineShared>);
+
+struct TexturePackBindingsShared {
+    _native: crate::imp::NativeTexturePackBindings,
+    pipeline: ComputePipeline,
+    _texture: TextureLease,
+    _buffer: BufferLease,
+    offset: u64,
+    size: u64,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// Closed X01 bindings: one complete sampled `Rgba8Unorm` texture and one RW
+/// storage buffer receiving row-major packed pixels.
+#[derive(Clone)]
+pub struct TexturePackBindings(Arc<TexturePackBindingsShared>);
+
+/// A cloneable strong lease for an X01 binding object and all its inputs.
+#[derive(Clone)]
+pub struct TexturePackBindingsLease(Arc<TexturePackBindingsShared>);
+
 /// A type-erased strong lease retained by native frame submissions.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -342,6 +582,10 @@ pub enum ResourceLease {
     ComputePipeline(ComputePipelineLease),
     /// Retains a native compute binding object, pipeline, and buffer.
     ComputeBindings(ComputeBindingsLease),
+    /// Retains a native raster pipeline, module, and layout.
+    RasterPipeline(RasterPipelineLease),
+    /// Retains the closed sampled-texture-to-storage-buffer binding object.
+    TexturePackBindings(TexturePackBindingsLease),
 }
 
 macro_rules! resource_accessors {
@@ -423,6 +667,24 @@ impl BufferLease {
     }
 }
 
+impl TextureLease {
+    #[allow(
+        dead_code,
+        reason = "the test-only exported-texture wrapper consumes this exact lease identity"
+    )]
+    pub(crate) fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the test-only exported-texture wrapper consumes this exact lease identity"
+    )]
+    pub(crate) fn identity(&self) -> PhysicalResourceIdentity {
+        self.0.identity
+    }
+}
+
 impl From<BufferLease> for ResourceLease {
     fn from(value: BufferLease) -> Self {
         Self::Buffer(value)
@@ -444,6 +706,18 @@ impl From<ComputePipelineLease> for ResourceLease {
 impl From<ComputeBindingsLease> for ResourceLease {
     fn from(value: ComputeBindingsLease) -> Self {
         Self::ComputeBindings(value)
+    }
+}
+
+impl From<RasterPipelineLease> for ResourceLease {
+    fn from(value: RasterPipelineLease) -> Self {
+        Self::RasterPipeline(value)
+    }
+}
+
+impl From<TexturePackBindingsLease> for ResourceLease {
+    fn from(value: TexturePackBindingsLease) -> Self {
+        Self::TexturePackBindings(value)
     }
 }
 
@@ -502,6 +776,46 @@ impl ComputeBindings {
     }
 }
 
+impl RasterPipeline {
+    /// Returns the fixed artifact selected during creation.
+    pub fn kernel(&self) -> RasterKernel {
+        self.0.kernel
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a lease retaining the native pipeline and its artifacts.
+    pub fn lease(&self) -> RasterPipelineLease {
+        RasterPipelineLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeRasterPipeline {
+        &self.0._native
+    }
+}
+
+impl TexturePackBindings {
+    /// Returns the `TexturePackRgba8` pipeline selected during creation.
+    pub fn pipeline(&self) -> &ComputePipeline {
+        &self.0.pipeline
+    }
+    /// Returns the exact storage-buffer range receiving packed pixels.
+    pub fn range(&self) -> (u64, u64) {
+        (self.0.offset, self.0.size)
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a lease retaining all native objects referenced by this binding.
+    pub fn lease(&self) -> TexturePackBindingsLease {
+        TexturePackBindingsLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeTexturePackBindings {
+        &self.0._native
+    }
+}
+
 impl fmt::Debug for ComputePipeline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ComputePipeline")
@@ -526,6 +840,35 @@ impl fmt::Debug for ComputePipelineLease {
 impl fmt::Debug for ComputeBindingsLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("ComputeBindingsLease")
+            .field(&Arc::strong_count(&self.0))
+            .finish()
+    }
+}
+
+impl fmt::Debug for RasterPipeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RasterPipeline")
+            .field("kernel", &self.0.kernel)
+            .finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for RasterPipelineLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RasterPipelineLease")
+            .field(&Arc::strong_count(&self.0))
+            .finish()
+    }
+}
+impl fmt::Debug for TexturePackBindings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TexturePackBindings")
+            .field("range", &self.range())
+            .finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for TexturePackBindingsLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TexturePackBindingsLease")
             .field(&Arc::strong_count(&self.0))
             .finish()
     }
@@ -571,6 +914,9 @@ impl Device {
         offset: u64,
         size: u64,
     ) -> Result<ComputeBindings, ComputeCreateError> {
+        if pipeline.kernel() == ComputeKernel::TexturePackRgba8 {
+            return Err(ComputeCreateError::BindingRecipeMismatch);
+        }
         if pipeline.device_identity() != self.identity || buffer.device_identity() != self.identity
         {
             return Err(ComputeCreateError::ForeignDevice);
@@ -605,6 +951,99 @@ impl Device {
             _buffer: buffer.lease(),
             offset,
             size,
+            device: self.identity,
+        })))
+    }
+
+    /// Creates the only binding layout accepted by the X01 texture-pack artifact.
+    ///
+    /// The complete `Rgba8Unorm` texture is sampled with `textureLoad`; each
+    /// pixel occupies exactly one little-endian RGBA8-packed `u32` in the
+    /// authorized destination range.
+    pub fn create_texture_pack_bindings(
+        &self,
+        pipeline: &ComputePipeline,
+        texture: &Texture,
+        buffer: &Buffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<TexturePackBindings, ComputeCreateError> {
+        if pipeline.kernel() != ComputeKernel::TexturePackRgba8 {
+            return Err(ComputeCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity
+            || texture.device_identity() != self.identity
+            || buffer.device_identity() != self.identity
+        {
+            return Err(ComputeCreateError::ForeignDevice);
+        }
+        validate_texture_pack_texture(texture)?;
+        validate_compute_binding_range(
+            offset,
+            size,
+            buffer.descriptor().buffer.size,
+            self.capabilities.min_storage_buffer_offset_alignment,
+            self.capabilities.max_storage_buffer_binding_size,
+        )?;
+        if !buffer
+            .allowed_usage()
+            .contains(BufferUsageKind::StorageRead)
+            || !buffer
+                .allowed_usage()
+                .contains(BufferUsageKind::StorageWrite)
+        {
+            return Err(ComputeCreateError::StorageUsageRequired);
+        }
+        let required_size = texture_pack_required_size(texture.descriptor().texture)?;
+        if size < required_size {
+            return Err(ComputeCreateError::InvalidBindingRange);
+        }
+        let native = crate::imp::create_texture_pack_bindings(
+            &self.inner,
+            pipeline.native(),
+            texture.native(),
+            buffer.native(),
+            offset,
+            size,
+        )
+        .map_err(ComputeCreateError::NativeFailure)?;
+        Ok(TexturePackBindings(Arc::new(TexturePackBindingsShared {
+            _native: native,
+            pipeline: pipeline.clone(),
+            _texture: texture.lease(),
+            _buffer: buffer.lease(),
+            offset,
+            size,
+            device: self.identity,
+        })))
+    }
+
+    /// Creates one fixed-artifact raster pipeline for this device.
+    pub fn create_raster_pipeline(
+        &self,
+        kernel: RasterKernel,
+    ) -> Result<RasterPipeline, RasterCreateError> {
+        #[cfg(windows)]
+        let native = crate::imp::create_raster_pipeline(
+            &self.inner,
+            kernel.wgsl_source(),
+            kernel.vertex_entry_point(),
+            kernel.fragment_entry_point(),
+            kernel.vertex_stride() != 0,
+        )
+        .map_err(map_raster_pipeline_create_error)?;
+        #[cfg(not(windows))]
+        let native = crate::imp::create_raster_pipeline(
+            &self.inner,
+            kernel.wgsl_source(),
+            kernel.vertex_entry_point(),
+            kernel.fragment_entry_point(),
+            kernel.vertex_stride() != 0,
+        )
+        .map_err(RasterCreateError::NativeObjectCreation)?;
+        Ok(RasterPipeline(Arc::new(RasterPipelineShared {
+            _native: native,
+            kernel,
             device: self.identity,
         })))
     }
@@ -700,6 +1139,37 @@ fn validate_compute_binding_range(
         return Err(ComputeCreateError::InvalidBindingRange);
     }
     Ok(())
+}
+
+/// Validates the closed X01 sampled-texture side of the binding recipe.
+fn validate_texture_pack_texture(texture: &Texture) -> Result<(), ComputeCreateError> {
+    validate_texture_pack_texture_desc(texture.descriptor().texture, texture.allowed_usage())
+}
+
+/// Validates the descriptor facts the X01 texture binding cannot generalize.
+fn validate_texture_pack_texture_desc(
+    image: TextureDesc,
+    allowed_usage: TextureUsage,
+) -> Result<(), ComputeCreateError> {
+    if image.dimension != TextureDimension::D2
+        || image.format != TextureFormat::Rgba8Unorm
+        || image.extent.depth != 1
+        || image.mip_levels != 1
+        || image.array_layers != 1
+        || image.sample_count != 1
+        || !allowed_usage.contains(TextureUsageKind::Sampled)
+    {
+        return Err(ComputeCreateError::BindingRecipeMismatch);
+    }
+    Ok(())
+}
+
+/// Returns the exact byte extent of X01's one-`u32`-per-pixel output.
+fn texture_pack_required_size(image: TextureDesc) -> Result<u64, ComputeCreateError> {
+    u64::from(image.extent.width)
+        .checked_mul(u64::from(image.extent.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(ComputeCreateError::InvalidBindingRange)
 }
 
 fn invalid(resource: ResourceKind, reason: InvalidResourceReason) -> ResourceCreateError {
@@ -861,6 +1331,28 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn raster_pipeline_creation_stages_map_to_public_error_variants() {
+        let cases = [
+            (
+                crate::imp::RasterPipelineCreateError::ShaderValidation("parse".into()),
+                RasterCreateError::ShaderValidation("parse".into()),
+            ),
+            (
+                crate::imp::RasterPipelineCreateError::ShaderCompilation("compile".into()),
+                RasterCreateError::ShaderCompilation("compile".into()),
+            ),
+            (
+                crate::imp::RasterPipelineCreateError::NativeObjectCreation("layout".into()),
+                RasterCreateError::NativeObjectCreation("layout".into()),
+            ),
+        ];
+        for (native, public) in cases {
+            assert_eq!(map_raster_pipeline_create_error(native), public);
+        }
+    }
+
     #[test]
     fn rejects_zero_buffer_and_empty_usage() {
         let empty = BufferDescriptor {
@@ -982,5 +1474,64 @@ mod tests {
         assert_ne!(add.entry_point, multiply.entry_point);
         assert_eq!(add.workgroup_size, [64, 1, 1]);
         assert_eq!(add.binding_recipe_version, 1);
+    }
+
+    #[test]
+    fn texture_pack_is_a_distinct_closed_compute_recipe() {
+        let pack = ComputeKernel::TexturePackRgba8.portable_identity();
+        let add = ComputeKernel::WrappingAdd.portable_identity();
+        assert_ne!(pack.module_source_hash, add.module_source_hash);
+        assert_eq!(pack.entry_point, "pack_rgba8");
+        assert_eq!(pack.workgroup_size, [8, 8, 1]);
+        assert_eq!(pack.binding_recipe_version, 2);
+    }
+
+    #[test]
+    fn raster_identities_are_portable_but_recipes_remain_distinct() {
+        let triangle = RasterKernel::Triangle.portable_identity();
+        let indexed = RasterKernel::IndexedPositionColor.portable_identity();
+        assert_eq!(triangle.target_format, TextureFormat::Rgba8Unorm);
+        assert_eq!(triangle.vertex_stride, 0);
+        assert_eq!(triangle.vertex_layout, RasterVertexLayout::None);
+        assert_eq!(indexed.vertex_stride, 12);
+        assert_eq!(
+            indexed.vertex_layout,
+            RasterVertexLayout::PositionFloat32x2ColorUnorm8x4
+        );
+        assert_ne!(triangle.module_source_hash, indexed.module_source_hash);
+        assert_eq!(triangle.fragment_entry_point, indexed.fragment_entry_point);
+    }
+
+    #[test]
+    fn texture_pack_accepts_only_full_single_sampled_rgba8_images() {
+        let image = TextureDesc {
+            dimension: TextureDimension::D2,
+            extent: Extent3d {
+                width: 7,
+                height: 3,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        };
+        let sampled = TextureUsage::empty().with(TextureUsageKind::Sampled);
+        assert_eq!(validate_texture_pack_texture_desc(image, sampled), Ok(()));
+        assert_eq!(texture_pack_required_size(image), Ok(84));
+        assert_eq!(
+            validate_texture_pack_texture_desc(
+                TextureDesc {
+                    mip_levels: 2,
+                    ..image
+                },
+                sampled
+            ),
+            Err(ComputeCreateError::BindingRecipeMismatch)
+        );
+        assert_eq!(
+            validate_texture_pack_texture_desc(image, TextureUsage::empty()),
+            Err(ComputeCreateError::BindingRecipeMismatch)
+        );
     }
 }

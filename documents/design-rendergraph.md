@@ -1,6 +1,6 @@
 # Fluxel RenderGraph architecture
 
-**Status: 0.1.3 Copy + fixed-Compute execution contract**
+**Status: 0.1.4 fixed Raster + Compute + Copy execution contract**
 
 This workspace starts its own release sequence at `0.1.0`. Its code was
 imported from a pre-migration snapshot; prior version numbers and Git history
@@ -242,7 +242,7 @@ fixture requires it. Missing facts fail closed.
 
 Format entries describe sampling/filtering, storage, attachment/sample-count,
 and copy support. Buffer entries describe storage and indirect support; limits
-cover only values consumed by current validation. In 0.1.3 that includes the
+cover only values consumed by current validation. In 0.1.4 that includes the
 per-dimension compute-dispatch maximum: zero and over-limit dimensions are
 rejected before a backend records a dispatch. Fixed shader workgroup shape and
 invocation limits remain RHI hardware facts because the graph has no general
@@ -272,12 +272,13 @@ emulate GPU memory, or prove native validation or GPU performance.
 The current boundary is intentionally narrow and provisional. A native backend
 must truthfully report actual allowed usage for imports and allocations, then
 turn planned transitions and commands into DX12/Vulkan behavior.
-`fluxel-rhi` currently proves that path for Copy and a closed fixed-Compute
-subset: `CopyBackend` remains Copy-only, while `ComputeBackend` adds only fixed
-kernel dispatch with opaque RHI-provided pipeline and binding objects. The
-graph neither accepts WGSL nor owns Naga/native shader lowering, descriptor
-layouts, or pipeline policy. Those objects are registered by a provider and
-must still correspond to explicit pass resource accesses.
+`fluxel-rhi` implements that path for Copy, fixed Compute, and a closed Raster
+profile: `CopyBackend` remains Copy-only, `ComputeBackend` adds only fixed
+kernel dispatch, and `RasterBackend` supplies the R01/R02 raster recipes plus
+X01's closed texture-pack compute recipe. Opaque RHI-provided pipeline and
+binding objects remain outside the graph. The graph neither accepts WGSL nor
+owns Naga/native shader lowering, descriptor layouts, or pipeline policy; all
+such objects must still correspond to explicit pass resource accesses.
 
 Native Copy conformance covers partial buffers, padded texture rows, and
 overlapping same-state WAW; buffer-copy offsets and sizes are rejected unless
@@ -285,7 +286,11 @@ overlapping same-state WAW; buffer-copy offsets and sizes are rejected unless
 covers K01's in-place wrapping add and K02's ordered add-then-multiply on one
 RW storage buffer, each read back against a CPU oracle on DX12 and Vulkan.
 Readback consumes the export's reported outgoing state as its actual incoming
-state; it is not allowed to repair a wrong graph result.
+state; it is not allowed to repair a wrong graph result. The 0.1.4 release
+fixtures are R01 clear/triangle, R02 indexed viewport/scissor, and X01
+Raster→Compute→Copy. Their texture/buffer readback must compare exact bytes to
+CPU pixel or packing oracles on both native backends, with diagnostics empty,
+before native Raster conformance is claimed.
 
 Surface presentation, multi-queue lowering, aliasing, and performance claims
 follow only after real conformance evidence exists.
@@ -318,9 +323,10 @@ submission/export handoff—remains provisional while native execution exposes
 integration requirements. Neither surface leaks native backend handle types.
 
 The present evidence is compiler/validation coverage, TestRhi protocol
-coverage, and real headless DX12/Vulkan Copy plus fixed-Compute readback.
-Raster readback is the next evidence level; surface acquire/resize/recreate/
-present follows that.
+coverage, and real headless DX12/Vulkan Copy, fixed-Compute, and fixed-Raster
+readback. R01/R02/X01 pass exact CPU oracles independently and through paired
+same-plan runs on the recorded 0.1.4 AMD Radeon 780M release hardware. Surface
+acquire/resize/recreate/present follows that.
 Native multi-queue, aliasing, recording caches, and performance claims remain
 deferred until representative fixtures and measurements exist.
 

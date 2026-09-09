@@ -1,4 +1,4 @@
-//! Native Copy and fixed-Compute execution of portable RenderGraph plans.
+//! Native Copy, fixed-Compute, and fixed-Raster execution of portable RenderGraph plans.
 
 use core::{fmt, time::Duration};
 use std::collections::HashMap;
@@ -6,20 +6,21 @@ use std::ops::Range;
 
 use fluxel_rendergraph::{
     BoundBuffer, BoundTexture, BufferCapabilities, BufferCopyRegion, BufferDesc, BufferRange,
-    BufferUsage, CompletionFailure, CompletionStatus, DeviceCapabilities, DeviceLimits,
-    ExecutionBackend, IndexFormat, QueueCapabilities, QueueDescriptor, QueueId,
-    RasterPassDescriptor, RecordingCapabilities, RecordingModel, ResourceAccessState, ScissorRect,
-    SynchronizationCapabilities, TextureCopyRegion, TextureDesc, TextureFormat,
-    TextureFormatCapabilities, TextureRange, TextureUsage, TimestampCapabilities,
-    TransientResourceCapabilities, TransitionCapabilities, Viewport,
+    BufferUsage, BufferUsageKind, CompletionFailure, CompletionStatus, DeviceCapabilities,
+    DeviceLimits, ExecutionBackend, IndexFormat, LoadOp, QueueCapabilities, QueueDescriptor,
+    QueueId, RasterPassDescriptor, RecordingCapabilities, RecordingModel, ResourceAccessState,
+    ScissorRect, StoreOp, SynchronizationCapabilities, TextureCopyRegion, TextureDesc,
+    TextureFormat, TextureFormatCapabilities, TextureRange, TextureUsage, TextureUsageKind,
+    TimestampCapabilities, TransientResourceCapabilities, TransitionCapabilities, Viewport,
 };
 
 use crate::{
     Buffer, BufferDescriptor, ComputeBindings, ComputeCreateError, ComputePipeline, Device,
-    MemoryPolicy, ResourceCreateError, ResourceLease, Texture, TextureDescriptor,
+    MemoryPolicy, RasterPipeline, ResourceCreateError, ResourceLease, Texture, TextureDescriptor,
+    TexturePackBindings,
 };
 
-/// Failure while lowering or executing the current native Copy/Compute slice.
+/// Failure while lowering or executing the current native fixed command slice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum NativeExecutionError {
@@ -37,6 +38,8 @@ pub enum NativeExecutionError {
     ForeignCommandBuffer,
     /// A copy range or texture region was invalid at the native boundary.
     InvalidTransfer(&'static str),
+    /// A Copy command or transition was issued in the wrong pass scope.
+    CopyStateMismatch,
     /// A native recording operation failed before submission.
     Recording(String),
     /// A finished command buffer was rejected without being accepted.
@@ -47,6 +50,8 @@ pub enum NativeExecutionError {
     InvalidDispatch,
     /// The active pipeline and bound fixed binding recipe do not match.
     ComputeBindingMismatch,
+    /// The active raster state does not satisfy a fixed draw recipe.
+    RasterStateMismatch,
 }
 
 impl fmt::Display for NativeExecutionError {
@@ -65,6 +70,9 @@ impl fmt::Display for NativeExecutionError {
                 formatter.write_str("command buffer belongs to another native device")
             }
             Self::InvalidTransfer(reason) => write!(formatter, "invalid native transfer: {reason}"),
+            Self::CopyStateMismatch => {
+                formatter.write_str("copy command or transition is outside its required scope")
+            }
             Self::Recording(reason) => write!(formatter, "native recording failed: {reason}"),
             Self::SubmitRejected(reason) => {
                 write!(formatter, "native submission was rejected: {reason}")
@@ -75,6 +83,9 @@ impl fmt::Display for NativeExecutionError {
             Self::InvalidDispatch => formatter.write_str("invalid compute dispatch dimensions"),
             Self::ComputeBindingMismatch => {
                 formatter.write_str("compute bindings do not match the active pipeline")
+            }
+            Self::RasterStateMismatch => {
+                formatter.write_str("raster command does not satisfy the active fixed recipe")
             }
         }
     }
@@ -114,6 +125,12 @@ pub struct CopyEncoder {
     leases: Vec<ResourceLease>,
     active_compute: Option<ComputePipeline>,
     bound_compute_pipeline: Option<ComputePipeline>,
+    active_raster: Option<RasterPipeline>,
+    vertex_buffer: Option<(Buffer, u64)>,
+    index_buffer: Option<(Buffer, u64, IndexFormat)>,
+    raster_extent: Option<(u32, u32)>,
+    compute_open: bool,
+    copy_open: bool,
 }
 /// Opaque finished command buffer for one copy-only graph submission.
 pub struct CopyCommandBuffer {
@@ -180,14 +197,15 @@ mod tests {
     use std::collections::HashMap;
 
     use fluxel_rendergraph::{
-        BindingResource, BindingSetId, BoundBindings, BoundComputePipeline, BoundRasterPipeline,
-        BufferBindingId, BufferRead, BufferReadWrite, BufferReadWriteUse, BufferWrite,
-        ComputePipelineId, DiagnosticContext, ExportBufferContract, ExportBufferSlot,
-        ExternalOwnership, FrameBindingError, FrameBindingErrorKind, FrameInputs,
-        FrameResourceProvider, ImportBufferContract, InitialContents, PassResourceResolver,
-        RasterPipelineId, RecordResult, RecordingError, RecordingErrorKind, RenderGraph,
-        RenderObjectProvider, ResolvedBindingResource, TextureBindingId, TextureRead, TextureWrite,
-        WriteCoverage,
+        AttachmentOps, BindingResource, BindingSetId, BoundBindings, BoundComputePipeline,
+        BoundRasterPipeline, BufferBindingId, BufferRead, BufferReadWrite, BufferReadWriteUse,
+        BufferWrite, ColorAttachmentDesc, ComputePipelineId, DiagnosticContext,
+        ExportBufferContract, ExportBufferSlot, ExportTextureContract, Extent3d, ExternalOwnership,
+        FrameBindingError, FrameBindingErrorKind, FrameInputs, FrameResourceProvider,
+        ImportBufferContract, InitialContents, PassResourceResolver, RasterColorAttachment,
+        RasterDepthStencilAttachment, RasterPipelineId, RecordResult, RecordingError,
+        RecordingErrorKind, RenderGraph, RenderObjectProvider, ResolvedBindingResource,
+        TextureBindingId, TextureRead, TextureWrite, WriteCoverage,
     };
 
     struct Resources {
@@ -240,6 +258,21 @@ mod tests {
     }
 
     impl FrameResourceProvider<ComputeBackend> for Resources {
+        fn texture(
+            &self,
+            id: fluxel_rendergraph::TextureBindingId,
+        ) -> Result<BoundTexture<Texture, ResourceLease>, FrameBindingError> {
+            <Self as FrameResourceProvider<CopyBackend>>::texture(self, id)
+        }
+        fn buffer(
+            &self,
+            id: BufferBindingId,
+        ) -> Result<BoundBuffer<Buffer, ResourceLease>, FrameBindingError> {
+            <Self as FrameResourceProvider<CopyBackend>>::buffer(self, id)
+        }
+    }
+
+    impl FrameResourceProvider<RasterBackend> for Resources {
         fn texture(
             &self,
             id: fluxel_rendergraph::TextureBindingId,
@@ -422,6 +455,51 @@ mod tests {
         run_k02,
         crate::Backend::Vulkan
     );
+    native_case!(r01_dx12_clear_triangle, run_r01, crate::Backend::Dx12);
+    native_case!(r01_vulkan_clear_triangle, run_r01, crate::Backend::Vulkan);
+    native_case!(
+        r02_dx12_indexed_viewport_scissor,
+        run_r02,
+        crate::Backend::Dx12
+    );
+    native_case!(
+        r02_vulkan_indexed_viewport_scissor,
+        run_r02,
+        crate::Backend::Vulkan
+    );
+    native_case!(x01_dx12_raster_compute_copy, run_x01, crate::Backend::Dx12);
+    native_case!(
+        x01_vulkan_raster_compute_copy,
+        run_x01,
+        crate::Backend::Vulkan
+    );
+    #[test]
+    #[ignore = "requires native validation plus a real GPU"]
+    fn r01_paired_same_compiled_plan() {
+        let _guard = hardware_guard();
+        crate::imp::initialize_validation_capture();
+        let case = build_r01();
+        run_r01_case(crate::Backend::Dx12, &case, "paired-same-compiled-plan");
+        run_r01_case(crate::Backend::Vulkan, &case, "paired-same-compiled-plan");
+    }
+    #[test]
+    #[ignore = "requires native validation plus a real GPU"]
+    fn r02_paired_same_compiled_plan() {
+        let _guard = hardware_guard();
+        crate::imp::initialize_validation_capture();
+        let case = build_r02();
+        run_r02_case(crate::Backend::Dx12, &case, "paired-same-compiled-plan");
+        run_r02_case(crate::Backend::Vulkan, &case, "paired-same-compiled-plan");
+    }
+    #[test]
+    #[ignore = "requires native validation plus a real GPU"]
+    fn x01_paired_same_compiled_plan() {
+        let _guard = hardware_guard();
+        crate::imp::initialize_validation_capture();
+        let case = build_x01();
+        run_x01_case(crate::Backend::Dx12, &case, "paired-same-compiled-plan");
+        run_x01_case(crate::Backend::Vulkan, &case, "paired-same-compiled-plan");
+    }
     #[test]
     #[ignore = "requires native validation plus a real GPU"]
     fn k01_paired_same_compiled_plan() {
@@ -450,6 +528,564 @@ mod tests {
         run_compute_negative_paths,
         crate::Backend::Vulkan
     );
+    native_case!(
+        negative_dx12_raster_fail_closed,
+        run_raster_negative_paths,
+        crate::Backend::Dx12
+    );
+    native_case!(
+        negative_vulkan_raster_fail_closed,
+        run_raster_negative_paths,
+        crate::Backend::Vulkan
+    );
+    native_case!(
+        failure_dx12_submission_contract,
+        run_submission_failure_paths,
+        crate::Backend::Dx12
+    );
+    native_case!(
+        failure_vulkan_submission_contract,
+        run_submission_failure_paths,
+        crate::Backend::Vulkan
+    );
+
+    fn run_submission_failure_paths(backend_kind: crate::Backend) {
+        let device = Device::open(
+            backend_kind,
+            crate::DeviceOptions {
+                validation: crate::Validation::Required,
+                ..crate::DeviceOptions::default()
+            },
+        )
+        .unwrap();
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        let mut backend = CopyBackend::new(device.clone());
+
+        crate::imp::inject_submit_rejected_once();
+        let encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        let command = backend.finish_encoder(encoder).unwrap();
+        assert!(matches!(
+            backend.submit(QueueId::new(0), command),
+            Err(NativeExecutionError::SubmitRejected(_))
+        ));
+
+        crate::imp::inject_submit_accepted_unknown_once();
+        let encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        let command = backend.finish_encoder(encoder).unwrap();
+        let completion = backend.submit(QueueId::new(0), command).unwrap();
+        assert_eq!(
+            backend.completion_status(&completion),
+            CompletionStatus::Failed(CompletionFailure::DeviceLost)
+        );
+        assert_eq!(
+            backend.wait(&completion, Duration::from_secs(1)),
+            Err(WaitError::Failed(CompletionFailure::DeviceLost))
+        );
+        drop(completion);
+
+        let encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        let command = backend.finish_encoder(encoder).unwrap();
+        let completion = backend.submit(QueueId::new(0), command).unwrap();
+        crate::imp::inject_wait_pending_once();
+        assert_eq!(
+            backend.wait(&completion, Duration::ZERO),
+            Err(WaitError::Timeout)
+        );
+        backend.wait(&completion, Duration::from_secs(10)).unwrap();
+
+        // The accepted completion owns its native bundle independently from
+        // the backend; dropping either side first is nonblocking and safe.
+        drop(backend);
+        drop(completion);
+        assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
+    }
+
+    fn run_raster_negative_paths(backend_kind: crate::Backend) {
+        let device = Device::open(
+            backend_kind,
+            crate::DeviceOptions {
+                validation: crate::Validation::Required,
+                ..crate::DeviceOptions::default()
+            },
+        )
+        .unwrap();
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        let target_descriptor = TextureDesc {
+            dimension: fluxel_rendergraph::TextureDimension::D2,
+            extent: Extent3d {
+                width: 8,
+                height: 8,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        };
+        let target = device
+            .create_texture(TextureDescriptor {
+                texture: target_descriptor,
+                usage: TextureUsage::from_kinds([TextureUsageKind::ColorAttachment]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let overlap_descriptor = TextureDesc {
+            mip_levels: 2,
+            ..target_descriptor
+        };
+        let overlap_texture = device
+            .create_texture(TextureDescriptor {
+                texture: overlap_descriptor,
+                usage: TextureUsage::from_kinds([TextureUsageKind::ColorAttachment]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let pipeline = device
+            .create_raster_pipeline(crate::RasterKernel::IndexedPositionColor)
+            .unwrap();
+        let triangle = device
+            .create_raster_pipeline(crate::RasterKernel::Triangle)
+            .unwrap();
+        let compute_pipeline = device
+            .create_compute_pipeline(crate::ComputeKernel::WrappingAdd)
+            .unwrap();
+        let compute_buffer = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 64 },
+                usage: BufferUsage::from_kinds([
+                    BufferUsageKind::StorageRead,
+                    BufferUsageKind::StorageWrite,
+                ]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let compute_bindings = RasterBindings::Compute(
+            device
+                .create_compute_bindings(&compute_pipeline, &compute_buffer, 0, 64)
+                .unwrap(),
+        );
+        let foreign_device = Device::open(backend_kind, crate::DeviceOptions::default()).unwrap();
+        let foreign_pipeline = foreign_device
+            .create_raster_pipeline(crate::RasterKernel::Triangle)
+            .unwrap();
+        let foreign_target = foreign_device
+            .create_texture(TextureDescriptor {
+                texture: target_descriptor,
+                usage: TextureUsage::from_kinds([TextureUsageKind::ColorAttachment]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let mut provider = RasterObjectProvider::new(&device);
+        assert_eq!(
+            provider.register_raster_pipeline(RasterPipelineId::new(999), foreign_pipeline),
+            Err(NativeExecutionError::ForeignResource)
+        );
+
+        let color = raster_negative_color(&target);
+        let descriptor = RasterPassDescriptor {
+            label: "negative-raster",
+            colors: std::slice::from_ref(&color),
+            depth_stencil: None,
+        };
+        let mismatch = NativeExecutionError::RasterStateMismatch;
+        let mut backend = RasterBackend::new(device.clone());
+
+        // All malformed pass descriptors fail before opening a native render pass.
+        let foreign_color = raster_negative_color(&foreign_target);
+        let foreign_descriptor = RasterPassDescriptor {
+            label: "foreign",
+            colors: std::slice::from_ref(&foreign_color),
+            depth_stencil: None,
+        };
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        assert!(matches!(
+            backend.begin_raster(&mut encoder, &descriptor),
+            Err(NativeExecutionError::Recording(_))
+        ));
+        for invalid_range in [
+            TextureRange::Subresources {
+                base_mip_level: 0,
+                mip_level_count: 0,
+                base_array_layer: 0,
+                array_layer_count: 1,
+                aspect: fluxel_rendergraph::TextureAspect::Color,
+            },
+            TextureRange::Subresources {
+                base_mip_level: 1,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1,
+                aspect: fluxel_rendergraph::TextureAspect::Color,
+            },
+        ] {
+            assert!(matches!(
+                backend.transition_texture(
+                    &mut encoder,
+                    &target,
+                    invalid_range,
+                    ResourceAccessState::Undefined,
+                    ResourceAccessState::ColorAttachmentWrite,
+                ),
+                Err(NativeExecutionError::Recording(_))
+            ));
+        }
+        backend
+            .transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Subresources {
+                    base_mip_level: 0,
+                    mip_level_count: 1,
+                    base_array_layer: 0,
+                    array_layer_count: 1,
+                    aspect: fluxel_rendergraph::TextureAspect::Color,
+                },
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentWrite,
+            )
+            .unwrap();
+        assert!(matches!(
+            backend.transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::CopySource,
+            ),
+            Err(NativeExecutionError::Recording(_))
+        ));
+        let mut overlap_encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend
+            .transition_texture(
+                &mut overlap_encoder,
+                &overlap_texture,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentWrite,
+            )
+            .unwrap();
+        assert!(matches!(
+            backend.transition_texture(
+                &mut overlap_encoder,
+                &overlap_texture,
+                TextureRange::Subresources {
+                    base_mip_level: 1,
+                    mip_level_count: 1,
+                    base_array_layer: 0,
+                    array_layer_count: 1,
+                    aspect: fluxel_rendergraph::TextureAspect::Color,
+                },
+                ResourceAccessState::Undefined,
+                ResourceAccessState::CopySource,
+            ),
+            Err(NativeExecutionError::Recording(_))
+        ));
+        drop(overlap_encoder);
+        let mut overlap_encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend
+            .transition_texture(
+                &mut overlap_encoder,
+                &overlap_texture,
+                TextureRange::Subresources {
+                    base_mip_level: 1,
+                    mip_level_count: 1,
+                    base_array_layer: 0,
+                    array_layer_count: 1,
+                    aspect: fluxel_rendergraph::TextureAspect::Color,
+                },
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentWrite,
+            )
+            .unwrap();
+        assert!(matches!(
+            backend.transition_texture(
+                &mut overlap_encoder,
+                &overlap_texture,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::CopySource,
+            ),
+            Err(NativeExecutionError::Recording(_))
+        ));
+        drop(overlap_encoder);
+        assert_eq!(
+            backend.set_compute_pipeline(&mut encoder, &compute_pipeline),
+            Err(NativeExecutionError::ComputeBindingMismatch)
+        );
+        assert_eq!(
+            backend.set_bindings(&mut encoder, &compute_bindings),
+            Err(NativeExecutionError::ComputeBindingMismatch)
+        );
+        assert_eq!(
+            backend.dispatch(&mut encoder, [1, 1, 1]),
+            Err(NativeExecutionError::ComputeBindingMismatch)
+        );
+        assert_eq!(
+            backend.begin_raster(&mut encoder, &foreign_descriptor),
+            Err(NativeExecutionError::ForeignResource)
+        );
+        let ranged_color = RasterColorAttachment {
+            index: 0,
+            texture: &target,
+            range: TextureRange::Subresources {
+                base_mip_level: 0,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1,
+                aspect: fluxel_rendergraph::TextureAspect::Color,
+            },
+            operations: raster_negative_ops(),
+        };
+        assert_eq!(
+            backend.begin_raster(
+                &mut encoder,
+                &RasterPassDescriptor {
+                    label: "range",
+                    colors: std::slice::from_ref(&ranged_color),
+                    depth_stencil: None,
+                }
+            ),
+            Err(mismatch.clone())
+        );
+        let depth = RasterDepthStencilAttachment {
+            texture: &target,
+            range: TextureRange::Whole,
+            depth: None,
+            stencil: None,
+        };
+        assert_eq!(
+            backend.begin_raster(
+                &mut encoder,
+                &RasterPassDescriptor {
+                    label: "depth",
+                    colors: std::slice::from_ref(&color),
+                    depth_stencil: Some(depth),
+                }
+            ),
+            Err(mismatch.clone())
+        );
+        assert_eq!(
+            backend.begin_raster(
+                &mut encoder,
+                &RasterPassDescriptor {
+                    label: "mrt",
+                    colors: &[
+                        raster_negative_color(&target),
+                        raster_negative_color(&target),
+                    ],
+                    depth_stencil: None,
+                }
+            ),
+            Err(mismatch.clone())
+        );
+        drop(encoder);
+
+        let no_attachment_usage = device
+            .create_texture(TextureDescriptor {
+                texture: target_descriptor,
+                usage: TextureUsage::from_kinds([TextureUsageKind::CopyDestination]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let usage_color = raster_negative_color(&no_attachment_usage);
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        assert_eq!(
+            backend.begin_raster(
+                &mut encoder,
+                &RasterPassDescriptor {
+                    label: "usage",
+                    colors: std::slice::from_ref(&usage_color),
+                    depth_stencil: None,
+                }
+            ),
+            Err(mismatch.clone())
+        );
+        drop(encoder);
+
+        // Nested/mismatched pass state and finish-with-open-pass are rejected.
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend
+            .transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentReadWrite,
+            )
+            .unwrap();
+        backend.begin_raster(&mut encoder, &descriptor).unwrap();
+        assert_eq!(
+            backend.transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Whole,
+                ResourceAccessState::ColorAttachmentWrite,
+                ResourceAccessState::CopySource,
+            ),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        assert_eq!(
+            backend.begin_copy(&mut encoder, "nested-copy"),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        assert_eq!(
+            backend.copy_buffer(
+                &mut encoder,
+                &compute_buffer,
+                &compute_buffer,
+                BufferCopyRegion {
+                    source_offset: 0,
+                    destination_offset: 0,
+                    size: 4,
+                },
+            ),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        assert_eq!(
+            backend.begin_raster(&mut encoder, &descriptor),
+            Err(mismatch.clone())
+        );
+        assert_eq!(
+            backend.begin_compute(&mut encoder, "nested"),
+            Err(mismatch.clone())
+        );
+        assert_eq!(
+            backend.end_compute(&mut encoder),
+            Err(NativeExecutionError::ComputeBindingMismatch)
+        );
+        assert!(matches!(
+            backend.finish_encoder(encoder),
+            Err(NativeExecutionError::RasterStateMismatch)
+        ));
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend.begin_compute(&mut encoder, "compute").unwrap();
+        assert_eq!(backend.end_raster(&mut encoder), Err(mismatch.clone()));
+        assert_eq!(
+            backend.begin_raster(&mut encoder, &descriptor),
+            Err(mismatch.clone())
+        );
+        assert!(matches!(
+            backend.finish_encoder(encoder),
+            Err(NativeExecutionError::RasterStateMismatch)
+        ));
+
+        // Draw validation happens before native draw calls and never submits this encoder.
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend
+            .transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentReadWrite,
+            )
+            .unwrap();
+        backend.begin_raster(&mut encoder, &descriptor).unwrap();
+        assert_eq!(
+            backend.draw(&mut encoder, 0..3, 0..1),
+            Err(mismatch.clone())
+        );
+        assert_eq!(
+            backend.set_viewport(
+                &mut encoder,
+                Viewport {
+                    x: 7.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 1.0,
+                    min_depth: 0.0,
+                    max_depth: 1.0
+                }
+            ),
+            Err(mismatch.clone())
+        );
+        assert_eq!(
+            backend.set_scissor(
+                &mut encoder,
+                ScissorRect {
+                    x: 7,
+                    y: 0,
+                    width: 2,
+                    height: 1
+                }
+            ),
+            Err(mismatch.clone())
+        );
+        backend
+            .set_raster_pipeline(&mut encoder, &pipeline)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(mismatch.clone())
+        );
+        let wrong_usage = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 64 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::StorageRead]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 0, &wrong_usage, 0),
+            Err(mismatch.clone())
+        );
+        assert_eq!(
+            backend.set_index_buffer(&mut encoder, &wrong_usage, 0, IndexFormat::Uint16),
+            Err(mismatch.clone())
+        );
+        let vertex = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 64 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let index = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 6 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Index]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        backend
+            .set_vertex_buffer(&mut encoder, 0, &vertex, 0)
+            .unwrap();
+        assert_eq!(
+            backend.set_index_buffer(&mut encoder, &index, 0, IndexFormat::Uint32),
+            Err(mismatch.clone())
+        );
+        backend
+            .set_index_buffer(&mut encoder, &index, 0, IndexFormat::Uint16)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..4, 0, 0..1),
+            Err(mismatch)
+        );
+        backend.end_raster(&mut encoder).unwrap();
+        drop(encoder);
+
+        // Nothing above finishes/submits; validation must remain silent.
+        assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
+        drop(triangle);
+    }
+
+    fn raster_negative_ops() -> AttachmentOps<[f32; 4]> {
+        AttachmentOps {
+            // No clear is necessary for a test that never draws or submits.
+            load: LoadOp::Load,
+            store: StoreOp::Store,
+            write_coverage: WriteCoverage::Full,
+        }
+    }
+
+    fn raster_negative_color(texture: &Texture) -> RasterColorAttachment<'_, Texture> {
+        RasterColorAttachment {
+            index: 0,
+            texture,
+            range: TextureRange::Whole,
+            operations: raster_negative_ops(),
+        }
+    }
 
     fn run_compute_negative_paths(backend_kind: crate::Backend) {
         let device = Device::open(
@@ -519,7 +1155,60 @@ mod tests {
             .unwrap();
         let mut backend = ComputeBackend::new(device.clone());
         let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        assert_eq!(
+            backend.end_copy(&mut encoder),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        backend.begin_copy(&mut encoder, "copy-state").unwrap();
+        assert_eq!(
+            backend.begin_copy(&mut encoder, "nested-copy"),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        backend.end_copy(&mut encoder).unwrap();
+        assert_eq!(
+            backend.end_copy(&mut encoder),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        assert_eq!(
+            backend.set_compute_pipeline(&mut encoder, &pipeline_a),
+            Err(NativeExecutionError::ComputeBindingMismatch)
+        );
+        assert_eq!(
+            backend.set_bindings(&mut encoder, &binding_a),
+            Err(NativeExecutionError::ComputeBindingMismatch)
+        );
+        assert_eq!(
+            backend.dispatch(&mut encoder, [1, 1, 1]),
+            Err(NativeExecutionError::ComputeBindingMismatch)
+        );
         backend.begin_compute(&mut encoder, "negative").unwrap();
+        assert_eq!(
+            backend.transition_buffer(
+                &mut encoder,
+                &buffer,
+                BufferRange::Whole,
+                ResourceAccessState::ShaderStorageReadWrite,
+                ResourceAccessState::CopySource,
+            ),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        assert_eq!(
+            backend.begin_copy(&mut encoder, "nested-copy"),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
+        assert_eq!(
+            backend.copy_buffer(
+                &mut encoder,
+                &buffer,
+                &buffer,
+                BufferCopyRegion {
+                    source_offset: 0,
+                    destination_offset: 0,
+                    size: 4,
+                },
+            ),
+            Err(NativeExecutionError::CopyStateMismatch)
+        );
         assert_eq!(
             backend.dispatch(&mut encoder, [1, 1, 1]),
             Err(NativeExecutionError::ComputeBindingMismatch)
@@ -550,6 +1239,12 @@ mod tests {
         );
         // No finish/submit: every negative assertion is pre-submission.
         drop(encoder);
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend.begin_copy(&mut encoder, "unfinished-copy").unwrap();
+        assert!(matches!(
+            backend.finish_encoder(encoder),
+            Err(NativeExecutionError::CopyStateMismatch)
+        ));
         assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
     }
 
@@ -703,6 +1398,33 @@ mod tests {
         input_description: &'static str,
     }
 
+    struct RasterTextureCase {
+        compiled: fluxel_rendergraph::CompiledGraph,
+        export: fluxel_rendergraph::ExportTextureSlot,
+        pipeline: RasterPipelineId,
+        expected: Vec<u8>,
+    }
+
+    struct RasterIndexedCase {
+        compiled: fluxel_rendergraph::CompiledGraph,
+        export: fluxel_rendergraph::ExportTextureSlot,
+        vertex_slot: fluxel_rendergraph::ImportBufferSlot,
+        index_slot: fluxel_rendergraph::ImportBufferSlot,
+        vertices: Vec<u8>,
+        indices: Vec<u8>,
+        pipeline: RasterPipelineId,
+        expected: Vec<u8>,
+    }
+
+    struct RasterBufferCase {
+        compiled: fluxel_rendergraph::CompiledGraph,
+        export: ExportBufferSlot,
+        raster_pipeline: RasterPipelineId,
+        compute_pipeline: ComputePipelineId,
+        bindings: BindingSetId,
+        expected: Vec<u8>,
+    }
+
     fn add_compute(
         graph: &mut RenderGraph,
         name: &str,
@@ -745,6 +1467,678 @@ mod tests {
     fn run_k01(backend: crate::Backend) {
         let case = build_k01();
         run_compute_case_bundle("K01", backend, &case);
+    }
+
+    fn run_r01(backend: crate::Backend) {
+        run_r01_case(backend, &build_r01(), "independent");
+    }
+
+    fn build_r01() -> RasterTextureCase {
+        let descriptor = TextureDesc {
+            dimension: fluxel_rendergraph::TextureDimension::D2,
+            extent: Extent3d {
+                width: 8,
+                height: 8,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        };
+        let pipeline_id = RasterPipelineId::new(401);
+        let mut graph = RenderGraph::new();
+        let target = graph.create_texture("r01-target", descriptor);
+        let pass = graph.add_raster_pass(
+            "r01-clear-triangle",
+            |pass| {
+                let output = pass.color_attachment(
+                    target,
+                    ColorAttachmentDesc {
+                        index: 0,
+                        range: TextureRange::Whole,
+                        operations: AttachmentOps {
+                            load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+                            store: StoreOp::Store,
+                            write_coverage: WriteCoverage::Full,
+                        },
+                    },
+                );
+                (output, pipeline_id)
+            },
+            |commands, _, pipeline, _| {
+                commands.set_pipeline(*pipeline)?;
+                commands.draw(0..3, 0..1)
+            },
+        );
+        let export = graph.export_texture(
+            pass.output,
+            ExportTextureContract {
+                // The graph itself requests CopySource; the external helper merely
+                // consumes this reported fact and cannot repair an omitted usage.
+                final_state: ResourceAccessState::CopySource,
+            },
+        );
+        let compiled = graph
+            .compile(&RasterBackend::portable_capabilities())
+            .unwrap()
+            .graph;
+        RasterTextureCase {
+            compiled,
+            export,
+            pipeline: pipeline_id,
+            expected: r01_oracle(),
+        }
+    }
+
+    fn run_r01_case(backend: crate::Backend, case: &RasterTextureCase, mode: &str) {
+        let device = Device::open(
+            backend,
+            crate::DeviceOptions {
+                validation: crate::Validation::Required,
+                ..crate::DeviceOptions::default()
+            },
+        )
+        .unwrap();
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        let pipeline = device
+            .create_raster_pipeline(crate::RasterKernel::Triangle)
+            .unwrap();
+        let mut provider = RasterObjectProvider::new(&device);
+        provider
+            .register_raster_pipeline(case.pipeline, pipeline)
+            .unwrap();
+        let resources = Resources {
+            device: device.identity(),
+            buffers: HashMap::new(),
+            textures: HashMap::new(),
+        };
+        let executor = fluxel_rendergraph::FrameExecutor::new(RasterBackend::new(device.clone()));
+        let mut frame = executor
+            .execute(
+                &case.compiled,
+                case.compiled.instantiate_local(FrameInputs::new(())),
+                &resources,
+                &provider,
+            )
+            .unwrap();
+        let completion = frame.submission.completion().clone();
+        executor
+            .try_backend()
+            .unwrap()
+            .wait(&completion, Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(
+            frame.submission.status().unwrap(),
+            CompletionStatus::Complete
+        );
+        let exported = frame.exports.texture(case.export).unwrap();
+        let outgoing_state = exported.outgoing_state;
+        let descriptor = exported.descriptor;
+        let actual = readback_raster_exported_texture_for_test(&device, exported)
+            .unwrap()
+            .tight;
+        assert_eq!(
+            actual,
+            case.expected,
+            "{backend:?} first difference: {:?}",
+            actual
+                .iter()
+                .zip(&case.expected)
+                .position(|(left, right)| left != right)
+        );
+        let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+        assert!(
+            diagnostics.is_empty(),
+            "R01/{backend:?} diagnostics: {diagnostics:#?}"
+        );
+        let commit = std::env::var("FLUXEL_TEST_COMMIT").unwrap_or_else(|_| "working-tree".into());
+        let first_difference = actual
+            .iter()
+            .zip(&case.expected)
+            .position(|(left, right)| left != right);
+        eprintln!(
+            "artifact case=R01 mode={mode} backend={backend:?} commit={commit} os={}; hardware={:?}; canonical_plan_label=R01-raster-v1; execution_plan={:?}; raster_artifact={:?}; input=draw vertices=0..3 instances=0..1 target=8x8 clear=[0,0,0,1]; resource=texture descriptor={descriptor:?}; expected={:?}; actual={actual:?}; first_difference={first_difference:?}; outgoing_state={outgoing_state:?}; completion=Complete; diagnostics={diagnostics:?}",
+            std::env::consts::OS,
+            device.hardware(),
+            case.compiled.execution_plan(),
+            crate::RasterKernel::Triangle.portable_identity(),
+            case.expected,
+        );
+    }
+
+    fn r01_oracle() -> Vec<u8> {
+        let mut output = vec![0_u8; 8 * 8 * 4];
+        for pixel in output.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        let points = [(1.2_f32, 6.4_f32), (6.8, 6.4), (4.0, 1.2)];
+        let edge = |a: (f32, f32), b: (f32, f32), p: (f32, f32)| {
+            (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
+        };
+        for y in 0..8 {
+            for x in 0..8 {
+                let point = (x as f32 + 0.5, y as f32 + 0.5);
+                let edges = [
+                    edge(points[0], points[1], point),
+                    edge(points[1], points[2], point),
+                    edge(points[2], points[0], point),
+                ];
+                if edges.iter().all(|edge| *edge <= 0.0) || edges.iter().all(|edge| *edge >= 0.0) {
+                    output[(y * 8 + x) * 4..(y * 8 + x + 1) * 4]
+                        .copy_from_slice(&[64, 160, 255, 255]);
+                }
+            }
+        }
+        output
+    }
+
+    struct IndexedRasterData {
+        pipeline: RasterPipelineId,
+        vertices: BufferRead,
+        indices: BufferRead,
+    }
+
+    fn run_r02(backend: crate::Backend) {
+        run_r02_case(backend, &build_r02(), "independent");
+    }
+
+    fn build_r02() -> RasterIndexedCase {
+        let target = TextureDesc {
+            dimension: fluxel_rendergraph::TextureDimension::D2,
+            extent: Extent3d {
+                width: 8,
+                height: 8,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        };
+        let vertices = r02_vertices();
+        let indices = r02_indices();
+        let mut graph = RenderGraph::new();
+        let vertex_slot = graph.import_buffer_slot(
+            "r02-vertices",
+            ImportBufferContract {
+                descriptor: BufferDesc {
+                    size: vertices.len() as u64,
+                },
+                initial_state: ResourceAccessState::CopyDestination,
+                ownership: ExternalOwnership::Caller,
+                initial_contents: InitialContents::Defined,
+            },
+        );
+        let index_slot = graph.import_buffer_slot(
+            "r02-indices",
+            ImportBufferContract {
+                descriptor: BufferDesc {
+                    size: indices.len() as u64,
+                },
+                initial_state: ResourceAccessState::CopyDestination,
+                ownership: ExternalOwnership::Caller,
+                initial_contents: InitialContents::Defined,
+            },
+        );
+        let image = graph.create_texture("r02-target", target);
+        let pipeline_id = RasterPipelineId::new(402);
+        let pass = graph.add_raster_pass(
+            "r02-indexed-viewport-scissor",
+            |pass| {
+                let output = pass.color_attachment(
+                    image,
+                    ColorAttachmentDesc {
+                        index: 0,
+                        range: TextureRange::Whole,
+                        operations: AttachmentOps {
+                            load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+                            store: StoreOp::Store,
+                            write_coverage: WriteCoverage::Full,
+                        },
+                    },
+                );
+                let vertices = pass.read_buffer(
+                    &vertex_slot.version,
+                    fluxel_rendergraph::BufferReadUse::Vertex,
+                    BufferRange::Whole,
+                );
+                let indices = pass.read_buffer(
+                    &index_slot.version,
+                    fluxel_rendergraph::BufferReadUse::Index,
+                    BufferRange::Whole,
+                );
+                (
+                    output,
+                    IndexedRasterData {
+                        pipeline: pipeline_id,
+                        vertices,
+                        indices,
+                    },
+                )
+            },
+            |commands, _, data, _| {
+                commands.set_pipeline(data.pipeline)?;
+                commands.set_vertex_buffer(0, &data.vertices)?;
+                commands.set_index_buffer(&data.indices, IndexFormat::Uint16)?;
+                commands.set_viewport(Viewport {
+                    x: 1.0,
+                    y: 1.0,
+                    width: 6.0,
+                    height: 6.0,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                })?;
+                commands.set_scissor(ScissorRect {
+                    x: 2,
+                    y: 2,
+                    width: 4,
+                    height: 3,
+                })?;
+                commands.draw_indexed(0..6, 0, 0..1)
+            },
+        );
+        let export = graph.export_texture(
+            pass.output,
+            ExportTextureContract {
+                final_state: ResourceAccessState::CopySource,
+            },
+        );
+        let compiled = graph
+            .compile(&RasterBackend::portable_capabilities())
+            .unwrap()
+            .graph;
+        RasterIndexedCase {
+            compiled,
+            export,
+            vertex_slot: vertex_slot.slot,
+            index_slot: index_slot.slot,
+            vertices,
+            indices,
+            pipeline: pipeline_id,
+            expected: r02_oracle(),
+        }
+    }
+
+    fn run_r02_case(backend: crate::Backend, case: &RasterIndexedCase, mode: &str) {
+        let device = Device::open(
+            backend,
+            crate::DeviceOptions {
+                validation: crate::Validation::Required,
+                ..crate::DeviceOptions::default()
+            },
+        )
+        .unwrap();
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        let vertex = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc {
+                    size: case.vertices.len() as u64,
+                },
+                usage: BufferUsage::from_kinds([
+                    BufferUsageKind::CopyDestination,
+                    BufferUsageKind::Vertex,
+                ]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let index = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc {
+                    size: case.indices.len() as u64,
+                },
+                usage: BufferUsage::from_kinds([
+                    BufferUsageKind::CopyDestination,
+                    BufferUsageKind::Index,
+                ]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let vertex_state = crate::imp::upload_buffer_for_test(
+            &device.inner,
+            vertex.native(),
+            vertex.lease().into(),
+            &case.vertices,
+        )
+        .unwrap();
+        let index_state = crate::imp::upload_buffer_for_test(
+            &device.inner,
+            index.native(),
+            index.lease().into(),
+            &case.indices,
+        )
+        .unwrap();
+        let resources = Resources {
+            device: device.identity(),
+            buffers: HashMap::from([
+                (BufferBindingId::new(11), (vertex, vertex_state)),
+                (BufferBindingId::new(12), (index, index_state)),
+            ]),
+            textures: HashMap::new(),
+        };
+        let mut inputs = FrameInputs::new(());
+        inputs.bind_buffer(case.vertex_slot, BufferBindingId::new(11));
+        inputs.bind_buffer(case.index_slot, BufferBindingId::new(12));
+        let mut provider = RasterObjectProvider::new(&device);
+        provider
+            .register_raster_pipeline(
+                case.pipeline,
+                device
+                    .create_raster_pipeline(crate::RasterKernel::IndexedPositionColor)
+                    .unwrap(),
+            )
+            .unwrap();
+        let executor = fluxel_rendergraph::FrameExecutor::new(RasterBackend::new(device.clone()));
+        let mut frame = executor
+            .execute(
+                &case.compiled,
+                case.compiled.instantiate_local(inputs),
+                &resources,
+                &provider,
+            )
+            .unwrap();
+        let completion = frame.submission.completion().clone();
+        executor
+            .try_backend()
+            .unwrap()
+            .wait(&completion, Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(
+            frame.submission.status().unwrap(),
+            CompletionStatus::Complete
+        );
+        let exported = frame.exports.texture(case.export).unwrap();
+        let outgoing_state = exported.outgoing_state;
+        let descriptor = exported.descriptor;
+        let actual = readback_raster_exported_texture_for_test(&device, exported)
+            .unwrap()
+            .tight;
+        assert_eq!(
+            actual,
+            case.expected,
+            "{backend:?} first difference: {:?}",
+            actual
+                .iter()
+                .zip(&case.expected)
+                .position(|(left, right)| left != right)
+        );
+        let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+        assert!(
+            diagnostics.is_empty(),
+            "R02/{backend:?} diagnostics: {diagnostics:#?}"
+        );
+        let commit = std::env::var("FLUXEL_TEST_COMMIT").unwrap_or_else(|_| "working-tree".into());
+        let first_difference = actual
+            .iter()
+            .zip(&case.expected)
+            .position(|(left, right)| left != right);
+        eprintln!(
+            "artifact case=R02 mode={mode} backend={backend:?} commit={commit} os={}; hardware={:?}; canonical_plan_label=R02-indexed-raster-v1; execution_plan={:?}; raster_artifact={:?}; input=vertex_layout=float32x2+unorm8x4 index_format=uint16 indices=0..6 viewport=[1,1,6,6,0,1] scissor=[2,2,4,3] target=8x8; resource=texture descriptor={descriptor:?}; expected={:?}; actual={actual:?}; first_difference={first_difference:?}; outgoing_state={outgoing_state:?}; completion=Complete; diagnostics={diagnostics:?}",
+            std::env::consts::OS,
+            device.hardware(),
+            case.compiled.execution_plan(),
+            crate::RasterKernel::IndexedPositionColor.portable_identity(),
+            case.expected,
+        );
+    }
+
+    fn r02_vertices() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (x, y) in [(-1.0_f32, -1.0_f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            bytes.extend_from_slice(&x.to_le_bytes());
+            bytes.extend_from_slice(&y.to_le_bytes());
+            bytes.extend_from_slice(&[64, 160, 255, 255]);
+        }
+        bytes
+    }
+    fn r02_indices() -> Vec<u8> {
+        [0_u16, 1, 2, 2, 1, 3]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+    fn r02_oracle() -> Vec<u8> {
+        let mut output = vec![0_u8; 8 * 8 * 4];
+        for pixel in output.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        for y in 2..5 {
+            for x in 2..6 {
+                output[(y * 8 + x) * 4..(y * 8 + x + 1) * 4].copy_from_slice(&[64, 160, 255, 255]);
+            }
+        }
+        output
+    }
+
+    struct X01ComputeData {
+        pipeline: ComputePipelineId,
+        bindings: BindingSetId,
+        texture: TextureRead,
+        output: BufferWrite,
+    }
+    struct X01CopyData {
+        source: BufferRead,
+        destination: BufferWrite,
+    }
+
+    fn run_x01(backend: crate::Backend) {
+        run_x01_case(backend, &build_x01(), "independent");
+    }
+
+    fn build_x01() -> RasterBufferCase {
+        let texture = TextureDesc {
+            dimension: fluxel_rendergraph::TextureDimension::D2,
+            extent: Extent3d {
+                width: 8,
+                height: 8,
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        };
+        let bytes = BufferDesc { size: 256 };
+        let raster_id = RasterPipelineId::new(403);
+        let compute_id = ComputePipelineId::new(404);
+        let bindings_id = BindingSetId::new(405);
+        let mut graph = RenderGraph::new();
+        let image = graph.create_texture("x01-raster-target", texture);
+        let storage = graph.create_buffer("x01-packed", bytes);
+        let copied = graph.create_buffer("x01-copy-destination", bytes);
+        let raster = graph.add_raster_pass(
+            "x01-raster",
+            |pass| {
+                let out = pass.color_attachment(
+                    image,
+                    ColorAttachmentDesc {
+                        index: 0,
+                        range: TextureRange::Whole,
+                        operations: AttachmentOps {
+                            load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+                            store: StoreOp::Store,
+                            write_coverage: WriteCoverage::Full,
+                        },
+                    },
+                );
+                (out, raster_id)
+            },
+            |commands, _, pipeline, _| {
+                commands.set_pipeline(*pipeline)?;
+                commands.draw(0..3, 0..1)
+            },
+        );
+        let compute = graph.add_compute_pass(
+            "x01-pack",
+            |pass| {
+                let sampled = pass.read_texture(
+                    &raster.output,
+                    fluxel_rendergraph::TextureReadUse::Sampled,
+                    TextureRange::Whole,
+                );
+                let (out, storage) = pass.write_buffer(
+                    storage,
+                    fluxel_rendergraph::BufferWriteUse::Storage,
+                    BufferRange::Whole,
+                    WriteCoverage::Full,
+                );
+                (
+                    out,
+                    X01ComputeData {
+                        pipeline: compute_id,
+                        bindings: bindings_id,
+                        texture: sampled,
+                        output: storage,
+                    },
+                )
+            },
+            |commands, resolver, data, _| {
+                commands.set_pipeline(data.pipeline)?;
+                let bindings = resolver.resolve_bindings(
+                    data.bindings,
+                    &[
+                        BindingResource::TextureRead(&data.texture),
+                        BindingResource::BufferWrite(&data.output),
+                    ],
+                    &[],
+                )?;
+                commands.set_bindings(&bindings)?;
+                commands.dispatch([1, 1, 1])
+            },
+        );
+        let copy = graph.add_copy_pass(
+            "x01-copy",
+            |pass| {
+                let source = pass.read_buffer(&compute.output, BufferRange::Whole);
+                let (out, destination) =
+                    pass.write_buffer(copied, BufferRange::Whole, WriteCoverage::Full);
+                (
+                    out,
+                    X01CopyData {
+                        source,
+                        destination,
+                    },
+                )
+            },
+            |commands, _, data, _| {
+                commands.copy_buffer(
+                    &data.source,
+                    &data.destination,
+                    BufferCopyRegion {
+                        source_offset: 0,
+                        destination_offset: 0,
+                        size: 256,
+                    },
+                )
+            },
+        );
+        let export = graph.export_buffer(
+            copy.output,
+            ExportBufferContract {
+                final_state: ResourceAccessState::CopySource,
+            },
+        );
+        let compiled = graph
+            .compile(&RasterBackend::portable_capabilities())
+            .unwrap()
+            .graph;
+        let expected: Vec<u8> = r01_oracle()
+            .chunks_exact(4)
+            .flat_map(|pixel| u32::from_le_bytes(pixel.try_into().unwrap()).to_le_bytes())
+            .collect();
+        RasterBufferCase {
+            compiled,
+            export,
+            raster_pipeline: raster_id,
+            compute_pipeline: compute_id,
+            bindings: bindings_id,
+            expected,
+        }
+    }
+
+    fn run_x01_case(backend: crate::Backend, case: &RasterBufferCase, mode: &str) {
+        let device = Device::open(
+            backend,
+            crate::DeviceOptions {
+                validation: crate::Validation::Required,
+                ..crate::DeviceOptions::default()
+            },
+        )
+        .unwrap();
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        let mut provider = RasterObjectProvider::new(&device);
+        provider
+            .register_raster_pipeline(
+                case.raster_pipeline,
+                device
+                    .create_raster_pipeline(crate::RasterKernel::Triangle)
+                    .unwrap(),
+            )
+            .unwrap();
+        provider
+            .register_compute_pipeline(
+                case.compute_pipeline,
+                device
+                    .create_compute_pipeline(crate::ComputeKernel::TexturePackRgba8)
+                    .unwrap(),
+            )
+            .unwrap();
+        provider
+            .register_bindings(case.bindings, case.compute_pipeline)
+            .unwrap();
+        let resources = Resources {
+            device: device.identity(),
+            buffers: HashMap::new(),
+            textures: HashMap::new(),
+        };
+        let executor = fluxel_rendergraph::FrameExecutor::new(RasterBackend::new(device.clone()));
+        let mut frame = executor
+            .execute(
+                &case.compiled,
+                case.compiled.instantiate_local(FrameInputs::new(())),
+                &resources,
+                &provider,
+            )
+            .unwrap();
+        let completion = frame.submission.completion().clone();
+        executor
+            .try_backend()
+            .unwrap()
+            .wait(&completion, Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(
+            frame.submission.status().unwrap(),
+            CompletionStatus::Complete
+        );
+        let exported = frame.exports.buffer(case.export).unwrap();
+        let outgoing_state = exported.outgoing_state;
+        let descriptor = exported.descriptor;
+        let actual = readback_raster_exported_buffer_for_test(&device, exported).unwrap();
+        assert_eq!(
+            actual,
+            case.expected,
+            "{backend:?} first difference: {:?}",
+            actual.iter().zip(&case.expected).position(|(a, b)| a != b)
+        );
+        let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+        assert!(
+            diagnostics.is_empty(),
+            "X01/{backend:?} diagnostics: {diagnostics:#?}"
+        );
+        let commit = std::env::var("FLUXEL_TEST_COMMIT").unwrap_or_else(|_| "working-tree".into());
+        let first_difference = actual
+            .iter()
+            .zip(&case.expected)
+            .position(|(left, right)| left != right);
+        eprintln!(
+            "artifact case=X01 mode={mode} backend={backend:?} commit={commit} os={}; hardware={:?}; canonical_plan_label=X01-raster-compute-copy-v1; execution_plan={:?}; raster_artifact={:?}; compute_artifact={:?}; binding_layout=sampled rgba8 texture + one storage buffer; dispatch=[1,1,1]; input=Raster triangle 8x8 -> textureLoad row-major rgba8 pack -> buffer copy; resource=buffer descriptor={descriptor:?}; expected={:?}; actual={actual:?}; first_difference={first_difference:?}; outgoing_state={outgoing_state:?}; completion=Complete; diagnostics={diagnostics:?}",
+            std::env::consts::OS,
+            device.hardware(),
+            case.compiled.execution_plan(),
+            crate::RasterKernel::Triangle.portable_identity(),
+            crate::ComputeKernel::TexturePackRgba8.portable_identity(),
+            case.expected,
+        );
     }
 
     fn build_k01() -> ComputeCase {
@@ -1360,7 +2754,7 @@ mod tests {
     }
 }
 
-/// Registry for the only fixed compute pipeline and binding recipes in 0.1.3.
+/// Registry for the fixed compute pipeline and binding recipes.
 ///
 /// Registration is explicit so graph IDs never become implicit native handles.
 pub struct ComputeObjectProvider {
@@ -1439,6 +2833,7 @@ fn compute_binding_error_kind(
         ComputeCreateError::ForeignDevice
         | ComputeCreateError::InvalidBindingRange
         | ComputeCreateError::StorageUsageRequired
+        | ComputeCreateError::BindingRecipeMismatch
         | ComputeCreateError::UnsupportedComputeLimits => {
             fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe
         }
@@ -1558,7 +2953,275 @@ impl fluxel_rendergraph::RenderObjectProvider<ComputeBackend> for ComputeObjectP
     }
 }
 
-/// A serial DX12/Vulkan backend that adds the fixed 0.1.3 compute slice.
+/// Binding objects accepted by the raster profile's two fixed compute recipes.
+///
+/// Keeping this enum private to the profile avoids promoting either fixed
+/// recipe into a general-purpose bind-group API.
+#[derive(Clone)]
+pub enum RasterBindings {
+    /// One fixed in-place RW-storage-buffer binding.
+    Compute(ComputeBindings),
+    /// The closed sampled-Rgba8-to-RW-storage-buffer X01 binding.
+    TexturePack(TexturePackBindings),
+}
+
+/// A serial DX12/Vulkan backend for the fixed Raster→Compute→Copy slice.
+pub struct RasterBackend {
+    device: Device,
+    capabilities: DeviceCapabilities,
+    retired: Vec<Retired>,
+}
+
+/// Registry for the fixed raster artifacts and the two fixed compute recipes
+/// required by the 0.1.4 Raster→Compute→Copy vertical slice.
+pub struct RasterObjectProvider {
+    owner: Device,
+    device: fluxel_rendergraph::DeviceIdentity,
+    raster: HashMap<fluxel_rendergraph::RasterPipelineId, RasterPipeline>,
+    compute: HashMap<fluxel_rendergraph::ComputePipelineId, ComputePipeline>,
+    bindings: HashMap<
+        fluxel_rendergraph::BindingSetId,
+        (fluxel_rendergraph::ComputePipelineId, ComputePipeline),
+    >,
+}
+
+impl RasterObjectProvider {
+    /// Creates an empty registry for one device-affine raster backend.
+    pub fn new(device: &Device) -> Self {
+        Self {
+            owner: device.clone(),
+            device: device.identity(),
+            raster: HashMap::new(),
+            compute: HashMap::new(),
+            bindings: HashMap::new(),
+        }
+    }
+
+    /// Registers one fixed raster pipeline under a graph identity.
+    pub fn register_raster_pipeline(
+        &mut self,
+        id: fluxel_rendergraph::RasterPipelineId,
+        pipeline: RasterPipeline,
+    ) -> Result<(), NativeExecutionError> {
+        require_device(
+            pipeline.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        self.raster.insert(id, pipeline);
+        Ok(())
+    }
+
+    /// Registers one fixed compute pipeline under a graph identity.
+    pub fn register_compute_pipeline(
+        &mut self,
+        id: fluxel_rendergraph::ComputePipelineId,
+        pipeline: ComputePipeline,
+    ) -> Result<(), NativeExecutionError> {
+        require_device(
+            pipeline.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        self.compute.insert(id, pipeline);
+        Ok(())
+    }
+
+    /// Registers the fixed binding recipe expected by a compute pipeline.
+    pub fn register_bindings(
+        &mut self,
+        id: fluxel_rendergraph::BindingSetId,
+        expected_pipeline: fluxel_rendergraph::ComputePipelineId,
+    ) -> Result<(), NativeExecutionError> {
+        let pipeline = self
+            .compute
+            .get(&expected_pipeline)
+            .ok_or(NativeExecutionError::ComputeBindingMismatch)?;
+        self.bindings
+            .insert(id, (expected_pipeline, pipeline.clone()));
+        Ok(())
+    }
+}
+
+impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectProvider {
+    fn raster_pipeline(
+        &self,
+        id: fluxel_rendergraph::RasterPipelineId,
+    ) -> Result<
+        fluxel_rendergraph::BoundRasterPipeline<RasterPipeline, ResourceLease>,
+        fluxel_rendergraph::RecordingError,
+    > {
+        let pipeline = self.raster.get(&id).ok_or_else(|| {
+            provider_error(
+                fluxel_rendergraph::RecordingErrorKind::MissingFrameBinding,
+                "unknown raster pipeline",
+            )
+        })?;
+        if pipeline.device_identity() != self.device {
+            return Err(provider_error(
+                fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                "foreign raster pipeline",
+            ));
+        }
+        Ok(fluxel_rendergraph::BoundRasterPipeline {
+            device: self.device,
+            physical: pipeline.clone(),
+            lease: pipeline.lease().into(),
+        })
+    }
+
+    fn compute_pipeline(
+        &self,
+        id: fluxel_rendergraph::ComputePipelineId,
+    ) -> Result<
+        fluxel_rendergraph::BoundComputePipeline<ComputePipeline, ResourceLease>,
+        fluxel_rendergraph::RecordingError,
+    > {
+        let pipeline = self.compute.get(&id).ok_or_else(|| {
+            provider_error(
+                fluxel_rendergraph::RecordingErrorKind::MissingFrameBinding,
+                "unknown compute pipeline",
+            )
+        })?;
+        if pipeline.device_identity() != self.device {
+            return Err(provider_error(
+                fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                "foreign compute pipeline",
+            ));
+        }
+        Ok(fluxel_rendergraph::BoundComputePipeline {
+            device: self.device,
+            physical: pipeline.clone(),
+            lease: pipeline.lease().into(),
+        })
+    }
+
+    fn bindings(
+        &self,
+        id: fluxel_rendergraph::BindingSetId,
+        resources: &[fluxel_rendergraph::ResolvedBindingResource<'_, Texture, Buffer>],
+        dynamic_offsets: &[u32],
+    ) -> Result<
+        fluxel_rendergraph::BoundBindings<RasterBindings, ResourceLease>,
+        fluxel_rendergraph::RecordingError,
+    > {
+        if !dynamic_offsets.is_empty() {
+            return Err(provider_error(
+                fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                "fixed bindings do not accept dynamic offsets",
+            ));
+        }
+        let (_, pipeline) = self.bindings.get(&id).ok_or_else(|| {
+            provider_error(
+                fluxel_rendergraph::RecordingErrorKind::MissingFrameBinding,
+                "unknown fixed binding recipe",
+            )
+        })?;
+        let bindings = match pipeline.kernel() {
+            crate::ComputeKernel::TexturePackRgba8 => {
+                let [
+                    fluxel_rendergraph::ResolvedBindingResource::Texture {
+                        physical: texture,
+                        range: fluxel_rendergraph::TextureRange::Whole,
+                        semantic:
+                            fluxel_rendergraph::BindingResourceSemantic::TextureRead(
+                                fluxel_rendergraph::TextureReadUse::Sampled,
+                            ),
+                    },
+                    fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                        physical: buffer,
+                        range,
+                        semantic,
+                    },
+                ] = resources
+                else {
+                    return Err(provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        "texture-pack requires a complete sampled texture and one RW storage buffer",
+                    ));
+                };
+                if !matches!(
+                    semantic,
+                    fluxel_rendergraph::BindingResourceSemantic::BufferReadWrite(
+                        fluxel_rendergraph::BufferReadWriteUse::Storage
+                    ) | fluxel_rendergraph::BindingResourceSemantic::BufferWrite(
+                        fluxel_rendergraph::BufferWriteUse::Storage
+                    )
+                ) {
+                    return Err(provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::DeclaredUseMismatch,
+                        "texture-pack requires Storage output",
+                    ));
+                }
+                if texture.device_identity() != self.device
+                    || buffer.device_identity() != self.device
+                {
+                    return Err(provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        "texture-pack binding is foreign to provider device",
+                    ));
+                }
+                let (offset, size) = match *range {
+                    BufferRange::Whole => (0, buffer.descriptor().buffer.size),
+                    BufferRange::Bytes { offset, size } => (offset, size),
+                };
+                let value = self
+                    .owner
+                    .create_texture_pack_bindings(pipeline, texture, buffer, offset, size)
+                    .map_err(|error| {
+                        provider_error(compute_binding_error_kind(&error), error.to_string())
+                    })?;
+                RasterBindings::TexturePack(value)
+            }
+            _ => {
+                let [
+                    fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                        physical: buffer,
+                        range,
+                        semantic:
+                            fluxel_rendergraph::BindingResourceSemantic::BufferReadWrite(
+                                fluxel_rendergraph::BufferReadWriteUse::Storage,
+                            ),
+                    },
+                ] = resources
+                else {
+                    return Err(provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        "fixed compute requires one RW storage buffer",
+                    ));
+                };
+                if buffer.device_identity() != self.device {
+                    return Err(provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        "compute binding is foreign to provider device",
+                    ));
+                }
+                let (offset, size) = match *range {
+                    BufferRange::Whole => (0, buffer.descriptor().buffer.size),
+                    BufferRange::Bytes { offset, size } => (offset, size),
+                };
+                let value = self
+                    .owner
+                    .create_compute_bindings(pipeline, buffer, offset, size)
+                    .map_err(|error| {
+                        provider_error(compute_binding_error_kind(&error), error.to_string())
+                    })?;
+                RasterBindings::Compute(value)
+            }
+        };
+        let lease = match &bindings {
+            RasterBindings::Compute(value) => value.lease().into(),
+            RasterBindings::TexturePack(value) => value.lease().into(),
+        };
+        Ok(fluxel_rendergraph::BoundBindings {
+            device: self.device,
+            physical: bindings,
+            lease,
+        })
+    }
+}
+
+/// A serial DX12/Vulkan backend for the fixed Compute-and-Copy slice.
 pub struct ComputeBackend {
     device: Device,
     capabilities: DeviceCapabilities,
@@ -1682,6 +3345,12 @@ impl ExecutionBackend for CopyBackend {
                 leases: Vec::new(),
                 active_compute: None,
                 bound_compute_pipeline: None,
+                active_raster: None,
+                vertex_buffer: None,
+                index_buffer: None,
+                raster_extent: None,
+                compute_open: false,
+                copy_open: false,
             })
             .map_err(NativeExecutionError::Recording)
     }
@@ -1694,6 +3363,9 @@ impl ExecutionBackend for CopyBackend {
         after: ResourceAccessState,
     ) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if encoder.copy_open || encoder.compute_open || encoder.raster_extent.is_some() {
+            return Err(NativeExecutionError::CopyStateMismatch);
+        }
         self.check_texture(texture)?;
         crate::imp::transition_texture(
             &mut encoder.native,
@@ -1716,6 +3388,9 @@ impl ExecutionBackend for CopyBackend {
         after: ResourceAccessState,
     ) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if encoder.copy_open || encoder.compute_open || encoder.raster_extent.is_some() {
+            return Err(NativeExecutionError::CopyStateMismatch);
+        }
         self.check_buffer(buffer)?;
         crate::imp::transition_buffer(&mut encoder.native, buffer.native(), before, after)
             .map_err(NativeExecutionError::Recording)?;
@@ -1738,10 +3413,20 @@ impl ExecutionBackend for CopyBackend {
     fn end_compute(&mut self, _: &mut Self::Encoder) -> Result<(), Self::Error> {
         Err(NativeExecutionError::UnsupportedCommandFamily)
     }
-    fn begin_copy(&mut self, _: &mut Self::Encoder, _: &str) -> Result<(), Self::Error> {
+    fn begin_copy(&mut self, encoder: &mut Self::Encoder, _: &str) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if encoder.copy_open || encoder.compute_open || encoder.raster_extent.is_some() {
+            return Err(NativeExecutionError::CopyStateMismatch);
+        }
+        encoder.copy_open = true;
         Ok(())
     }
-    fn end_copy(&mut self, _: &mut Self::Encoder) -> Result<(), Self::Error> {
+    fn end_copy(&mut self, encoder: &mut Self::Encoder) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if !encoder.copy_open {
+            return Err(NativeExecutionError::CopyStateMismatch);
+        }
+        encoder.copy_open = false;
         Ok(())
     }
     fn set_raster_pipeline(
@@ -1817,6 +3502,9 @@ impl ExecutionBackend for CopyBackend {
         region: TextureCopyRegion,
     ) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if !encoder.copy_open {
+            return Err(NativeExecutionError::CopyStateMismatch);
+        }
         self.check_texture(source)?;
         self.check_texture(destination)?;
         validate_texture_copy(
@@ -1844,6 +3532,9 @@ impl ExecutionBackend for CopyBackend {
         region: BufferCopyRegion,
     ) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if !encoder.copy_open {
+            return Err(NativeExecutionError::CopyStateMismatch);
+        }
         self.check_buffer(source)?;
         self.check_buffer(destination)?;
         validate_buffer_copy(
@@ -1867,12 +3558,17 @@ impl ExecutionBackend for CopyBackend {
         encoder: Self::Encoder,
     ) -> Result<Self::CommandBuffer, Self::Error> {
         self.check_encoder(&encoder)?;
+        if encoder.copy_open {
+            return Err(NativeExecutionError::CopyStateMismatch);
+        }
+        if encoder.compute_open || encoder.raster_extent.is_some() {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
         let CopyEncoder {
             native,
             device,
             leases,
-            active_compute: _,
-            bound_compute_pipeline: _,
+            ..
         } = encoder;
         crate::imp::finish_copy_encoder(native)
             .map(|native| CopyCommandBuffer {
@@ -2040,6 +3736,12 @@ impl ExecutionBackend for ComputeBackend {
                 leases: Vec::new(),
                 active_compute: None,
                 bound_compute_pipeline: None,
+                active_raster: None,
+                vertex_buffer: None,
+                index_buffer: None,
+                raster_extent: None,
+                compute_open: false,
+                copy_open: false,
             })
             .map_err(NativeExecutionError::Recording)
     }
@@ -2077,17 +3779,25 @@ impl ExecutionBackend for ComputeBackend {
     }
     fn begin_compute(&mut self, encoder: &mut CopyEncoder, label: &str) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if encoder.copy_open || encoder.compute_open || encoder.raster_extent.is_some() {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
         crate::imp::begin_compute(&mut encoder.native, label)
             .map_err(NativeExecutionError::Recording)?;
         encoder.active_compute = None;
         encoder.bound_compute_pipeline = None;
+        encoder.compute_open = true;
         Ok(())
     }
     fn end_compute(&mut self, encoder: &mut CopyEncoder) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
         crate::imp::end_compute(&mut encoder.native).map_err(NativeExecutionError::Recording)?;
         encoder.active_compute = None;
         encoder.bound_compute_pipeline = None;
+        encoder.compute_open = false;
         Ok(())
     }
     fn begin_copy(&mut self, encoder: &mut CopyEncoder, label: &str) -> Result<(), Self::Error> {
@@ -2109,6 +3819,9 @@ impl ExecutionBackend for ComputeBackend {
         pipeline: &ComputePipeline,
     ) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
         self.check_pipeline(pipeline)?;
         crate::imp::set_compute_pipeline(&mut encoder.native, pipeline.native())
             .map_err(NativeExecutionError::Recording)?;
@@ -2123,6 +3836,9 @@ impl ExecutionBackend for ComputeBackend {
         bindings: &ComputeBindings,
     ) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
         if bindings.device_identity() != self.device.identity() {
             return Err(NativeExecutionError::ForeignResource);
         }
@@ -2182,6 +3898,9 @@ impl ExecutionBackend for ComputeBackend {
     }
     fn dispatch(&mut self, encoder: &mut CopyEncoder, groups: [u32; 3]) -> Result<(), Self::Error> {
         self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
         if !valid_compute_dispatch(
             groups,
             self.capabilities
@@ -2252,6 +3971,711 @@ impl ExecutionBackend for ComputeBackend {
     }
 }
 
+impl RasterBackend {
+    /// Creates the only backend profile that can record the fixed raster slice.
+    pub fn new(device: Device) -> Self {
+        Self {
+            capabilities: raster_capabilities(&device),
+            device,
+            retired: Vec::new(),
+        }
+    }
+
+    /// Returns the conservative cross-backend capability profile.
+    pub fn portable_capabilities() -> DeviceCapabilities {
+        raster_capabilities_from_limit([65_535; 3])
+    }
+
+    /// Waits outside graph execution for an accepted submission.
+    pub fn wait(&self, completion: &NativeCompletion, timeout: Duration) -> Result<(), WaitError> {
+        CopyBackend::new(self.device.clone()).wait(completion, timeout)
+    }
+
+    fn copy(&self) -> CopyBackend {
+        CopyBackend {
+            device: self.device.clone(),
+            capabilities: copy_capabilities(),
+            retired: Vec::new(),
+        }
+    }
+    fn check_encoder(&self, encoder: &CopyEncoder) -> Result<(), NativeExecutionError> {
+        require_device(
+            encoder.device,
+            self.device.identity(),
+            NativeExecutionError::ForeignEncoder,
+        )
+    }
+    fn check_buffer(&self, buffer: &Buffer) -> Result<(), NativeExecutionError> {
+        require_device(
+            buffer.device_identity(),
+            self.device.identity(),
+            NativeExecutionError::ForeignResource,
+        )
+    }
+    fn check_texture(&self, texture: &Texture) -> Result<(), NativeExecutionError> {
+        require_device(
+            texture.device_identity(),
+            self.device.identity(),
+            NativeExecutionError::ForeignResource,
+        )
+    }
+}
+
+fn raster_capabilities(device: &Device) -> DeviceCapabilities {
+    raster_capabilities_from_limit(device.capabilities().max_compute_workgroups_per_dimension)
+}
+
+fn raster_capabilities_from_limit(maximum: [u32; 3]) -> DeviceCapabilities {
+    DeviceCapabilities::builder()
+        .queue(QueueDescriptor::new(
+            QueueId::new(0),
+            QueueCapabilities::new(true, true, true, false),
+        ))
+        .recording(RecordingCapabilities::new(
+            RecordingModel::DeferredCommandBuffers,
+            false,
+        ))
+        .transitions(TransitionCapabilities::GraphManagedExplicit)
+        .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
+        .timestamps(TimestampCapabilities::Unsupported)
+        .transient_resources(TransientResourceCapabilities::new(false, false, false))
+        .limits(DeviceLimits::new(1, 256).with_max_compute_workgroups_per_dimension(maximum))
+        .buffers(BufferCapabilities::new(true, true, false))
+        .texture_format(
+            TextureFormatCapabilities::builder(TextureFormat::Rgba8Unorm)
+                .sampled(true, false)
+                .attachments(true, false, vec![1])
+                .copies(true, true)
+                .build(),
+        )
+        .build()
+}
+
+impl ExecutionBackend for RasterBackend {
+    type Texture = Texture;
+    type Buffer = Buffer;
+    type RasterPipeline = RasterPipeline;
+    type ComputePipeline = ComputePipeline;
+    type Bindings = RasterBindings;
+    type Encoder = CopyEncoder;
+    type CommandBuffer = CopyCommandBuffer;
+    type Completion = NativeCompletion;
+    type Lease = ResourceLease;
+    type Error = NativeExecutionError;
+
+    fn capabilities(&self) -> &DeviceCapabilities {
+        &self.capabilities
+    }
+    fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.device.identity()
+    }
+    fn create_transient_texture(
+        &mut self,
+        descriptor: TextureDesc,
+        usage: TextureUsage,
+    ) -> Result<BoundTexture<Texture, ResourceLease>, Self::Error> {
+        let texture = self.device.create_texture(TextureDescriptor {
+            texture: descriptor,
+            usage,
+            memory: MemoryPolicy::DeviceOnly,
+        })?;
+        Ok(BoundTexture {
+            device: self.device.identity(),
+            identity: texture.identity(),
+            physical: texture.clone(),
+            descriptor,
+            usage: texture.allowed_usage(),
+            initial_state: ResourceAccessState::Undefined,
+            lease: texture.lease().into(),
+        })
+    }
+    fn create_transient_buffer(
+        &mut self,
+        descriptor: BufferDesc,
+        usage: BufferUsage,
+    ) -> Result<BoundBuffer<Buffer, ResourceLease>, Self::Error> {
+        let buffer = self.device.create_buffer(BufferDescriptor {
+            buffer: descriptor,
+            usage,
+            memory: MemoryPolicy::DeviceOnly,
+        })?;
+        Ok(BoundBuffer {
+            device: self.device.identity(),
+            identity: buffer.identity(),
+            physical: buffer.clone(),
+            descriptor,
+            usage: buffer.allowed_usage(),
+            initial_state: ResourceAccessState::Undefined,
+            lease: buffer.lease().into(),
+        })
+    }
+    fn begin_encoder(&mut self, queue: QueueId) -> Result<CopyEncoder, Self::Error> {
+        if queue != QueueId::new(0) {
+            return Err(NativeExecutionError::UnknownQueue(queue));
+        }
+        crate::imp::begin_copy_encoder(&self.device.inner)
+            .map(|native| CopyEncoder {
+                native,
+                device: self.device.identity(),
+                leases: Vec::new(),
+                active_compute: None,
+                bound_compute_pipeline: None,
+                active_raster: None,
+                vertex_buffer: None,
+                index_buffer: None,
+                raster_extent: None,
+                compute_open: false,
+                copy_open: false,
+            })
+            .map_err(NativeExecutionError::Recording)
+    }
+    fn transition_texture(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        texture: &Texture,
+        range: TextureRange,
+        before: ResourceAccessState,
+        after: ResourceAccessState,
+    ) -> Result<(), Self::Error> {
+        self.copy()
+            .transition_texture(encoder, texture, range, before, after)
+    }
+    fn transition_buffer(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        buffer: &Buffer,
+        range: BufferRange,
+        before: ResourceAccessState,
+        after: ResourceAccessState,
+    ) -> Result<(), Self::Error> {
+        self.copy()
+            .transition_buffer(encoder, buffer, range, before, after)
+    }
+    fn begin_raster(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        descriptor: &RasterPassDescriptor<'_, Texture>,
+    ) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if encoder.raster_extent.is_some()
+            || encoder.compute_open
+            || encoder.copy_open
+            || descriptor.depth_stencil.is_some()
+            || descriptor.colors.len() != 1
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        let color = &descriptor.colors[0];
+        if color.index != 0 || color.range != TextureRange::Whole {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        self.check_texture(color.texture)?;
+        if !color
+            .texture
+            .allowed_usage()
+            .contains(TextureUsageKind::ColorAttachment)
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        let texture = color.texture.descriptor().texture;
+        if texture.dimension != fluxel_rendergraph::TextureDimension::D2
+            || texture.format != TextureFormat::Rgba8Unorm
+            || texture.mip_levels != 1
+            || texture.array_layers != 1
+            || texture.sample_count != 1
+            || texture.extent.depth != 1
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        let (clear, load) = match color.operations.load {
+            LoadOp::Clear(value) => (Some(value), false),
+            LoadOp::Load => (None, true),
+            LoadOp::DontCare => return Err(NativeExecutionError::RasterStateMismatch),
+        };
+        if color.operations.store != StoreOp::Store {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::begin_raster(
+            &mut encoder.native,
+            color.texture.native(),
+            texture,
+            clear,
+            load,
+            true,
+            descriptor.label,
+        )
+        .map_err(NativeExecutionError::Recording)?;
+        encoder.leases.push(color.texture.lease().into());
+        encoder.raster_extent = Some((texture.extent.width, texture.extent.height));
+        encoder.active_raster = None;
+        encoder.vertex_buffer = None;
+        encoder.index_buffer = None;
+        Ok(())
+    }
+    fn end_raster(&mut self, encoder: &mut CopyEncoder) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if encoder.raster_extent.is_none() {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::end_raster(&mut encoder.native).map_err(NativeExecutionError::Recording)?;
+        encoder.raster_extent = None;
+        encoder.active_raster = None;
+        encoder.vertex_buffer = None;
+        encoder.index_buffer = None;
+        Ok(())
+    }
+    fn begin_compute(&mut self, encoder: &mut CopyEncoder, label: &str) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if encoder.raster_extent.is_some() || encoder.compute_open || encoder.copy_open {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::begin_compute(&mut encoder.native, label)
+            .map_err(NativeExecutionError::Recording)?;
+        encoder.active_compute = None;
+        encoder.bound_compute_pipeline = None;
+        encoder.compute_open = true;
+        Ok(())
+    }
+    fn end_compute(&mut self, encoder: &mut CopyEncoder) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
+        crate::imp::end_compute(&mut encoder.native).map_err(NativeExecutionError::Recording)?;
+        encoder.active_compute = None;
+        encoder.bound_compute_pipeline = None;
+        encoder.compute_open = false;
+        Ok(())
+    }
+    fn begin_copy(&mut self, encoder: &mut CopyEncoder, label: &str) -> Result<(), Self::Error> {
+        self.copy().begin_copy(encoder, label)
+    }
+    fn end_copy(&mut self, encoder: &mut CopyEncoder) -> Result<(), Self::Error> {
+        self.copy().end_copy(encoder)
+    }
+    fn set_raster_pipeline(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        pipeline: &RasterPipeline,
+    ) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        self.check_texture_pipeline(pipeline)?;
+        if encoder.raster_extent.is_none() {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::set_raster_pipeline(&mut encoder.native, pipeline.native())
+            .map_err(NativeExecutionError::Recording)?;
+        encoder.active_raster = Some(pipeline.clone());
+        encoder.leases.push(pipeline.lease().into());
+        Ok(())
+    }
+    fn set_compute_pipeline(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        pipeline: &ComputePipeline,
+    ) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
+        require_device(
+            pipeline.device_identity(),
+            self.device.identity(),
+            NativeExecutionError::ForeignResource,
+        )?;
+        crate::imp::set_compute_pipeline(&mut encoder.native, pipeline.native())
+            .map_err(NativeExecutionError::Recording)?;
+        encoder.active_compute = Some(pipeline.clone());
+        encoder.bound_compute_pipeline = None;
+        encoder.leases.push(pipeline.lease().into());
+        Ok(())
+    }
+    fn set_bindings(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        bindings: &RasterBindings,
+    ) -> Result<(), Self::Error> {
+        self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
+        let pipeline = encoder
+            .active_compute
+            .as_ref()
+            .ok_or(NativeExecutionError::ComputeBindingMismatch)?;
+        match bindings {
+            RasterBindings::Compute(value)
+                if value.device_identity() == self.device.identity()
+                    && value.pipeline().same_object(pipeline) =>
+            {
+                crate::imp::set_compute_bindings(&mut encoder.native, value.native())
+                    .map_err(NativeExecutionError::Recording)?;
+                encoder.leases.push(value.lease().into());
+            }
+            RasterBindings::TexturePack(value)
+                if value.device_identity() == self.device.identity()
+                    && value.pipeline().same_object(pipeline) =>
+            {
+                crate::imp::set_texture_pack_bindings(&mut encoder.native, value.native())
+                    .map_err(NativeExecutionError::Recording)?;
+                encoder.leases.push(value.lease().into());
+            }
+            _ => return Err(NativeExecutionError::ComputeBindingMismatch),
+        }
+        encoder.bound_compute_pipeline = Some(pipeline.clone());
+        Ok(())
+    }
+    fn set_vertex_buffer(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        slot: u32,
+        buffer: &Buffer,
+        offset: u64,
+    ) -> Result<(), Self::Error> {
+        self.set_vertex(encoder, slot, buffer, offset)
+    }
+    fn set_index_buffer(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        buffer: &Buffer,
+        offset: u64,
+        format: IndexFormat,
+    ) -> Result<(), Self::Error> {
+        self.set_index(encoder, buffer, offset, format)
+    }
+    fn set_viewport(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        viewport: Viewport,
+    ) -> Result<(), Self::Error> {
+        self.set_viewport_checked(encoder, viewport)
+    }
+    fn set_scissor(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        scissor: ScissorRect,
+    ) -> Result<(), Self::Error> {
+        self.set_scissor_checked(encoder, scissor)
+    }
+    fn draw(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        vertices: Range<u32>,
+        instances: Range<u32>,
+    ) -> Result<(), Self::Error> {
+        self.draw_checked(encoder, vertices, instances)
+    }
+    fn draw_indexed(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        indices: Range<u32>,
+        base_vertex: i32,
+        instances: Range<u32>,
+    ) -> Result<(), Self::Error> {
+        self.draw_indexed_checked(encoder, indices, base_vertex, instances)
+    }
+    fn dispatch(&mut self, encoder: &mut CopyEncoder, groups: [u32; 3]) -> Result<(), Self::Error> {
+        self.dispatch_checked(encoder, groups)
+    }
+    fn copy_texture(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        source: &Texture,
+        destination: &Texture,
+        region: TextureCopyRegion,
+    ) -> Result<(), Self::Error> {
+        self.copy()
+            .copy_texture(encoder, source, destination, region)
+    }
+    fn copy_buffer(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        source: &Buffer,
+        destination: &Buffer,
+        region: BufferCopyRegion,
+    ) -> Result<(), Self::Error> {
+        self.copy()
+            .copy_buffer(encoder, source, destination, region)
+    }
+    fn finish_encoder(&mut self, encoder: CopyEncoder) -> Result<CopyCommandBuffer, Self::Error> {
+        self.copy().finish_encoder(encoder)
+    }
+    fn submit(
+        &mut self,
+        queue: QueueId,
+        command_buffer: CopyCommandBuffer,
+    ) -> Result<NativeCompletion, Self::Error> {
+        self.copy().submit(queue, command_buffer)
+    }
+    fn completion_status(&self, completion: &NativeCompletion) -> CompletionStatus {
+        crate::imp::completion_status(&completion.0)
+            .unwrap_or(CompletionStatus::Failed(CompletionFailure::DeviceLost))
+    }
+    fn retire(&mut self, completion: NativeCompletion, leases: Vec<ResourceLease>) {
+        self.retired.push(Retired { completion, leases });
+    }
+    fn collect_retired(&mut self) -> Result<usize, Self::Error> {
+        let before = self.retired.len();
+        let mut error = None;
+        self.retired.retain(
+            |entry| match crate::imp::completion_status(&entry.completion.0) {
+                Ok(CompletionStatus::Pending) => true,
+                Ok(_) => false,
+                Err(value) => {
+                    error.get_or_insert(value);
+                    true
+                }
+            },
+        );
+        error.map_or(Ok(before - self.retired.len()), |value| {
+            Err(NativeExecutionError::Completion(value))
+        })
+    }
+}
+
+impl RasterBackend {
+    fn check_texture_pipeline(
+        &self,
+        pipeline: &RasterPipeline,
+    ) -> Result<(), NativeExecutionError> {
+        require_device(
+            pipeline.device_identity(),
+            self.device.identity(),
+            NativeExecutionError::ForeignResource,
+        )
+    }
+
+    fn set_vertex(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        slot: u32,
+        buffer: &Buffer,
+        offset: u64,
+    ) -> Result<(), NativeExecutionError> {
+        self.check_encoder(encoder)?;
+        self.check_buffer(buffer)?;
+        if slot != 0
+            || encoder.raster_extent.is_none()
+            || offset > buffer.descriptor().buffer.size
+            || !buffer.allowed_usage().contains(BufferUsageKind::Vertex)
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        let pipeline = encoder
+            .active_raster
+            .as_ref()
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        if pipeline.kernel() != crate::RasterKernel::IndexedPositionColor
+            || !offset.is_multiple_of(4)
+            || (buffer.descriptor().buffer.size - offset)
+                < u64::from(pipeline.kernel().vertex_stride())
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::set_vertex_buffer(
+            &mut encoder.native,
+            buffer.native(),
+            offset,
+            buffer.descriptor().buffer.size - offset,
+        )
+        .map_err(NativeExecutionError::Recording)?;
+        encoder.vertex_buffer = Some((buffer.clone(), offset));
+        encoder.leases.push(buffer.lease().into());
+        Ok(())
+    }
+
+    fn set_index(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        buffer: &Buffer,
+        offset: u64,
+        format: IndexFormat,
+    ) -> Result<(), NativeExecutionError> {
+        self.check_encoder(encoder)?;
+        self.check_buffer(buffer)?;
+        if encoder.raster_extent.is_none()
+            || format != IndexFormat::Uint16
+            || !offset.is_multiple_of(2)
+            || offset >= buffer.descriptor().buffer.size
+            || !buffer.allowed_usage().contains(BufferUsageKind::Index)
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        if encoder.active_raster.as_ref().map(RasterPipeline::kernel)
+            != Some(crate::RasterKernel::IndexedPositionColor)
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::set_index_buffer(
+            &mut encoder.native,
+            buffer.native(),
+            offset,
+            buffer.descriptor().buffer.size - offset,
+        )
+        .map_err(NativeExecutionError::Recording)?;
+        encoder.index_buffer = Some((buffer.clone(), offset, format));
+        encoder.leases.push(buffer.lease().into());
+        Ok(())
+    }
+
+    fn set_viewport_checked(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        viewport: Viewport,
+    ) -> Result<(), NativeExecutionError> {
+        self.check_encoder(encoder)?;
+        let (width, height) = encoder
+            .raster_extent
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        let inside = viewport.x >= 0.0
+            && viewport.y >= 0.0
+            && viewport.x + viewport.width <= width as f32
+            && viewport.y + viewport.height <= height as f32;
+        if !viewport.x.is_finite()
+            || !viewport.y.is_finite()
+            || !viewport.width.is_finite()
+            || !viewport.height.is_finite()
+            || !viewport.min_depth.is_finite()
+            || !viewport.max_depth.is_finite()
+            || viewport.width <= 0.0
+            || viewport.height <= 0.0
+            || !(0.0..=1.0).contains(&viewport.min_depth)
+            || !(0.0..=1.0).contains(&viewport.max_depth)
+            || viewport.min_depth > viewport.max_depth
+            || !inside
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::set_viewport(
+            &mut encoder.native,
+            viewport.x,
+            viewport.y,
+            viewport.width,
+            viewport.height,
+            viewport.min_depth,
+            viewport.max_depth,
+        )
+        .map_err(NativeExecutionError::Recording)
+    }
+
+    fn set_scissor_checked(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        scissor: ScissorRect,
+    ) -> Result<(), NativeExecutionError> {
+        self.check_encoder(encoder)?;
+        let (width, height) = encoder
+            .raster_extent
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        let Some(right) = scissor.x.checked_add(scissor.width) else {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        };
+        let Some(bottom) = scissor.y.checked_add(scissor.height) else {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        };
+        if scissor.width == 0 || scissor.height == 0 || right > width || bottom > height {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::set_scissor(
+            &mut encoder.native,
+            scissor.x,
+            scissor.y,
+            scissor.width,
+            scissor.height,
+        )
+        .map_err(NativeExecutionError::Recording)
+    }
+
+    fn draw_checked(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        vertices: Range<u32>,
+        instances: Range<u32>,
+    ) -> Result<(), NativeExecutionError> {
+        self.check_encoder(encoder)?;
+        if vertices != (0..3)
+            || instances != (0..1)
+            || encoder.raster_extent.is_none()
+            || encoder.active_raster.as_ref().map(RasterPipeline::kernel)
+                != Some(crate::RasterKernel::Triangle)
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::draw(
+            &mut encoder.native,
+            vertices.start,
+            vertices.end - vertices.start,
+            instances.start,
+            instances.end - instances.start,
+        )
+        .map_err(NativeExecutionError::Recording)
+    }
+
+    fn draw_indexed_checked(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        indices: Range<u32>,
+        base_vertex: i32,
+        instances: Range<u32>,
+    ) -> Result<(), NativeExecutionError> {
+        self.check_encoder(encoder)?;
+        if indices.start >= indices.end
+            || base_vertex != 0
+            || instances != (0..1)
+            || encoder.raster_extent.is_none()
+            || encoder.active_raster.as_ref().map(RasterPipeline::kernel)
+                != Some(crate::RasterKernel::IndexedPositionColor)
+            || encoder.vertex_buffer.is_none()
+            || encoder.index_buffer.is_none()
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        let (buffer, offset, format) = encoder
+            .index_buffer
+            .as_ref()
+            .expect("checked index binding");
+        let byte_end = u64::from(indices.end)
+            .checked_mul(2)
+            .and_then(|end| offset.checked_add(end))
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        if *format != IndexFormat::Uint16 || byte_end > buffer.descriptor().buffer.size {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        crate::imp::draw_indexed(
+            &mut encoder.native,
+            indices.start,
+            indices.end - indices.start,
+            base_vertex,
+            instances.start,
+            instances.end - instances.start,
+        )
+        .map_err(NativeExecutionError::Recording)
+    }
+
+    fn dispatch_checked(
+        &mut self,
+        encoder: &mut CopyEncoder,
+        groups: [u32; 3],
+    ) -> Result<(), NativeExecutionError> {
+        self.check_encoder(encoder)?;
+        if !encoder.compute_open {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
+        if !valid_compute_dispatch(
+            groups,
+            self.capabilities
+                .limits
+                .max_compute_workgroups_per_dimension,
+        ) {
+            return Err(NativeExecutionError::InvalidDispatch);
+        }
+        if encoder.active_compute.is_none() || encoder.bound_compute_pipeline.is_none() {
+            return Err(NativeExecutionError::ComputeBindingMismatch);
+        }
+        crate::imp::dispatch(&mut encoder.native, groups).map_err(NativeExecutionError::Recording)
+    }
+}
+
 fn valid_compute_dispatch(groups: [u32; 3], maximum: [u32; 3]) -> bool {
     groups
         .into_iter()
@@ -2312,6 +4736,64 @@ pub(crate) fn readback_exported_buffer_for_test(
         exported.lease.clone(),
         exported.outgoing_state,
         exported.descriptor.size,
+    )
+    .map_err(NativeExecutionError::Recording)
+}
+
+/// Reads a completed RasterBackend buffer export through the test-only staging
+/// path.  The graph-reported outgoing state is deliberately the helper's only
+/// incoming-state input.
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "R01/R02/X01 hardware fixtures consume this crate-private wrapper"
+)]
+pub(crate) fn readback_raster_exported_buffer_for_test(
+    device: &Device,
+    exported: &fluxel_rendergraph::ExportedBuffer<RasterBackend>,
+) -> Result<Vec<u8>, NativeExecutionError> {
+    if exported.physical.device_identity() != device.identity() {
+        return Err(NativeExecutionError::ForeignResource);
+    }
+    if !matches!(&exported.lease, ResourceLease::Buffer(_)) {
+        return Err(NativeExecutionError::ForeignResource);
+    }
+    crate::imp::readback_buffer_for_test(
+        &device.inner,
+        exported.physical.native(),
+        exported.lease.clone(),
+        exported.outgoing_state,
+        exported.descriptor.size,
+    )
+    .map_err(NativeExecutionError::Recording)
+}
+
+/// Reads a completed RasterBackend texture export after consuming its actual
+/// graph-reported outgoing state; the helper never guesses or repairs it.
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "R01/R02/X01 hardware fixtures consume this crate-private wrapper"
+)]
+pub(crate) fn readback_raster_exported_texture_for_test(
+    device: &Device,
+    exported: &fluxel_rendergraph::ExportedTexture<RasterBackend>,
+) -> Result<crate::imp::TextureReadback, NativeExecutionError> {
+    if exported.physical.device_identity() != device.identity() {
+        return Err(NativeExecutionError::ForeignResource);
+    }
+    match &exported.lease {
+        ResourceLease::Texture(lease)
+            if lease.device_identity() == device.identity()
+                && lease.identity() == exported.physical.identity() => {}
+        _ => return Err(NativeExecutionError::ForeignResource),
+    }
+    crate::imp::readback_texture_for_test(
+        &device.inner,
+        exported.physical.native(),
+        exported.lease.clone(),
+        exported.descriptor,
+        exported.outgoing_state,
     )
     .map_err(NativeExecutionError::Recording)
 }
@@ -2470,6 +4952,22 @@ mod contract_tests {
             compute.limits.max_compute_workgroups_per_dimension,
             [65_535; 3]
         );
+    }
+
+    #[test]
+    fn raster_profile_is_single_queue_raster_compute_copy_rgba8() {
+        let capabilities = RasterBackend::portable_capabilities();
+        assert_eq!(capabilities.queues.len(), 1);
+        assert!(capabilities.queues[0].capabilities.raster);
+        assert!(capabilities.queues[0].capabilities.compute);
+        assert!(capabilities.queues[0].capabilities.copy);
+        let rgba8 = capabilities
+            .texture_formats
+            .iter()
+            .find(|facts| facts.format == TextureFormat::Rgba8Unorm)
+            .unwrap();
+        assert!(rgba8.color_attachment && rgba8.sampled && rgba8.copy_source);
+        assert_eq!(rgba8.attachment_sample_counts, vec![1]);
     }
 
     #[test]
