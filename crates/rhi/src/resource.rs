@@ -4,11 +4,12 @@ use core::fmt;
 use std::sync::Arc;
 
 use fluxel_rendergraph::{
-    BufferDesc, BufferUsage, BufferUsageKind, PhysicalResourceIdentity, TextureDesc,
-    TextureDimension, TextureFormat, TextureUsage, TextureUsageKind,
+    BufferDesc, BufferUsage, BufferUsageKind, CompletionStatus, PhysicalResourceIdentity,
+    ResourceAccessState, TextureDesc, TextureDimension, TextureFormat, TextureUsage,
+    TextureUsageKind,
 };
 
-use crate::{Backend, Device};
+use crate::{Backend, Device, NativeCompletion};
 
 /// Host visibility policy for an owned resource.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -113,6 +114,107 @@ impl fmt::Display for ResourceCreateError {
 
 impl std::error::Error for ResourceCreateError {}
 
+/// The stage at which an immutable buffer upload reached the native boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum BufferUploadStage {
+    /// The private staging allocation or host write failed.
+    Staging,
+    /// Recording the fixed copy operation failed.
+    Recording,
+    /// The queue rejected the submission before it was accepted.
+    SubmitRejected,
+    /// Querying or waiting for an accepted completion failed.
+    Completion,
+}
+
+/// A stable reason why an immutable buffer upload request was rejected before native work.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum InvalidBufferUploadReason {
+    /// The source byte slice was empty.
+    EmptyData,
+    /// The source byte length was not a multiple of the portable copy alignment.
+    DataLengthNotCopyAligned,
+    /// The buffer descriptor size was not exactly the source byte length.
+    DescriptorSizeMismatch,
+    /// The upload slice accepts only device-local destination buffers.
+    MemoryPolicyUnsupported,
+    /// The destination declaration did not request copy-destination usage.
+    CopyDestinationUsageRequired,
+    /// Test-only observation requires the finalized buffer to allow copy-source use.
+    CopySourceUsageRequired,
+}
+
+/// Why an immutable buffer upload could not be started or observed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BufferUploadError {
+    /// The portable upload request was malformed.
+    InvalidRequest(InvalidBufferUploadReason),
+    /// Creating the destination buffer failed.
+    Resource(ResourceCreateError),
+    /// An observation request used a buffer from a different native device.
+    ForeignDevice,
+    /// A private native boundary operation failed.
+    Native {
+        /// Backend selected by the owning device.
+        backend: Backend,
+        /// Upload stage that failed.
+        stage: BufferUploadStage,
+        /// Native diagnostic retained without exposing HAL types.
+        reason: String,
+    },
+}
+
+impl fmt::Display for BufferUploadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRequest(reason) => {
+                write!(f, "invalid immutable buffer upload: {reason:?}")
+            }
+            Self::Resource(error) => write!(f, "immutable buffer upload resource error: {error}"),
+            Self::ForeignDevice => f.write_str("immutable buffer upload used a foreign device"),
+            Self::Native {
+                backend,
+                stage,
+                reason,
+            } => write!(
+                f,
+                "{backend:?} immutable buffer upload {stage:?} failed: {reason}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BufferUploadError {}
+
+/// An immutable buffer upload accepted by the native queue but not yet finalized.
+///
+/// This value retains the destination and the accepted submission. Dropping it
+/// never releases potentially in-flight native storage early: the private
+/// completion owns the staging allocation and applies the accepted-unknown
+/// quarantine contract when completion cannot be proven.
+pub struct PendingBufferUpload {
+    buffer: Option<Buffer>,
+    completion: NativeCompletion,
+    backend: Backend,
+}
+
+/// A non-complete immutable upload returned by [`PendingBufferUpload::finalize`].
+pub struct IncompleteBufferUpload {
+    upload: PendingBufferUpload,
+    status: CompletionStatus,
+}
+
+/// An immutable buffer whose initial contents are available to later GPU work.
+///
+/// Its only published incoming/outgoing state is [`ResourceAccessState::CopyDestination`].
+#[derive(Clone)]
+pub struct UploadedBuffer {
+    buffer: Buffer,
+}
+
 /// Why creation of a fixed compute artifact was rejected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -200,7 +302,7 @@ impl fmt::Display for RasterCreateError {
 }
 impl std::error::Error for RasterCreateError {}
 
-#[cfg(windows)]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 fn map_compute_pipeline_create_error(
     error: crate::imp::ComputePipelineCreateError,
 ) -> ComputeCreateError {
@@ -217,7 +319,7 @@ fn map_compute_pipeline_create_error(
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 fn map_raster_pipeline_create_error(
     error: crate::imp::RasterPipelineCreateError,
 ) -> RasterCreateError {
@@ -727,6 +829,141 @@ impl Buffer {
     }
 }
 
+impl PendingBufferUpload {
+    /// Returns the completion state without blocking the calling thread.
+    pub fn status(&self) -> Result<CompletionStatus, BufferUploadError> {
+        crate::imp::completion_status(&self.completion.0).map_err(|reason| {
+            BufferUploadError::Native {
+                backend: self.backend,
+                stage: BufferUploadStage::Completion,
+                reason,
+            }
+        })
+    }
+
+    /// Waits no longer than `timeout` for the accepted upload submission.
+    ///
+    /// A timeout returns [`CompletionStatus::Pending`]; it does not cancel the
+    /// upload or release its staging allocation.
+    pub fn wait(
+        &self,
+        timeout: core::time::Duration,
+    ) -> Result<CompletionStatus, BufferUploadError> {
+        crate::imp::wait_completion(&self.completion.0, timeout).map_err(|reason| {
+            BufferUploadError::Native {
+                backend: self.backend,
+                stage: BufferUploadStage::Completion,
+                reason,
+            }
+        })
+    }
+
+    /// Finalizes this upload only after native completion is proven.
+    ///
+    /// Pending and failed submissions are returned intact so their completion
+    /// and keepalive storage remain owned by the caller.
+    pub fn finalize(mut self) -> Result<UploadedBuffer, IncompleteBufferUpload> {
+        let status = crate::imp::completion_status(&self.completion.0).unwrap_or(
+            CompletionStatus::Failed(fluxel_rendergraph::CompletionFailure::DeviceLost),
+        );
+        if status == CompletionStatus::Complete {
+            Ok(UploadedBuffer {
+                buffer: self
+                    .buffer
+                    .take()
+                    .expect("pending upload retains its destination until completion"),
+            })
+        } else {
+            Err(IncompleteBufferUpload {
+                upload: self,
+                status,
+            })
+        }
+    }
+}
+
+impl Drop for PendingBufferUpload {
+    fn drop(&mut self) {
+        // Dropping an application-level pending operation must neither block
+        // the caller nor release storage still referenced by accepted native
+        // work. A leaked Arc clone keeps the submission bundle, target lease,
+        // and private staging allocation quarantined whenever completion is
+        // not proven. Complete bundles take the ordinary immediate cleanup
+        // path when this value's original completion field is dropped.
+        if !matches!(
+            crate::imp::completion_status(&self.completion.0),
+            Ok(CompletionStatus::Complete)
+        ) {
+            let _quarantined = std::mem::ManuallyDrop::new(self.completion.clone());
+        }
+    }
+}
+
+impl IncompleteBufferUpload {
+    /// Returns the observed non-complete state.
+    #[must_use]
+    pub fn status(&self) -> CompletionStatus {
+        self.status
+    }
+
+    /// Returns the retained upload so it can be polled or waited again.
+    #[must_use]
+    pub fn upload(&self) -> &PendingBufferUpload {
+        &self.upload
+    }
+
+    /// Returns ownership of the retained upload.
+    #[must_use]
+    pub fn into_pending(self) -> PendingBufferUpload {
+        self.upload
+    }
+}
+
+impl UploadedBuffer {
+    /// Returns the immutable destination buffer.
+    #[must_use]
+    pub fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+
+    /// Returns the state that later graph imports must use as their incoming state.
+    #[must_use]
+    pub const fn outgoing_state(&self) -> ResourceAccessState {
+        ResourceAccessState::CopyDestination
+    }
+
+    /// Returns an independent lifetime lease for later graph submission.
+    #[must_use]
+    pub fn lease(&self) -> BufferLease {
+        self.buffer.lease()
+    }
+}
+
+impl fmt::Debug for PendingBufferUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingBufferUpload")
+            .field("buffer", &self.buffer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for IncompleteBufferUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IncompleteBufferUpload")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for UploadedBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UploadedBuffer")
+            .field("buffer", &self.buffer)
+            .field("outgoing_state", &self.outgoing_state())
+            .finish()
+    }
+}
+
 impl Texture {
     pub(crate) fn native(&self) -> &crate::imp::OwnedTexture {
         &self.0._native
@@ -875,6 +1112,48 @@ impl fmt::Debug for TexturePackBindingsLease {
 }
 
 impl Device {
+    /// Creates a device-local buffer and starts one immutable copy upload.
+    ///
+    /// The descriptor size must exactly match `bytes`, the byte length must be
+    /// non-zero and four-byte aligned, and the declared usage must include
+    /// copy-destination access. The returned value does not make the buffer
+    /// graph-importable until [`PendingBufferUpload::finalize`] reports a
+    /// completed submission.
+    pub fn upload_immutable_buffer(
+        &self,
+        descriptor: BufferDescriptor,
+        bytes: &[u8],
+    ) -> Result<PendingBufferUpload, BufferUploadError> {
+        validate_immutable_upload_descriptor(descriptor, bytes)?;
+        let buffer = self
+            .create_buffer(descriptor)
+            .map_err(BufferUploadError::Resource)?;
+        if !buffer
+            .allowed_usage()
+            .contains(BufferUsageKind::CopyDestination)
+        {
+            return Err(BufferUploadError::InvalidRequest(
+                InvalidBufferUploadReason::CopyDestinationUsageRequired,
+            ));
+        }
+        let completion = crate::imp::upload_immutable_buffer(
+            &self.inner,
+            buffer.native(),
+            buffer.lease().into(),
+            bytes,
+        )
+        .map_err(|(stage, reason)| BufferUploadError::Native {
+            backend: self.hardware.backend,
+            stage,
+            reason,
+        })?;
+        Ok(PendingBufferUpload {
+            buffer: Some(buffer),
+            completion: NativeCompletion(completion),
+            backend: self.hardware.backend,
+        })
+    }
+
     /// Creates one fixed-artifact compute pipeline for this device.
     pub fn create_compute_pipeline(
         &self,
@@ -885,14 +1164,14 @@ impl Device {
             self.capabilities.max_compute_workgroup_size,
             self.capabilities.max_compute_invocations_per_workgroup,
         )?;
-        #[cfg(windows)]
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
         let native = crate::imp::create_compute_pipeline(
             &self.inner,
             kernel.wgsl_source(),
             kernel.entry_point(),
         )
         .map_err(map_compute_pipeline_create_error)?;
-        #[cfg(not(windows))]
+        #[cfg(not(all(windows, any(feature = "dx12", feature = "vulkan"))))]
         let native = crate::imp::create_compute_pipeline(
             &self.inner,
             kernel.wgsl_source(),
@@ -1023,7 +1302,7 @@ impl Device {
         &self,
         kernel: RasterKernel,
     ) -> Result<RasterPipeline, RasterCreateError> {
-        #[cfg(windows)]
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
         let native = crate::imp::create_raster_pipeline(
             &self.inner,
             kernel.wgsl_source(),
@@ -1032,7 +1311,7 @@ impl Device {
             kernel.vertex_stride() != 0,
         )
         .map_err(map_raster_pipeline_create_error)?;
-        #[cfg(not(windows))]
+        #[cfg(not(all(windows, any(feature = "dx12", feature = "vulkan"))))]
         let native = crate::imp::create_raster_pipeline(
             &self.inner,
             kernel.wgsl_source(),
@@ -1088,6 +1367,38 @@ impl Device {
             device: self.identity,
         })))
     }
+}
+
+fn validate_immutable_upload_descriptor(
+    descriptor: BufferDescriptor,
+    bytes: &[u8],
+) -> Result<(), BufferUploadError> {
+    if bytes.is_empty() {
+        return Err(BufferUploadError::InvalidRequest(
+            InvalidBufferUploadReason::EmptyData,
+        ));
+    }
+    if !bytes.len().is_multiple_of(4) {
+        return Err(BufferUploadError::InvalidRequest(
+            InvalidBufferUploadReason::DataLengthNotCopyAligned,
+        ));
+    }
+    if descriptor.buffer.size != bytes.len() as u64 {
+        return Err(BufferUploadError::InvalidRequest(
+            InvalidBufferUploadReason::DescriptorSizeMismatch,
+        ));
+    }
+    if descriptor.memory != MemoryPolicy::DeviceOnly {
+        return Err(BufferUploadError::InvalidRequest(
+            InvalidBufferUploadReason::MemoryPolicyUnsupported,
+        ));
+    }
+    if !descriptor.usage.contains(BufferUsageKind::CopyDestination) {
+        return Err(BufferUploadError::InvalidRequest(
+            InvalidBufferUploadReason::CopyDestinationUsageRequired,
+        ));
+    }
+    Ok(())
 }
 
 /// Checks the fixed shader declaration against raw native workgroup facts.
@@ -1308,6 +1619,122 @@ fn validate_texture(desc: TextureDescriptor) -> Result<(), ResourceCreateError> 
 mod tests {
     use super::*;
     use fluxel_rendergraph::{Extent3d, TextureDimension};
+
+    #[test]
+    fn immutable_upload_requires_exact_device_only_copy_destination_bytes() {
+        let descriptor = BufferDescriptor {
+            buffer: BufferDesc { size: 8 },
+            usage: BufferUsage::empty().with(BufferUsageKind::CopyDestination),
+            memory: MemoryPolicy::DeviceOnly,
+        };
+        assert_eq!(
+            validate_immutable_upload_descriptor(descriptor, &[]),
+            Err(BufferUploadError::InvalidRequest(
+                InvalidBufferUploadReason::EmptyData
+            ))
+        );
+        assert_eq!(
+            validate_immutable_upload_descriptor(descriptor, &[0; 6]),
+            Err(BufferUploadError::InvalidRequest(
+                InvalidBufferUploadReason::DataLengthNotCopyAligned
+            ))
+        );
+        assert_eq!(
+            validate_immutable_upload_descriptor(descriptor, &[0; 4]),
+            Err(BufferUploadError::InvalidRequest(
+                InvalidBufferUploadReason::DescriptorSizeMismatch
+            ))
+        );
+        assert_eq!(
+            validate_immutable_upload_descriptor(
+                BufferDescriptor {
+                    usage: BufferUsage::empty(),
+                    ..descriptor
+                },
+                &[0; 8]
+            ),
+            Err(BufferUploadError::InvalidRequest(
+                InvalidBufferUploadReason::CopyDestinationUsageRequired
+            ))
+        );
+        assert_eq!(
+            validate_immutable_upload_descriptor(descriptor, &[0; 8]),
+            Ok(())
+        );
+    }
+
+    #[cfg(all(windows, feature = "dx12"))]
+    #[test]
+    #[ignore = "requires a Windows DX12 device with required validation"]
+    fn immutable_upload_dx12_failure_contract() {
+        run_immutable_upload_failure_contract(crate::Backend::Dx12);
+    }
+
+    #[cfg(all(windows, feature = "vulkan"))]
+    #[test]
+    #[ignore = "requires a Windows Vulkan device with required validation"]
+    fn immutable_upload_vulkan_failure_contract() {
+        run_immutable_upload_failure_contract(crate::Backend::Vulkan);
+    }
+
+    #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+    fn run_immutable_upload_failure_contract(backend: crate::Backend) {
+        use core::time::Duration;
+
+        let device = Device::open(
+            backend,
+            crate::DeviceOptions {
+                validation: crate::Validation::Required,
+                ..crate::DeviceOptions::default()
+            },
+        )
+        .unwrap();
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        let descriptor = BufferDescriptor {
+            buffer: BufferDesc { size: 8 },
+            usage: BufferUsage::from_kinds([BufferUsageKind::CopyDestination]),
+            memory: MemoryPolicy::DeviceOnly,
+        };
+
+        crate::imp::inject_submit_rejected_once();
+        assert!(matches!(
+            device.upload_immutable_buffer(descriptor, &[0; 8]),
+            Err(BufferUploadError::Native {
+                stage: BufferUploadStage::SubmitRejected,
+                ..
+            })
+        ));
+
+        crate::imp::inject_submit_accepted_unknown_once();
+        let accepted_unknown = device.upload_immutable_buffer(descriptor, &[1; 8]).unwrap();
+        assert_eq!(
+            accepted_unknown.status().unwrap(),
+            CompletionStatus::Failed(fluxel_rendergraph::CompletionFailure::DeviceLost)
+        );
+        let incomplete = accepted_unknown.finalize().unwrap_err();
+        assert_eq!(
+            incomplete.status(),
+            CompletionStatus::Failed(fluxel_rendergraph::CompletionFailure::DeviceLost)
+        );
+        drop(incomplete);
+
+        let pending = device.upload_immutable_buffer(descriptor, &[2; 8]).unwrap();
+        crate::imp::inject_wait_pending_once();
+        assert_eq!(
+            pending.wait(Duration::ZERO).unwrap(),
+            CompletionStatus::Pending
+        );
+        assert_eq!(
+            pending.wait(Duration::from_secs(10)).unwrap(),
+            CompletionStatus::Complete
+        );
+        assert!(pending.finalize().is_ok());
+        let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+        assert!(diagnostics.is_empty(), "{backend:?}: {diagnostics:?}");
+        eprintln!(
+            "artifact case=U01-failure backend={backend:?} submit_rejected=true accepted_unknown=DeviceLost timeout=Pending completion=Complete diagnostics={diagnostics:?}"
+        );
+    }
 
     #[cfg(windows)]
     #[test]

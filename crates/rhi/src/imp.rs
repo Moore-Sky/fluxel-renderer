@@ -16,8 +16,8 @@
 )]
 
 use crate::{
-    Backend, BufferDescriptor, DeviceKind, DeviceOptions, HardwareCapabilities, HardwareInfo,
-    OpenError, ResourceCreateError, ResourceLease, TextureDescriptor, Validation,
+    Backend, BufferDescriptor, BufferUploadStage, DeviceKind, DeviceOptions, HardwareCapabilities,
+    HardwareInfo, OpenError, ResourceCreateError, ResourceLease, TextureDescriptor, Validation,
 };
 use fluxel_rendergraph::{
     BufferCopyRegion, BufferUsage, BufferUsageKind, CompletionFailure, CompletionStatus,
@@ -327,6 +327,7 @@ enum NativeSubmission {
         command_buffer: Option<wgpu_hal::dx12::CommandBuffer>,
         fence: Option<wgpu_hal::dx12::Fence>,
         leases: Vec<ResourceLease>,
+        staging_buffers: Vec<OwnedBuffer>,
         render_views: Vec<NativeRenderView>,
         failure: Option<CompletionFailure>,
     },
@@ -337,6 +338,7 @@ enum NativeSubmission {
         command_buffer: Option<wgpu_hal::vulkan::CommandBuffer>,
         fence: Option<wgpu_hal::vulkan::Fence>,
         leases: Vec<ResourceLease>,
+        staging_buffers: Vec<OwnedBuffer>,
         render_views: Vec<NativeRenderView>,
         failure: Option<CompletionFailure>,
     },
@@ -738,6 +740,7 @@ impl Drop for NativeSubmission {
                 command_buffer,
                 fence,
                 leases,
+                staging_buffers,
                 render_views,
                 failure,
             } => {
@@ -761,6 +764,7 @@ impl Drop for NativeSubmission {
                 // process lifetime rather than resetting storage still in use.
                 if failure.is_some() {
                     let retained = std::mem::take(leases);
+                    let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
                     std::mem::forget((
                         owner.clone(),
@@ -768,6 +772,7 @@ impl Drop for NativeSubmission {
                         command_buffer,
                         fence,
                         retained,
+                        retained_staging,
                         retained_views,
                     ));
                 } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
@@ -779,6 +784,7 @@ impl Drop for NativeSubmission {
                     destroy_render_views(owner, std::mem::take(render_views));
                 } else {
                     let retained = std::mem::take(leases);
+                    let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
                     std::mem::forget((
                         owner.clone(),
@@ -786,6 +792,7 @@ impl Drop for NativeSubmission {
                         command_buffer,
                         fence,
                         retained,
+                        retained_staging,
                         retained_views,
                     ));
                 }
@@ -797,6 +804,7 @@ impl Drop for NativeSubmission {
                 command_buffer,
                 fence,
                 leases,
+                staging_buffers,
                 render_views,
                 failure,
             } => {
@@ -816,6 +824,7 @@ impl Drop for NativeSubmission {
                 };
                 if failure.is_some() {
                     let retained = std::mem::take(leases);
+                    let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
                     std::mem::forget((
                         owner.clone(),
@@ -823,6 +832,7 @@ impl Drop for NativeSubmission {
                         command_buffer,
                         fence,
                         retained,
+                        retained_staging,
                         retained_views,
                     ));
                 } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
@@ -834,6 +844,7 @@ impl Drop for NativeSubmission {
                     destroy_render_views(owner, std::mem::take(render_views));
                 } else {
                     let retained = std::mem::take(leases);
+                    let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
                     std::mem::forget((
                         owner.clone(),
@@ -841,6 +852,7 @@ impl Drop for NativeSubmission {
                         command_buffer,
                         fence,
                         retained,
+                        retained_staging,
                         retained_views,
                     ));
                 }
@@ -2583,8 +2595,22 @@ pub(super) fn finish_copy_encoder(mut encoder: CopyEncoder) -> Result<CopyComman
 }
 
 pub(super) fn submit_copy(
+    buffer: CopyCommandBuffer,
+    leases: Vec<ResourceLease>,
+) -> Result<NativeCompletion, String> {
+    submit_copy_with_staging(buffer, leases, Vec::new())
+}
+
+/// Submits a copy command while retaining private staging allocations in the
+/// same native submission bundle as the command buffer and target leases.
+///
+/// This is deliberately not a caller-side keepalive: an accepted submission
+/// whose completion becomes unknowable must quarantine every referenced
+/// allocation together.
+fn submit_copy_with_staging(
     mut buffer: CopyCommandBuffer,
     leases: Vec<ResourceLease>,
+    staging_buffers: Vec<OwnedBuffer>,
 ) -> Result<NativeCompletion, String> {
     let finished = buffer.native.take().expect("finished command buffer");
     #[cfg(test)]
@@ -2632,6 +2658,7 @@ pub(super) fn submit_copy(
                     command_buffer: Some(command_buffer),
                     fence: Some(fence),
                     leases,
+                    staging_buffers,
                     render_views,
                     failure: inject_accepted_unknown.then_some(CompletionFailure::DeviceLost),
                 },
@@ -2654,6 +2681,7 @@ pub(super) fn submit_copy(
                             command_buffer: Some(command_buffer),
                             fence: Some(fence),
                             leases,
+                            staging_buffers,
                             render_views,
                             failure: Some(CompletionFailure::DeviceLost),
                         }
@@ -2693,6 +2721,7 @@ pub(super) fn submit_copy(
                     command_buffer: Some(command_buffer),
                     fence: Some(fence),
                     leases,
+                    staging_buffers,
                     render_views,
                     failure: inject_accepted_unknown.then_some(CompletionFailure::DeviceLost),
                 },
@@ -2712,6 +2741,7 @@ pub(super) fn submit_copy(
                             command_buffer: Some(command_buffer),
                             fence: Some(fence),
                             leases,
+                            staging_buffers,
                             render_views,
                             failure: Some(CompletionFailure::DeviceLost),
                         }
@@ -2892,17 +2922,17 @@ pub(super) fn inject_wait_pending_once() {
     TEST_WAIT_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct ValidationLogger;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static VALIDATION_LOGGER: ValidationLogger = ValidationLogger;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static VALIDATION_MESSAGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static VALIDATION_LOGGER_INIT: std::sync::Once = std::sync::Once::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl log::Log for ValidationLogger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
         metadata.level() <= log::Level::Warn
@@ -2918,7 +2948,7 @@ impl log::Log for ValidationLogger {
     fn flush(&self) {}
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn initialize_validation_capture() {
     VALIDATION_LOGGER_INIT.call_once(|| {
         let _ = log::set_logger(&VALIDATION_LOGGER);
@@ -2929,7 +2959,7 @@ pub(super) fn initialize_validation_capture() {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn clear_validation_diagnostics(owner: &Arc<OpenedDevice>) {
     VALIDATION_MESSAGES
         .lock()
@@ -2945,7 +2975,7 @@ pub(super) fn clear_validation_diagnostics(owner: &Arc<OpenedDevice>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
     let mut messages = VALIDATION_MESSAGES
         .lock()
@@ -3034,32 +3064,35 @@ pub(super) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
     messages
 }
 
-#[cfg(test)]
-pub(super) fn upload_buffer_for_test(
+pub(super) fn upload_immutable_buffer(
     owner: &Arc<OpenedDevice>,
     target: &OwnedBuffer,
     target_lease: ResourceLease,
     bytes: &[u8],
-) -> Result<ResourceAccessState, String> {
+) -> Result<NativeCompletion, (BufferUploadStage, String)> {
     let staging = create_staging_buffer(
         owner,
         bytes.len() as u64,
         wgt::BufferUses::MAP_WRITE | wgt::BufferUses::COPY_SRC,
-    )?;
-    with_mapped_write(&staging, bytes)?;
-    let mut encoder = begin_copy_encoder(owner)?;
+    )
+    .map_err(|reason| (BufferUploadStage::Staging, reason))?;
+    with_mapped_write(&staging, bytes).map_err(|reason| (BufferUploadStage::Staging, reason))?;
+    let mut encoder =
+        begin_copy_encoder(owner).map_err(|reason| (BufferUploadStage::Recording, reason))?;
     transition_buffer(
         &mut encoder,
         &staging,
         ResourceAccessState::Undefined,
         ResourceAccessState::CopySource,
-    )?;
+    )
+    .map_err(|reason| (BufferUploadStage::Recording, reason))?;
     transition_buffer(
         &mut encoder,
         target,
         ResourceAccessState::Undefined,
         ResourceAccessState::CopyDestination,
-    )?;
+    )
+    .map_err(|reason| (BufferUploadStage::Recording, reason))?;
     copy_buffer(
         &mut encoder,
         &staging,
@@ -3069,21 +3102,32 @@ pub(super) fn upload_buffer_for_test(
             destination_offset: 0,
             size: bytes.len() as u64,
         },
-    )?;
-    let completion = submit_copy(finish_copy_encoder(encoder)?, vec![target_lease])?;
-    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
-    if status != CompletionStatus::Complete {
-        if matches!(status, CompletionStatus::Failed(_)) {
-            std::mem::forget(staging);
-        }
-        return Err(format!("upload did not complete: {status:?}"));
-    }
-    drop(completion);
-    drop(staging);
-    Ok(ResourceAccessState::CopyDestination)
+    )
+    .map_err(|reason| (BufferUploadStage::Recording, reason))?;
+    let command =
+        finish_copy_encoder(encoder).map_err(|reason| (BufferUploadStage::Recording, reason))?;
+    submit_copy_with_staging(command, vec![target_lease], vec![staging])
+        .map_err(|reason| (BufferUploadStage::SubmitRejected, reason))
 }
 
 #[cfg(test)]
+pub(super) fn upload_buffer_for_test(
+    owner: &Arc<OpenedDevice>,
+    target: &OwnedBuffer,
+    target_lease: ResourceLease,
+    bytes: &[u8],
+) -> Result<ResourceAccessState, String> {
+    let completion = upload_immutable_buffer(owner, target, target_lease, bytes)
+        .map_err(|(_, reason)| reason)?;
+    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
+    if status != CompletionStatus::Complete {
+        return Err(format!("upload did not complete: {status:?}"));
+    }
+    drop(completion);
+    Ok(ResourceAccessState::CopyDestination)
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn readback_buffer_for_test(
     owner: &Arc<OpenedDevice>,
     source: &OwnedBuffer,
@@ -3119,12 +3163,32 @@ pub(super) fn readback_buffer_for_test(
             size,
         },
     )?;
+    // The test observer is not allowed to leave the physical resource in a
+    // state different from the `UploadedBuffer` fact it borrowed. Restore the
+    // exact incoming state in the same ordered submission after the copy.
+    transition_buffer(
+        &mut encoder,
+        source,
+        ResourceAccessState::CopySource,
+        incoming_state,
+    )?;
     let completion = submit_copy(finish_copy_encoder(encoder)?, vec![source_lease])?;
-    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
-    if status != CompletionStatus::Complete {
-        if matches!(status, CompletionStatus::Failed(_)) {
+    let status = match wait_completion(&completion, core::time::Duration::from_secs(10)) {
+        Ok(status) => status,
+        Err(error) => {
+            // The observer cannot prove whether the accepted copy still uses
+            // staging. Quarantine it for process lifetime rather than violate
+            // the HAL resource-lifetime contract.
             std::mem::forget(staging);
+            let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
+            return Err(error);
         }
+    };
+    if status != CompletionStatus::Complete {
+        // Pending and failed/accepted-unknown are both unproven retirement
+        // states. This test-only path safely quarantines staging.
+        std::mem::forget(staging);
+        let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
         return Err(format!("readback did not complete: {status:?}"));
     }
     drop(completion);
@@ -3405,14 +3469,13 @@ fn clear_buffer(encoder: &mut CopyEncoder, buffer: &OwnedBuffer, size: u64) -> R
     Ok(())
 }
 
-#[cfg(test)]
 fn create_staging_buffer(
     owner: &Arc<OpenedDevice>,
     size: u64,
     usage: wgt::BufferUses,
 ) -> Result<OwnedBuffer, String> {
     let desc = wgpu_hal::BufferDescriptor {
-        label: Some("fluxel test staging"),
+        label: Some("fluxel immutable upload staging"),
         size,
         usage,
         memory_flags: wgpu_hal::MemoryFlags::PREFER_COHERENT,
@@ -3420,12 +3483,13 @@ fn create_staging_buffer(
     let native = match &owner.native {
         #[cfg(feature = "dx12")]
         NativeDevice::Dx12 { device, .. } => NativeBuffer::Dx12(
-            // SAFETY: non-zero in-bounds fixture size and valid staging flags.
+            // SAFETY: caller validates a non-zero bounded upload size and uses
+            // the fixed map-write/copy-source staging recipe.
             unsafe { device.create_buffer(&desc) }.map_err(|e| e.to_string())?,
         ),
         #[cfg(feature = "vulkan")]
         NativeDevice::Vulkan { device, .. } => NativeBuffer::Vulkan(
-            // SAFETY: non-zero in-bounds fixture size and valid staging flags.
+            // SAFETY: same validated size and fixed staging recipe as DX12.
             unsafe { device.create_buffer(&desc) }.map_err(|e| e.to_string())?,
         ),
     };
@@ -3436,7 +3500,6 @@ fn create_staging_buffer(
     })
 }
 
-#[cfg(test)]
 fn with_mapped_write(buffer: &OwnedBuffer, bytes: &[u8]) -> Result<(), String> {
     let range = 0..bytes.len() as u64;
     match (
@@ -3470,7 +3533,7 @@ fn with_mapped_write(buffer: &OwnedBuffer, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn with_mapped_read(buffer: &OwnedBuffer, size: u64) -> Result<Vec<u8>, String> {
     let range = 0..size;
     let mut result = vec![0; size as usize];

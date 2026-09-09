@@ -1,12 +1,13 @@
 # Fluxel Renderer design
 
-**Status: 0.1.0 headless domain baseline**
+**Status: 0.2.0 GPU-ready indexed-mesh upload snapshot**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
-current release establishes that ownership boundary with `Camera`,
-`Geometry`, `Mesh`, `BasicMaterial`, and `DrawList`; it does not yet
-perform the translation or execute GPU work.
+0.1 established that ownership boundary with `Camera`, `Geometry`, `Mesh`,
+`BasicMaterial`, and `DrawList`. The opt-in 0.2.0 slice adds only immutable
+indexed-geometry upload and readiness publication; it still does not lower a
+draw list or execute renderer draw work.
 
 ## Responsibility split
 
@@ -18,7 +19,7 @@ fluxel-renderer       Camera, mesh/material inputs, draw-list policy
         |
         +--> fluxel-rendergraph   per-frame access and execution planning
         |
-        +--> fluxel-rhi           native device/resources/commands (future)
+        +--> fluxel-rhi           immutable upload + native resources/commands
 
 fluxel-assets         persistent identity, loading, cache, lifetime
 ```
@@ -59,6 +60,15 @@ requirements are known. The first real shader API must be driven by the
 Compute/Raster readback slices and expose only facts the renderer needs.
 
 ## Future asset and frame coordination
+
+0.2.0 makes the first part concrete. `IndexedMeshUpload` owns two non-blocking
+RHI operations for tightly packed position `f32x3` and index `u32` buffers. A
+snapshot generation becomes Ready only when both completions succeed. If the
+first submission was accepted and the second cannot start, the failed owning
+operation still retains and retires the first; a partial generation is never
+published. The cloneable snapshot exposes generation and element counts to the
+application, while buffers, leases, and their reported `CopyDestination` state
+remain private for the next lowering slice.
 
 Four ownership classes stay distinct:
 

@@ -6,7 +6,7 @@ Its fixed-artifact Raster, Compute, and Copy backend executes the same compiled
 RenderGraph plan on both APIs, including semantic transition lowering, one
 queue submission, completion, and retirement.
 
-It is deliberately a narrow 0.1.4 milestone, not a general graphics API.
+It is deliberately a narrow native boundary, not a general graphics API.
 `CopyBackend` implements only Copy commands; the distinct `ComputeBackend`
 adds only closed `ComputeKernel` artifacts and their single RW storage-buffer
 binding recipe. `RasterBackend` adds only the fixed R01/R02 raster artifacts
@@ -14,6 +14,13 @@ and the closed X01 texture-pack compute recipe needed for one
 Raster→Compute→Copy chain. It does **not** expose general mapping/readback,
 acquire or present a surface, a general shader/pipeline API, renderer lowering,
 multiple queues, or transient aliasing.
+
+`Device::upload_immutable_buffer` is the one production upload primitive. It
+atomically creates a device-local destination and returns an owning pending
+operation. Only proven completion can yield `UploadedBuffer`; accepted-unknown
+work retains its target, staging allocation, command objects, and device rather
+than publishing guessed contents or state. The finalized incoming state is
+exactly `CopyDestination`.
 
 ## Installation
 
@@ -41,6 +48,10 @@ features = ["dx12"]
 | --- | --- |
 | `dx12` | Compile Direct3D 12 device bootstrap. |
 | `vulkan` | Compile Vulkan device bootstrap. |
+
+The non-default `test-support` feature is reserved for workspace conformance
+fixtures. Its doc-hidden exact-state readback and diagnostics capture are not a
+production mapping/readback API.
 
 Both features are enabled by default. A build with a requested backend omitted
 returns `OpenError::BackendDisabled`; a non-Windows build returns

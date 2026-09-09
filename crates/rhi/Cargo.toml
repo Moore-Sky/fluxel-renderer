@@ -15,6 +15,9 @@ fluxel-rendergraph = { path = "../rendergraph", version = "0.1.4" }
 default = ["dx12", "vulkan"]
 dx12 = ["wgpu-hal/dx12", "dep:windows"]
 vulkan = ["wgpu-hal/vulkan", "dep:ash"]
+# Enables doc-hidden native conformance observation helpers for sibling-crate
+# hardware fixtures. It does not expose mapping, command, or HAL APIs.
+test-support = []
 
 [target.'cfg(windows)'.dependencies]
 wgpu-hal = { version = "=30.0.1", default-features = false }

@@ -4,7 +4,8 @@
 //! device, owns buffers and 2D textures, and executes deliberately fixed Copy,
 //! Compute, and Raster subsets of a portable RenderGraph plan through barriers,
 //! one submission, completion, and lease-backed retirement. Surfaces and
-//! presentation remain outside this milestone.
+//! presentation remain outside this milestone. A narrow immutable-buffer
+//! upload operation retains staging and destination storage through completion.
 
 #![deny(missing_docs)]
 
@@ -155,6 +156,8 @@ impl Device {
     /// exposes no native handles. Copy submission and fixed-artifact compute
     /// execution are available through [`CopyBackend`] and [`ComputeBackend`].
     pub fn open(backend: Backend, options: DeviceOptions) -> Result<Self, OpenError> {
+        #[cfg(all(windows, feature = "test-support"))]
+        imp::initialize_validation_capture();
         let opened = imp::open(backend, options)?;
         Ok(Self {
             hardware: opened.hardware.clone(),
@@ -460,14 +463,97 @@ mod tests {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 mod imp;
 
-#[cfg(not(windows))]
+/// Doc-hidden conformance observation helpers for workspace hardware fixtures.
+///
+/// This module is non-default and deliberately exposes neither host mapping,
+/// command recording, nor native handles. Production callers must not use it
+/// as a general readback API.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    use crate::{BufferUploadError, BufferUploadStage, Device, UploadedBuffer};
+
+    /// Clears diagnostics collected after `Device::open` enabled capture.
+    pub fn clear_validation_diagnostics(device: &Device) {
+        #[cfg(windows)]
+        crate::imp::clear_validation_diagnostics(&device.inner);
+        #[cfg(not(windows))]
+        let _ = device;
+    }
+
+    /// Returns validation warnings and errors collected for `device`.
+    #[must_use]
+    pub fn validation_diagnostics(device: &Device) -> Vec<String> {
+        #[cfg(windows)]
+        {
+            crate::imp::validation_diagnostics(&device.inner)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = device;
+            Vec::new()
+        }
+    }
+
+    /// Reads a finalized immutable upload using its exact published state.
+    ///
+    /// The helper is only for CPU-oracle hardware fixtures. It consumes the
+    /// upload's `CopyDestination` state as the true incoming state before the
+    /// private readback transition, so it cannot repair a wrong upload state.
+    pub fn readback_uploaded_buffer(
+        device: &Device,
+        uploaded: &UploadedBuffer,
+    ) -> Result<Vec<u8>, BufferUploadError> {
+        if uploaded.buffer().device_identity() != device.identity() {
+            return Err(BufferUploadError::ForeignDevice);
+        }
+        if !uploaded
+            .buffer()
+            .allowed_usage()
+            .contains(fluxel_rendergraph::BufferUsageKind::CopySource)
+        {
+            return Err(BufferUploadError::InvalidRequest(
+                crate::InvalidBufferUploadReason::CopySourceUsageRequired,
+            ));
+        }
+        #[cfg(windows)]
+        {
+            crate::imp::readback_buffer_for_test(
+                &device.inner,
+                uploaded.buffer().native(),
+                uploaded.lease().into(),
+                uploaded.outgoing_state(),
+                uploaded.buffer().descriptor().buffer.size,
+            )
+            .map_err(|reason| BufferUploadError::Native {
+                backend: device.hardware().backend,
+                stage: BufferUploadStage::Completion,
+                reason,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = uploaded;
+            Err(BufferUploadError::Native {
+                backend: device.hardware().backend,
+                stage: BufferUploadStage::Completion,
+                reason: "native readback is only supported on Windows".into(),
+            })
+        }
+    }
+}
+
+#[cfg(any(
+    not(windows),
+    all(windows, not(any(feature = "dx12", feature = "vulkan")))
+))]
 mod imp {
     use super::{
-        Backend, BufferDescriptor, DeviceOptions, HardwareCapabilities, HardwareInfo, OpenError,
-        ResourceCreateError, ResourceLease, TextureDescriptor,
+        Backend, BufferDescriptor, BufferUploadStage, DeviceOptions, HardwareCapabilities,
+        HardwareInfo, OpenError, ResourceCreateError, ResourceLease, TextureDescriptor,
     };
     use fluxel_rendergraph::{
         BufferCopyRegion, BufferUsage, CompletionFailure, CompletionStatus, ResourceAccessState,
@@ -489,7 +575,14 @@ mod imp {
     #[derive(Clone)]
     pub(super) struct NativeCompletion;
     pub(super) fn open(backend: Backend, _: DeviceOptions) -> Result<OpenedDevice, OpenError> {
-        Err(OpenError::PlatformUnsupported { backend })
+        #[cfg(windows)]
+        {
+            Err(OpenError::BackendDisabled { backend })
+        }
+        #[cfg(not(windows))]
+        {
+            Err(OpenError::PlatformUnsupported { backend })
+        }
     }
     pub(super) fn create_buffer(
         owner: &Arc<OpenedDevice>,
@@ -508,6 +601,35 @@ mod imp {
             backend: owner.hardware.backend,
             reason: "native resources are only supported on Windows".into(),
         })
+    }
+    pub(super) fn upload_immutable_buffer(
+        _: &Arc<OpenedDevice>,
+        _: &OwnedBuffer,
+        _: ResourceLease,
+        _: &[u8],
+    ) -> Result<NativeCompletion, (BufferUploadStage, String)> {
+        Err((
+            BufferUploadStage::Staging,
+            "native uploads are unavailable without a Windows backend".into(),
+        ))
+    }
+    #[cfg(feature = "test-support")]
+    pub(super) fn initialize_validation_capture() {}
+    #[cfg(feature = "test-support")]
+    pub(super) fn clear_validation_diagnostics(_: &Arc<OpenedDevice>) {}
+    #[cfg(feature = "test-support")]
+    pub(super) fn validation_diagnostics(_: &Arc<OpenedDevice>) -> Vec<String> {
+        Vec::new()
+    }
+    #[cfg(feature = "test-support")]
+    pub(super) fn readback_buffer_for_test(
+        _: &Arc<OpenedDevice>,
+        _: &OwnedBuffer,
+        _: ResourceLease,
+        _: ResourceAccessState,
+        _: u64,
+    ) -> Result<Vec<u8>, String> {
+        Err("native readback is unavailable without a Windows backend".into())
     }
     pub(super) fn begin_copy_encoder(_: &Arc<OpenedDevice>) -> Result<CopyEncoder, String> {
         Err("native execution is only supported on Windows".into())

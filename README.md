@@ -1,6 +1,6 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is a `0.1.4` workspace for Fluxel's typed render graph,
+`fluxel-renderer` is a `0.2.0` workspace milestone for Fluxel's typed render graph,
 native RHI boundary, and renderer layer. It starts an independent release line
 from a pre-migration source snapshot and does not inherit prior version numbers
 or Git history.
@@ -13,11 +13,11 @@ The workspace is organised around three crates:
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | Headless DX12/Vulkan ownership plus fixed Raster, Compute, and Copy RenderGraph execution. |
-| `fluxel-renderer` | The renderer-facing layer: scene/domain data, draw-list construction, and its internal shader boundary. |
+| `fluxel-renderer` | Scene/domain data, draw-list construction, and opt-in immutable indexed-mesh GPU upload snapshots. |
 
-All three packages are present at the current baseline. The renderer crate
-currently stops at its headless domain model; it does not yet lower a
-`DrawList` into render-graph or native GPU work.
+The renderer still does not lower a `DrawList` or issue draw work. Its optional
+`gpu-upload` slice only publishes a mesh generation after both native uploads
+complete; the default build remains the portable headless domain model.
 
 Package READMEs are the detailed user documentation published with each crate;
 this file is only the workspace entry point.
@@ -46,7 +46,7 @@ real-GPU conformance remains an explicit local release gate.
 
 ## Roadmap
 
-The `0.1.4` implementation boundary adds a deliberately fixed
+The frozen `0.1.4` implementation boundary adds a deliberately fixed
 Raster→Compute→Copy slice to graph planning, CPU protocol validation, owned
 DX12/Vulkan resources, Copy, and fixed Compute. `RasterBackend` executes the
 same compiled plan on both APIs for R01 clear/triangle, R02 indexed
@@ -58,13 +58,19 @@ alive through terminal completion, with structured failures and private unsafe
 HAL boundaries. The 0.1.4 release fixtures pass on an AMD Radeon 780M through
 both DX12 and Vulkan with Required validation and exact CPU oracles.
 
-This is not a renderer, surface/present path, or general shader/pipeline API.
+The `0.2.0` renderer slice adds exact little-endian `f32x3`/`u32` serialization,
+non-blocking immutable buffer upload, and an opaque indexed-mesh snapshot.
+Pending or failed submissions never publish a ready generation; native target
+and staging storage remain retained through terminal completion. The uploaded
+state is reported as `CopyDestination` for a later graph import rather than
+guessed as a draw state. This is not draw lowering, texture/PBR, surface/present,
+or a general shader/pipeline API.
 
 | Component | Next milestones |
 | --- | --- |
 | RHI / RenderGraph integration `0.1` | Complete: Windows DX12/Vulkan owned resources and fixed Copy → Compute → Raster→Compute→Copy exact-oracle execution |
 | Renderer / Shader / Assets `0.1` | Headless Camera/Mesh/Geometry/BasicMaterial/DrawList → minimal shader compile/reflection and resource lifetime/cache/handles |
-| Renderer `0.2` | Texture, indexed mesh, basic PBR, and one real static scene |
+| Renderer `0.2` | In progress: GPU-ready indexed-mesh snapshot → fixed unlit draw → texture/basic PBR → one real static scene |
 | RenderGraph `0.2` | WebGPU and WebGL2 compatibility adapters |
 | Renderer `0.3` / Assets `0.2` / Shader `0.2` | GLTF, loading/reuse, variants/layout metadata, caches, culling, batching |
 | RenderGraph `0.3` / Renderer `0.4` | Surface/Present/resize/lost, then a visible Windows/Web renderer |

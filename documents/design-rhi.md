@@ -1,6 +1,6 @@
 # Fluxel RHI Design
 
-**Status: 0.1.4 fixed Raster + Compute + Copy correctness vertical slices**
+**Status: 0.1.4 fixed execution, plus 0.2.0 immutable buffer upload ownership**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
 not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
@@ -9,6 +9,14 @@ a fixed Raster + Compute + Copy portion of `ExecutionBackend`: semantic
 transition lowering, recording, one submission, completion, retirement, and
 crate-private exact test readback. It does not implement surfaces,
 presentation, renderer lowering, or a general shader/pipeline API.
+
+The 0.2.0 addition is a single immutable buffer-upload boundary for renderer
+snapshots. It does not generalize mapping or command recording: an upload owns
+its newly created DeviceOnly destination, private staging allocation, fixed
+Copy command, completion, and leases. Only a proven Complete result publishes
+an `UploadedBuffer` with `CopyDestination` state. Pending, timeout, failure, and
+accepted-unknown paths cannot expose initialized contents or release referenced
+storage early.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that

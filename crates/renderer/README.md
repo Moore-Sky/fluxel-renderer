@@ -1,13 +1,28 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is the headless renderer domain layer of the Fluxel
-workspace. It currently defines the user-facing scene inputs that a future
-renderer will lower into a render graph: `Camera`, `Geometry`, `Mesh`,
-`BasicMaterial`, and an insertion-ordered `DrawList`.
+`fluxel-renderer` defines the user-facing scene inputs `Camera`, `Geometry`,
+`Mesh`, `BasicMaterial`, and insertion-ordered `DrawList`. Its optional
+`gpu-upload` feature also turns validated indexed geometry into an opaque,
+immutable GPU-ready snapshot without blocking the frame-building thread.
 
-It is intentionally not a GPU renderer yet: it does not allocate native
-resources, compile or reflect shader source, record commands, submit work, or
-present pixels.
+It is intentionally not a complete GPU renderer: it does not lower draw lists,
+compile general material shaders, draw meshes, or present pixels.
+
+## Optional GPU upload
+
+```toml
+[dependencies.fluxel-renderer]
+git = "https://github.com/Moore-Sky/fluxel-renderer"
+tag = "v0.2.0"
+features = ["gpu-upload"]
+```
+
+`IndexedMeshUpload::begin` serializes positions as tightly packed
+little-endian `f32x3` and indices as little-endian `u32`. Polling is
+non-blocking. A cloneable `IndexedMeshSnapshot` appears only after both native
+submissions complete; failure and partial acceptance never expose a half-ready
+generation. Buffers, resource states, mapping, and native handles remain
+renderer-private.
 
 ## Use today
 
@@ -37,10 +52,10 @@ inspectable submission input without adding sorting policy prematurely.
 
 ## Performance and compatibility
 
-The crate has no dependencies, no `unsafe`, and no native API calls. Its work
-is ordinary CPU-side allocation for caller-provided geometry and draw-list
-items. It therefore builds wherever Rust 1.87 supports the workspace; it makes
-no GPU-performance or platform-rendering claim.
+With default features the crate has no dependencies, no `unsafe`, and no native
+API calls, and builds wherever Rust 1.87 supports the workspace. `gpu-upload`
+adds the safe `fluxel-rhi` boundary; native execution is currently implemented
+on Windows DX12/Vulkan. The renderer crate itself contains no `unsafe`.
 
 The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend

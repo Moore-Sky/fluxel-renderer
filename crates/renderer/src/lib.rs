@@ -1,14 +1,22 @@
 //! Headless renderer domain types for Fluxel.
 //!
 //! This crate models cameras, geometry, meshes, basic materials, and ordered
-//! draw lists. It deliberately does not allocate GPU resources, compile shader
-//! source, record commands, or render pixels yet.
+//! draw lists. Its opt-in `gpu-upload` feature publishes immutable indexed-mesh
+//! snapshots after native completion; it does not lower draws or render pixels.
 
 #![deny(missing_docs)]
 
 mod shader;
+#[cfg(feature = "gpu-upload")]
+mod upload;
 
 use core::fmt;
+
+#[cfg(feature = "gpu-upload")]
+pub use upload::{
+    IndexedMeshSnapshot, IndexedMeshUpload, IndexedMeshUploadFailure, IndexedMeshUploadStartError,
+    IndexedMeshUploadStatus,
+};
 
 /// A camera described by view and projection matrices.
 #[derive(Clone, Debug, PartialEq)]

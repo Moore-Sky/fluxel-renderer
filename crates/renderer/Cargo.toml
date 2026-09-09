@@ -1,13 +1,24 @@
 [package]
 name = "fluxel-renderer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
-description = "Headless renderer domain model for Fluxel"
+description = "Renderer domain model and GPU-ready indexed-mesh snapshots for Fluxel"
 readme = "README.md"
 repository = "https://github.com/Moore-Sky/fluxel-renderer"
 keywords = ["renderer", "graphics", "headless"]
 categories = ["rendering", "graphics", "game-development"]
 
+[features]
+default = []
+# Opt-in native upload coordination. The default crate remains the headless
+# domain model and does not link a graphics backend.
+gpu-upload = ["dep:fluxel-rendergraph", "dep:fluxel-rhi"]
+
 [dependencies]
+fluxel-rendergraph = { path = "../rendergraph", version = "0.1.4", optional = true }
+fluxel-rhi = { path = "../rhi", version = "0.1.4", optional = true }
+
+[dev-dependencies]
+fluxel-rhi = { path = "../rhi", version = "0.1.4", default-features = false, features = ["dx12", "vulkan", "test-support"] }
