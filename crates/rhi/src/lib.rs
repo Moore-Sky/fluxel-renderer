@@ -498,6 +498,35 @@ pub mod test_support {
         }
     }
 
+    /// Makes the next native submission fail before queue acceptance.
+    ///
+    /// This conformance-only hook is one-shot and has no production build
+    /// surface. It exercises the path which must release reservations because
+    /// native work was never accepted.
+    pub fn inject_submit_rejected_once() {
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+        crate::imp::inject_submit_rejected_once();
+    }
+
+    /// Makes the next native submission report accepted-but-unknown failure.
+    ///
+    /// This conformance-only hook is one-shot and exercises quarantine of all
+    /// submitted leases: callers must not infer a final resource state.
+    pub fn inject_submit_accepted_unknown_once() {
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+        crate::imp::inject_submit_accepted_unknown_once();
+    }
+
+    /// Makes the next nonblocking native completion observation report `Pending`.
+    ///
+    /// This conformance-only hook is one-shot and is consumed by the same
+    /// completion-status path used by renderer polling. It never alters a
+    /// later blocking readback wait.
+    pub fn inject_completion_pending_once() {
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+        crate::imp::inject_completion_pending_once();
+    }
+
     /// Reads a finalized immutable upload using its exact published state.
     ///
     /// The helper is only for CPU-oracle hardware fixtures. It consumes the
@@ -631,6 +660,22 @@ mod imp {
     ) -> Result<Vec<u8>, String> {
         Err("native readback is unavailable without a Windows backend".into())
     }
+    #[cfg(feature = "test-support")]
+    pub(super) struct TextureReadback {
+        pub(super) tight: Vec<u8>,
+        pub(super) padded: Vec<u8>,
+        pub(super) bytes_per_row: u32,
+    }
+    #[cfg(feature = "test-support")]
+    pub(super) fn readback_texture_for_test(
+        _: &Arc<OpenedDevice>,
+        _: &OwnedTexture,
+        _: ResourceLease,
+        _: TextureDesc,
+        _: ResourceAccessState,
+    ) -> Result<TextureReadback, String> {
+        Err("native texture readback is unavailable without a Windows backend".into())
+    }
     pub(super) fn begin_copy_encoder(_: &Arc<OpenedDevice>) -> Result<CopyEncoder, String> {
         Err("native execution is only supported on Windows".into())
     }
@@ -665,7 +710,7 @@ mod imp {
         _: &str,
         _: &str,
         _: &str,
-        _: bool,
+        _: crate::RasterKernel,
     ) -> Result<NativeRasterPipeline, String> {
         Err("native raster is only supported on Windows".into())
     }
@@ -736,6 +781,7 @@ mod imp {
         _: &OwnedBuffer,
         _: u64,
         _: u64,
+        _: crate::RasterKernel,
     ) -> Result<(), String> {
         Err("native raster is only supported on Windows".into())
     }
@@ -744,6 +790,7 @@ mod imp {
         _: &OwnedBuffer,
         _: u64,
         _: u64,
+        _: fluxel_rendergraph::IndexFormat,
     ) -> Result<(), String> {
         Err("native raster is only supported on Windows".into())
     }

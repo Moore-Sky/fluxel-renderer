@@ -9,8 +9,9 @@ queue submission, completion, and retirement.
 It is deliberately a narrow native boundary, not a general graphics API.
 `CopyBackend` implements only Copy commands; the distinct `ComputeBackend`
 adds only closed `ComputeKernel` artifacts and their single RW storage-buffer
-binding recipe. `RasterBackend` adds only the fixed R01/R02 raster artifacts
-and the closed X01 texture-pack compute recipe needed for one
+binding recipe. `RasterBackend` adds only the fixed R01/R02 raster artifacts,
+the closed U02 renderer snapshot recipe, and the closed X01 texture-pack
+compute recipe needed for one
 Raster→Compute→Copy chain. It does **not** expose general mapping/readback,
 acquire or present a surface, a general shader/pipeline API, renderer lowering,
 multiple queues, or transient aliasing.
@@ -27,7 +28,7 @@ exactly `CopyDestination`.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.4"
+tag = "v0.2.1"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -39,7 +40,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.4"
+tag = "v0.2.1"
 default-features = false
 features = ["dx12"]
 ```
@@ -101,7 +102,9 @@ accepted submissions retain every referenced lease until retirement is safe.
 `RasterBackend` is intentionally not a general draw interface. It supports a
 single-sampled, single-mip/layer `Rgba8Unorm` color target, fixed vertex/index
 recipes, exact load/store combinations, and R01 clear/triangle plus R02
-indexed viewport/scissor fixtures. X01 samples that complete color texture in
+indexed viewport/scissor fixtures. U02 adds a separate renderer snapshot recipe
+with tightly packed `float32x3` positions, `uint32` indices, and a fixed opaque
+fragment color; it does not make those choices configurable. X01 samples that complete color texture in
 a closed compute artifact, packs row-major RGBA8 pixels into an RW storage
 buffer, and copies the result to an export. Texture-row padding is stripped for
 the exact CPU oracle. Readback consumes the exported outgoing state and lease

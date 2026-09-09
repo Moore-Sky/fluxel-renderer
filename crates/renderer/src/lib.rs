@@ -2,16 +2,23 @@
 //!
 //! This crate models cameras, geometry, meshes, basic materials, and ordered
 //! draw lists. Its opt-in `gpu-upload` feature publishes immutable indexed-mesh
-//! snapshots after native completion; it does not lower draws or render pixels.
+//! snapshots after native completion. Its opt-in fixed-frame slice lowers one
+//! closed indexed draw without exposing native resources.
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "gpu-upload")]
+mod fixed_frame;
 mod shader;
 #[cfg(feature = "gpu-upload")]
 mod upload;
 
 use core::fmt;
 
+#[cfg(feature = "gpu-upload")]
+pub use fixed_frame::{
+    DrawStartError, FixedFrameRenderer, FixedFrameStatus, FixedFrameSubmission, FrameImage,
+};
 #[cfg(feature = "gpu-upload")]
 pub use upload::{
     IndexedMeshSnapshot, IndexedMeshUpload, IndexedMeshUploadFailure, IndexedMeshUploadStartError,

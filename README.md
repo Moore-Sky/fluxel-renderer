@@ -1,6 +1,6 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is a `0.2.0` workspace milestone for Fluxel's typed render graph,
+`fluxel-renderer` is a `0.2.1` workspace milestone for Fluxel's typed render graph,
 native RHI boundary, and renderer layer. It starts an independent release line
 from a pre-migration source snapshot and does not inherit prior version numbers
 or Git history.
@@ -13,11 +13,12 @@ The workspace is organised around three crates:
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | Headless DX12/Vulkan ownership plus fixed Raster, Compute, and Copy RenderGraph execution. |
-| `fluxel-renderer` | Scene/domain data, draw-list construction, and opt-in immutable indexed-mesh GPU upload snapshots. |
+| `fluxel-renderer` | Scene/domain data, immutable indexed-mesh GPU snapshots, and one fixed headless indexed draw. |
 
-The renderer still does not lower a `DrawList` or issue draw work. Its optional
-`gpu-upload` slice only publishes a mesh generation after both native uploads
-complete; the default build remains the portable headless domain model.
+The renderer still does not lower a `DrawList` or general material pipeline.
+Its optional `gpu-upload` slice publishes a mesh generation after both native
+uploads complete and can submit one closed `f32x3/u32` indexed draw to an
+offscreen image. The default build remains the portable headless domain model.
 
 Package READMEs are the detailed user documentation published with each crate;
 this file is only the workspace entry point.
@@ -64,13 +65,18 @@ Pending or failed submissions never publish a ready generation; native target
 and staging storage remain retained through terminal completion. The uploaded
 state is reported as `CopyDestination` for a later graph import rather than
 guessed as a draw state. This is not draw lowering, texture/PBR, surface/present,
-or a general shader/pipeline API.
+or a general shader/pipeline API. The `0.2.1` slice consumes that ready snapshot
+through a renderer-private RenderGraph import, executes a fixed opaque-color
+indexed draw into offscreen `Rgba8Unorm`, and restores both immutable buffers to
+their reported `CopyDestination` state after proven completion. Snapshot clones
+share a single-in-flight gate; an unproven accepted outcome poisons the
+generation instead of guessing its state.
 
 | Component | Next milestones |
 | --- | --- |
 | RHI / RenderGraph integration `0.1` | Complete: Windows DX12/Vulkan owned resources and fixed Copy → Compute → Raster→Compute→Copy exact-oracle execution |
 | Renderer / Shader / Assets `0.1` | Headless Camera/Mesh/Geometry/BasicMaterial/DrawList → minimal shader compile/reflection and resource lifetime/cache/handles |
-| Renderer `0.2` | In progress: GPU-ready indexed-mesh snapshot → fixed unlit draw → texture/basic PBR → one real static scene |
+| Renderer `0.2` | In progress: GPU-ready indexed-mesh snapshot and fixed unlit draw → Camera/material binding → texture/basic PBR → one real static scene |
 | RenderGraph `0.2` | WebGPU and WebGL2 compatibility adapters |
 | Renderer `0.3` / Assets `0.2` / Shader `0.2` | GLTF, loading/reuse, variants/layout metadata, caches, culling, batching |
 | RenderGraph `0.3` / Renderer `0.4` | Surface/Present/resize/lost, then a visible Windows/Web renderer |

@@ -1,6 +1,6 @@
 # Fluxel RHI Design
 
-**Status: 0.1.4 fixed execution, plus 0.2.0 immutable buffer upload ownership**
+**Status: 0.1.4 fixed execution, plus 0.2.1 renderer snapshot support**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
 not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
@@ -17,6 +17,13 @@ Copy command, completion, and leases. Only a proven Complete result publishes
 an `UploadedBuffer` with `CopyDestination` state. Pending, timeout, failure, and
 accepted-unknown paths cannot expose initialized contents or release referenced
 storage early.
+
+The 0.2.1 addition is one more closed Raster artifact for renderer-owned
+snapshot data: slot-zero tightly packed `float32x3` clip-space positions,
+`uint32` indices, triangle-list topology, and a fixed opaque fragment color.
+It does not expose configurable vertex layouts, index formats, shaders, or
+pipeline descriptors. Renderer lowering remains outside the RHI; this artifact
+only gives that lowering a safe native execution target.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that
@@ -123,7 +130,9 @@ Compute artifacts only because X01 needs one real Raster→Compute→Copy chain 
 one encoder and one submission; it does not turn those APIs into a general
 graphics interface. Its raster scope is a single `Rgba8Unorm`, D2,
 single-mip/layer/sample color attachment, fixed vertex/index recipes, and the
-R01 clear/triangle and R02 indexed viewport/scissor fixtures. X01 samples the
+R01 clear/triangle and R02 indexed viewport/scissor fixtures. The U02 renderer
+fixture adds the distinct fixed `float32x3 + uint32` recipe without widening
+either older artifact. X01 samples the
 complete attachment through a closed binding recipe, packs row-major RGBA8
 pixels into an RW storage buffer, then copies it to an exported buffer.
 Raster artifacts, bindings, views, attachment resources, encoder, command

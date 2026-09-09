@@ -21,8 +21,8 @@ use crate::{
 };
 use fluxel_rendergraph::{
     BufferCopyRegion, BufferUsage, BufferUsageKind, CompletionFailure, CompletionStatus,
-    ResourceAccessState, TextureAspect, TextureCopyRegion, TextureDesc, TextureDimension,
-    TextureFormat, TextureRange, TextureUsage, TextureUsageKind,
+    IndexFormat, ResourceAccessState, TextureAspect, TextureCopyRegion, TextureDesc,
+    TextureDimension, TextureFormat, TextureRange, TextureUsage, TextureUsageKind,
 };
 use std::{
     borrow::Cow,
@@ -1122,15 +1122,14 @@ pub(super) fn create_compute_pipeline(
     )))
 }
 
-/// Creates the only graphics shape admitted by 0.1.4: a D2 Rgba8Unorm target
-/// and one `float32x2 + unorm8x4` per-vertex buffer.  Source is parsed and
-/// validated before any unsafe HAL call; callers cannot pass a raw module.
+/// Creates one closed graphics recipe. Source is parsed and validated before
+/// any unsafe HAL call; callers cannot pass a raw module or layout.
 pub(super) fn create_raster_pipeline(
     owner: &Arc<OpenedDevice>,
     source: &str,
     vertex_entry: &str,
     fragment_entry: &str,
-    uses_vertex_buffer: bool,
+    kernel: crate::RasterKernel,
 ) -> Result<NativeRasterPipeline, RasterPipelineCreateError> {
     let module = naga::front::wgsl::Frontend::new()
         .parse(source)
@@ -1145,7 +1144,7 @@ pub(super) fn create_raster_pipeline(
     .map_err(|e| {
         RasterPipelineCreateError::ShaderValidation(format!("WGSL validation failed: {e}"))
     })?;
-    let attributes = [
+    let position_color_attributes = [
         wgt::VertexAttribute {
             format: wgt::VertexFormat::Float32x2,
             offset: 0,
@@ -1157,14 +1156,23 @@ pub(super) fn create_raster_pipeline(
             shader_location: 1,
         },
     ];
-    let buffers = if uses_vertex_buffer {
-        vec![Some(wgpu_hal::VertexBufferLayout {
+    let position_f32x3_attributes = [wgt::VertexAttribute {
+        format: wgt::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    }];
+    let buffers = match kernel {
+        crate::RasterKernel::Triangle => vec![],
+        crate::RasterKernel::IndexedPositionColor => vec![Some(wgpu_hal::VertexBufferLayout {
             array_stride: 12,
             step_mode: wgt::VertexStepMode::Vertex,
-            attributes: &attributes,
-        })]
-    } else {
-        vec![]
+            attributes: &position_color_attributes,
+        })],
+        crate::RasterKernel::IndexedPositionFloat32x3 => vec![Some(wgpu_hal::VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgt::VertexStepMode::Vertex,
+            attributes: &position_f32x3_attributes,
+        })],
     };
     let color_targets = [Some(wgt::ColorTargetState::from(
         wgt::TextureFormat::Rgba8Unorm,
@@ -1936,10 +1944,13 @@ pub(super) fn set_vertex_buffer(
     buffer: &OwnedBuffer,
     offset: u64,
     size: u64,
+    kernel: crate::RasterKernel,
 ) -> Result<(), String> {
     if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
+        || !offset.is_multiple_of(4)
+        || (kernel == crate::RasterKernel::IndexedPositionFloat32x3 && offset != 0)
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
-        || size == 0
+        || size < 12
     {
         return Err("invalid raster vertex buffer range".into());
     }
@@ -1975,14 +1986,20 @@ pub(super) fn set_index_buffer(
     buffer: &OwnedBuffer,
     offset: u64,
     size: u64,
+    format: IndexFormat,
 ) -> Result<(), String> {
+    let alignment = match format {
+        IndexFormat::Uint16 => 2,
+        IndexFormat::Uint32 => 4,
+    };
     if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
-        || !offset.is_multiple_of(2)
-        || !size.is_multiple_of(2)
+        || !offset.is_multiple_of(alignment)
+        || (format == IndexFormat::Uint32 && offset != 0)
+        || !size.is_multiple_of(alignment)
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
         || size == 0
     {
-        return Err("invalid Uint16 raster index buffer range".into());
+        return Err("invalid raster index buffer range".into());
     }
     let size = NonZeroU64::new(size).expect("checked non-zero index range");
     match (
@@ -1991,19 +2008,25 @@ pub(super) fn set_index_buffer(
     ) {
         #[cfg(feature = "dx12")]
         (NativeEncoder::Dx12(encoder), Some(NativeBuffer::Dx12(buffer))) => unsafe {
-            // SAFETY: safe and native checks prove active pass, Uint16 alignment,
+            // SAFETY: safe and native checks prove active pass, recipe-specific alignment,
             // in-bounds non-empty range, same device, and retained lifetime.
             encoder.set_index_buffer(
                 wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
-                wgt::IndexFormat::Uint16,
+                match format {
+                    IndexFormat::Uint16 => wgt::IndexFormat::Uint16,
+                    IndexFormat::Uint32 => wgt::IndexFormat::Uint32,
+                },
             )
         },
         #[cfg(feature = "vulkan")]
         (NativeEncoder::Vulkan(encoder), Some(NativeBuffer::Vulkan(buffer))) => unsafe {
-            // SAFETY: same active-pass, Uint16 range, device, and lifetime proof.
+            // SAFETY: same active-pass, recipe-specific range, device, and lifetime proof.
             encoder.set_index_buffer(
                 wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
-                wgt::IndexFormat::Uint16,
+                match format {
+                    IndexFormat::Uint16 => wgt::IndexFormat::Uint16,
+                    IndexFormat::Uint32 => wgt::IndexFormat::Uint32,
+                },
             )
         },
         _ => return Err("index buffer belongs to another native backend".into()),
@@ -2613,9 +2636,9 @@ fn submit_copy_with_staging(
     staging_buffers: Vec<OwnedBuffer>,
 ) -> Result<NativeCompletion, String> {
     let finished = buffer.native.take().expect("finished command buffer");
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let injected_submit_fault = TEST_SUBMIT_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let injected_submit_fault = 0;
     if injected_submit_fault == 1 {
         reset_finished(finished);
@@ -2764,6 +2787,10 @@ fn completion_failure(error: &wgpu_hal::DeviceError) -> CompletionFailure {
 }
 
 pub(super) fn completion_status(completion: &NativeCompletion) -> Result<CompletionStatus, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    if TEST_COMPLETION_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(CompletionStatus::Pending);
+    }
     let mut submission = completion
         .0
         .lock()
@@ -2833,10 +2860,6 @@ pub(super) fn wait_completion(
     completion: &NativeCompletion,
     timeout: core::time::Duration,
 ) -> Result<CompletionStatus, String> {
-    #[cfg(test)]
-    if TEST_WAIT_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        return Ok(CompletionStatus::Pending);
-    }
     let mut submission = completion
         .0
         .lock()
@@ -2902,24 +2925,25 @@ pub(super) fn wait_completion(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_SUBMIT_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-#[cfg(test)]
-static TEST_WAIT_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(any(test, feature = "test-support"))]
+static TEST_COMPLETION_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn inject_submit_rejected_once() {
     TEST_SUBMIT_FAULT.store(1, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn inject_submit_accepted_unknown_once() {
     TEST_SUBMIT_FAULT.store(2, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(test)]
-pub(super) fn inject_wait_pending_once() {
-    TEST_WAIT_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn inject_completion_pending_once() {
+    TEST_COMPLETION_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3197,7 +3221,7 @@ pub(super) fn readback_buffer_for_test(
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) struct TextureReadback {
     pub(super) tight: Vec<u8>,
     pub(super) padded: Vec<u8>,
@@ -3257,11 +3281,17 @@ pub(super) fn upload_texture_for_test(
         descriptor.extent.height,
     )?;
     let completion = submit_copy(finish_copy_encoder(encoder)?, vec![target_lease])?;
-    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
-    if status != CompletionStatus::Complete {
-        if matches!(status, CompletionStatus::Failed(_)) {
+    let status = match wait_completion(&completion, core::time::Duration::from_secs(10)) {
+        Ok(status) => status,
+        Err(error) => {
             std::mem::forget(staging);
+            let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
+            return Err(error);
         }
+    };
+    if status != CompletionStatus::Complete {
+        std::mem::forget(staging);
+        let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
         return Err(format!("texture upload did not complete: {status:?}"));
     }
     drop(completion);
@@ -3269,7 +3299,7 @@ pub(super) fn upload_texture_for_test(
     Ok(ResourceAccessState::CopyDestination)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn readback_texture_for_test(
     owner: &Arc<OpenedDevice>,
     source: &OwnedTexture,
@@ -3319,12 +3349,28 @@ pub(super) fn readback_texture_for_test(
         descriptor.extent.width,
         descriptor.extent.height,
     )?;
+    // Preserve the graph export's reported state after observation so every
+    // surviving alias remains truthful for a later renderer use.
+    transition_texture(
+        &mut encoder,
+        source,
+        descriptor,
+        TextureRange::Whole,
+        ResourceAccessState::CopySource,
+        incoming_state,
+    )?;
     let completion = submit_copy(finish_copy_encoder(encoder)?, vec![source_lease])?;
-    let status = wait_completion(&completion, core::time::Duration::from_secs(10))?;
-    if status != CompletionStatus::Complete {
-        if matches!(status, CompletionStatus::Failed(_)) {
+    let status = match wait_completion(&completion, core::time::Duration::from_secs(10)) {
+        Ok(status) => status,
+        Err(error) => {
             std::mem::forget(staging);
+            let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
+            return Err(error);
         }
+    };
+    if status != CompletionStatus::Complete {
+        std::mem::forget(staging);
+        let _quarantined_completion = std::mem::ManuallyDrop::new(completion);
         return Err(format!("texture readback did not complete: {status:?}"));
     }
     drop(completion);
@@ -3392,7 +3438,7 @@ fn copy_buffer_to_texture(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn copy_texture_to_buffer(
     encoder: &mut CopyEncoder,
     source: &OwnedTexture,
@@ -3450,7 +3496,7 @@ fn copy_texture_to_buffer(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn clear_buffer(encoder: &mut CopyEncoder, buffer: &OwnedBuffer, size: u64) -> Result<(), String> {
     match (
         encoder.native.as_mut().expect("recording encoder"),

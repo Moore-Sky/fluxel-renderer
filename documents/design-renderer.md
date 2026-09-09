@@ -1,13 +1,14 @@
 # Fluxel Renderer design
 
-**Status: 0.2.0 GPU-ready indexed-mesh upload snapshot**
+**Status: 0.2.1 fixed headless indexed snapshot draw**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
 0.1 established that ownership boundary with `Camera`, `Geometry`, `Mesh`,
-`BasicMaterial`, and `DrawList`. The opt-in 0.2.0 slice adds only immutable
-indexed-geometry upload and readiness publication; it still does not lower a
-draw list or execute renderer draw work.
+`BasicMaterial`, and `DrawList`. The opt-in 0.2.0 slice adds immutable
+indexed-geometry upload and readiness publication. The 0.2.1 slice consumes one
+ready snapshot in a closed headless indexed draw; it still does not lower a
+`DrawList` or expose a general renderer pipeline.
 
 ## Responsibility split
 
@@ -32,10 +33,10 @@ persistent identity and loading policy must not become frame-graph state.
 
 ## Why the first model is headless
 
-Native Copy, Compute, and Raster conformance are still scheduled work. A
-windowed façade built before those primitives would either hide unimplemented
-behavior or force scene policy into the RHI. The 0.1.0 renderer therefore
-models only inputs that can be tested without pretending to render pixels.
+Native Copy, Compute, and Raster conformance was established by the 0.1.x fixed
+execution slices before renderer draw work began. A windowed façade before
+Surface/Present would still hide unimplemented behavior or force scene policy
+into the RHI, so the current renderer remains headless.
 
 `Geometry` owns CPU vertex positions and optional validated indices.
 `Mesh` pairs geometry with a material. `DrawList` borrows meshes and a
@@ -96,6 +97,28 @@ known incoming state when binding an import and commits the exported state only
 after accepted submission. A failed submit must not publish a guessed state.
 Concurrent frames need queue ordering or an explicit GPU dependency; one global
 `last_state` value cannot safely represent overlapping use.
+
+## Fixed headless frame
+
+0.2.1 adds one renderer-owned coordinator rather than general draw-list
+lowering. `FixedFrameRenderer` accepts a ready `IndexedMeshSnapshot`, imports
+its tightly packed `f32x3` positions and `u32` indices using each upload's
+reported `CopyDestination` state, and declares one offscreen `Rgba8Unorm`
+Raster pass with a fixed opaque fragment color. The matching RHI artifact is a
+closed recipe; callers cannot choose arbitrary shaders, layouts, bindings, or
+pipeline state.
+
+The graph exports both immutable buffers back in `CopyDestination` after the
+draw and exports the target in `CopySource`. Clones of one snapshot generation
+share a single-in-flight reservation. A pre-submit rejection releases that
+reservation, proven completion permits reuse, and an accepted failure or early
+operation drop poisons the generation because its native state is not known.
+Polling never waits for the host or uses queue-idle as an ownership mechanism.
+Only opaque image extent/format/ownership becomes public after completion.
+
+This is evidence for snapshot-to-plan-to-native correctness, not a claim that
+Camera, BasicMaterial, transforms, textures, depth, blending, batching,
+Surface, or Present are implemented.
 
 ## Evolution gates
 

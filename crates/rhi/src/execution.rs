@@ -586,10 +586,10 @@ mod tests {
         let encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
         let command = backend.finish_encoder(encoder).unwrap();
         let completion = backend.submit(QueueId::new(0), command).unwrap();
-        crate::imp::inject_wait_pending_once();
+        crate::imp::inject_completion_pending_once();
         assert_eq!(
-            backend.wait(&completion, Duration::ZERO),
-            Err(WaitError::Timeout)
+            backend.completion_status(&completion),
+            CompletionStatus::Pending
         );
         backend.wait(&completion, Duration::from_secs(10)).unwrap();
 
@@ -4465,7 +4465,11 @@ impl RasterBackend {
             .active_raster
             .as_ref()
             .ok_or(NativeExecutionError::RasterStateMismatch)?;
-        if pipeline.kernel() != crate::RasterKernel::IndexedPositionColor
+        if !matches!(
+            pipeline.kernel(),
+            crate::RasterKernel::IndexedPositionColor
+                | crate::RasterKernel::IndexedPositionFloat32x3
+        ) || !raster_recipe_allows_vertex_offset(pipeline.kernel(), offset)
             || !offset.is_multiple_of(4)
             || (buffer.descriptor().buffer.size - offset)
                 < u64::from(pipeline.kernel().vertex_stride())
@@ -4477,6 +4481,7 @@ impl RasterBackend {
             buffer.native(),
             offset,
             buffer.descriptor().buffer.size - offset,
+            pipeline.kernel(),
         )
         .map_err(NativeExecutionError::Recording)?;
         encoder.vertex_buffer = Some((buffer.clone(), offset));
@@ -4494,15 +4499,29 @@ impl RasterBackend {
         self.check_encoder(encoder)?;
         self.check_buffer(buffer)?;
         if encoder.raster_extent.is_none()
-            || format != IndexFormat::Uint16
-            || !offset.is_multiple_of(2)
+            || !offset.is_multiple_of(match format {
+                IndexFormat::Uint16 => 2,
+                IndexFormat::Uint32 => 4,
+            })
             || offset >= buffer.descriptor().buffer.size
             || !buffer.allowed_usage().contains(BufferUsageKind::Index)
         {
             return Err(NativeExecutionError::RasterStateMismatch);
         }
-        if encoder.active_raster.as_ref().map(RasterPipeline::kernel)
-            != Some(crate::RasterKernel::IndexedPositionColor)
+        let expected_format = match encoder.active_raster.as_ref().map(RasterPipeline::kernel) {
+            Some(crate::RasterKernel::IndexedPositionColor) => IndexFormat::Uint16,
+            Some(crate::RasterKernel::IndexedPositionFloat32x3) => IndexFormat::Uint32,
+            _ => return Err(NativeExecutionError::RasterStateMismatch),
+        };
+        if format != expected_format
+            || !raster_recipe_allows_index_offset(
+                encoder
+                    .active_raster
+                    .as_ref()
+                    .expect("active recipe")
+                    .kernel(),
+                offset,
+            )
         {
             return Err(NativeExecutionError::RasterStateMismatch);
         }
@@ -4511,6 +4530,7 @@ impl RasterBackend {
             buffer.native(),
             offset,
             buffer.descriptor().buffer.size - offset,
+            format,
         )
         .map_err(NativeExecutionError::Recording)?;
         encoder.index_buffer = Some((buffer.clone(), offset, format));
@@ -4620,11 +4640,13 @@ impl RasterBackend {
     ) -> Result<(), NativeExecutionError> {
         self.check_encoder(encoder)?;
         if indices.start >= indices.end
+            || !raster_recipe_allows_first_index(
+                encoder.active_raster.as_ref().map(RasterPipeline::kernel),
+                indices.start,
+            )
             || base_vertex != 0
             || instances != (0..1)
             || encoder.raster_extent.is_none()
-            || encoder.active_raster.as_ref().map(RasterPipeline::kernel)
-                != Some(crate::RasterKernel::IndexedPositionColor)
             || encoder.vertex_buffer.is_none()
             || encoder.index_buffer.is_none()
         {
@@ -4634,11 +4656,20 @@ impl RasterBackend {
             .index_buffer
             .as_ref()
             .expect("checked index binding");
+        let expected_format = match encoder.active_raster.as_ref().map(RasterPipeline::kernel) {
+            Some(crate::RasterKernel::IndexedPositionColor) => IndexFormat::Uint16,
+            Some(crate::RasterKernel::IndexedPositionFloat32x3) => IndexFormat::Uint32,
+            _ => return Err(NativeExecutionError::RasterStateMismatch),
+        };
+        let index_size = match expected_format {
+            IndexFormat::Uint16 => 2,
+            IndexFormat::Uint32 => 4,
+        };
         let byte_end = u64::from(indices.end)
-            .checked_mul(2)
+            .checked_mul(index_size)
             .and_then(|end| offset.checked_add(end))
             .ok_or(NativeExecutionError::RasterStateMismatch)?;
-        if *format != IndexFormat::Uint16 || byte_end > buffer.descriptor().buffer.size {
+        if *format != expected_format || byte_end > buffer.descriptor().buffer.size {
             return Err(NativeExecutionError::RasterStateMismatch);
         }
         crate::imp::draw_indexed(
@@ -4681,6 +4712,23 @@ fn valid_compute_dispatch(groups: [u32; 3], maximum: [u32; 3]) -> bool {
         .into_iter()
         .zip(maximum)
         .all(|(given, maximum)| given != 0 && given <= maximum)
+}
+
+/// Closed 0.2.1 mesh input recipes keep their binding base fixed at zero;
+/// R02 retains its established aligned-offset behavior.
+fn raster_recipe_allows_vertex_offset(kernel: crate::RasterKernel, offset: u64) -> bool {
+    kernel != crate::RasterKernel::IndexedPositionFloat32x3 || offset == 0
+}
+
+/// The same fixed-base rule applies to the new Uint32 index recipe only.
+fn raster_recipe_allows_index_offset(kernel: crate::RasterKernel, offset: u64) -> bool {
+    kernel != crate::RasterKernel::IndexedPositionFloat32x3 || offset == 0
+}
+
+/// The 0.2.1 recipe is one exact indexed draw beginning at zero; R02 remains
+/// able to select an aligned subrange.
+fn raster_recipe_allows_first_index(kernel: Option<crate::RasterKernel>, first_index: u32) -> bool {
+    kernel != Some(crate::RasterKernel::IndexedPositionFloat32x3) || first_index == 0
 }
 
 impl ComputeBackend {
@@ -4768,17 +4816,34 @@ pub(crate) fn readback_raster_exported_buffer_for_test(
     .map_err(NativeExecutionError::Recording)
 }
 
+/// Exact byte result of a test-support raster texture readback.
+///
+/// The staging row pitch is exposed so fixtures can separately assert both
+/// tight pixels and padding. This is observation-only and cannot create or
+/// modify an RHI texture.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RasterTextureReadback {
+    /// Tightly packed RGBA8 pixels in row-major order.
+    pub tight: Vec<u8>,
+    /// Native staging rows including their required padding bytes.
+    pub padded: Vec<u8>,
+    /// Native staging pitch, in bytes.
+    pub bytes_per_row: u32,
+}
+
 /// Reads a completed RasterBackend texture export after consuming its actual
 /// graph-reported outgoing state; the helper never guesses or repairs it.
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "R01/R02/X01 hardware fixtures consume this crate-private wrapper"
-)]
-pub(crate) fn readback_raster_exported_texture_for_test(
+///
+/// This is deliberately restricted to an `ExportedTexture<RasterBackend>`:
+/// callers cannot use it to impose a guessed state on an ordinary texture.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn readback_exported_raster_texture_for_test(
     device: &Device,
     exported: &fluxel_rendergraph::ExportedTexture<RasterBackend>,
-) -> Result<crate::imp::TextureReadback, NativeExecutionError> {
+) -> Result<RasterTextureReadback, NativeExecutionError> {
     if exported.physical.device_identity() != device.identity() {
         return Err(NativeExecutionError::ForeignResource);
     }
@@ -4788,15 +4853,23 @@ pub(crate) fn readback_raster_exported_texture_for_test(
                 && lease.identity() == exported.physical.identity() => {}
         _ => return Err(NativeExecutionError::ForeignResource),
     }
-    crate::imp::readback_texture_for_test(
+    let result = crate::imp::readback_texture_for_test(
         &device.inner,
         exported.physical.native(),
         exported.lease.clone(),
         exported.descriptor,
         exported.outgoing_state,
     )
-    .map_err(NativeExecutionError::Recording)
+    .map_err(NativeExecutionError::Recording)?;
+    Ok(RasterTextureReadback {
+        tight: result.tight,
+        padded: result.padded,
+        bytes_per_row: result.bytes_per_row,
+    })
 }
+
+#[cfg(test)]
+pub(crate) use readback_exported_raster_texture_for_test as readback_raster_exported_texture_for_test;
 
 fn validate_buffer_copy(
     source: BufferDesc,
@@ -4968,6 +5041,47 @@ mod contract_tests {
             .unwrap();
         assert!(rgba8.color_attachment && rgba8.sampled && rgba8.copy_source);
         assert_eq!(rgba8.attachment_sample_counts, vec![1]);
+    }
+
+    #[test]
+    fn f32x3_u32_recipe_rejects_nonzero_bases_before_native_recording() {
+        use crate::RasterKernel::{IndexedPositionColor, IndexedPositionFloat32x3};
+
+        // These predicates are evaluated by RasterBackend before it calls the
+        // private HAL boundary, so rejected values cannot form a submission.
+        assert!(raster_recipe_allows_vertex_offset(
+            IndexedPositionFloat32x3,
+            0
+        ));
+        assert!(!raster_recipe_allows_vertex_offset(
+            IndexedPositionFloat32x3,
+            4
+        ));
+        assert!(raster_recipe_allows_index_offset(
+            IndexedPositionFloat32x3,
+            0
+        ));
+        assert!(!raster_recipe_allows_index_offset(
+            IndexedPositionFloat32x3,
+            4
+        ));
+        assert!(raster_recipe_allows_first_index(
+            Some(IndexedPositionFloat32x3),
+            0
+        ));
+        assert!(!raster_recipe_allows_first_index(
+            Some(IndexedPositionFloat32x3),
+            1
+        ));
+
+        // R02 is deliberately unchanged: its fixed Uint16 recipe continues
+        // to permit aligned buffer offsets and an indexed subrange.
+        assert!(raster_recipe_allows_vertex_offset(IndexedPositionColor, 4));
+        assert!(raster_recipe_allows_index_offset(IndexedPositionColor, 2));
+        assert!(raster_recipe_allows_first_index(
+            Some(IndexedPositionColor),
+            1
+        ));
     }
 
     #[test]

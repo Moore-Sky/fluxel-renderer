@@ -4,9 +4,9 @@ use core::fmt;
 use std::sync::Arc;
 
 use fluxel_rendergraph::{
-    BufferDesc, BufferUsage, BufferUsageKind, CompletionStatus, PhysicalResourceIdentity,
-    ResourceAccessState, TextureDesc, TextureDimension, TextureFormat, TextureUsage,
-    TextureUsageKind,
+    BufferDesc, BufferUsage, BufferUsageKind, CompletionStatus, IndexFormat,
+    PhysicalResourceIdentity, ResourceAccessState, TextureDesc, TextureDimension, TextureFormat,
+    TextureUsage, TextureUsageKind,
 };
 
 use crate::{Backend, Device, NativeCompletion};
@@ -514,13 +514,16 @@ pub struct ComputeBindings(Arc<ComputeBindingsShared>);
 #[derive(Clone)]
 pub struct ComputeBindingsLease(Arc<ComputeBindingsShared>);
 
-/// The two deterministic raster artifacts supported by this milestone.
+/// The deterministic raster artifacts supported by this milestone.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RasterKernel {
     /// A fixed, non-indexed triangle with no resource bindings.
     Triangle,
     /// An indexed mesh using `float32x2 position + unorm8x4 color` vertices.
     IndexedPositionColor,
+    /// An indexed clip-space mesh using `float32x3` positions and a fixed
+    /// opaque fragment color.
+    IndexedPositionFloat32x3,
 }
 
 /// The non-configurable vertex layout selected by a fixed raster artifact.
@@ -531,6 +534,8 @@ pub enum RasterVertexLayout {
     /// One vertex is `float32x2 position` at byte zero followed by
     /// `unorm8x4 color` at byte eight, for a 12-byte stride.
     PositionFloat32x2ColorUnorm8x4,
+    /// One vertex is `float32x3 position` at byte zero, for a 12-byte stride.
+    PositionFloat32x3,
 }
 
 /// Portable identity of one fixed raster artifact.
@@ -551,6 +556,8 @@ pub struct RasterArtifactIdentity {
     pub vertex_layout: RasterVertexLayout,
     /// Bytes between vertices; zero means the fixed shader uses vertex index.
     pub vertex_stride: u32,
+    /// The required index element format, or `None` for the non-indexed recipe.
+    pub index_format: Option<IndexFormat>,
     /// Version of the fixed vertex/index/target recipe.
     pub recipe_version: u32,
 }
@@ -561,6 +568,7 @@ impl RasterKernel {
         match self {
             Self::Triangle => "triangle_vertex",
             Self::IndexedPositionColor => "position_color_vertex",
+            Self::IndexedPositionFloat32x3 => "position_f32x3_vertex",
         }
     }
 
@@ -579,6 +587,16 @@ impl RasterKernel {
         match self {
             Self::Triangle => 0,
             Self::IndexedPositionColor => 12,
+            Self::IndexedPositionFloat32x3 => 12,
+        }
+    }
+
+    /// Returns the required index element format for this closed recipe.
+    pub const fn index_format(self) -> Option<IndexFormat> {
+        match self {
+            Self::Triangle => None,
+            Self::IndexedPositionColor => Some(IndexFormat::Uint16),
+            Self::IndexedPositionFloat32x3 => Some(IndexFormat::Uint32),
         }
     }
 
@@ -587,6 +605,7 @@ impl RasterKernel {
         match self {
             Self::Triangle => RasterVertexLayout::None,
             Self::IndexedPositionColor => RasterVertexLayout::PositionFloat32x2ColorUnorm8x4,
+            Self::IndexedPositionFloat32x3 => RasterVertexLayout::PositionFloat32x3,
         }
     }
 
@@ -599,6 +618,7 @@ impl RasterKernel {
             target_format: self.target_format(),
             vertex_layout: self.vertex_layout(),
             vertex_stride: self.vertex_stride(),
+            index_format: self.index_format(),
             recipe_version: 1,
         }
     }
@@ -634,6 +654,21 @@ impl RasterKernel {
              return VertexOutput(vec4(input.position, 0.0, 1.0), input.color);\n\
          }\n\
          @fragment fn color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { return input.color; }"
+            }
+            Self::IndexedPositionFloat32x3 => {
+                "struct VertexInput {\n\
+         @location(0) position: vec3<f32>,\n\
+         };\n\
+         struct VertexOutput {\n\
+         @builtin(position) position: vec4<f32>,\n\
+         };\n\
+         @vertex fn position_f32x3_vertex(input: VertexInput) -> VertexOutput {\n\
+             return VertexOutput(vec4(input.position, 1.0));\n\
+         }\n\
+         @fragment fn color_fragment(input: VertexOutput) -> @location(0) vec4<f32> {\n\
+             _ = input;\n\
+             return vec4(48.0 / 255.0, 176.0 / 255.0, 112.0 / 255.0, 1.0);\n\
+         }"
             }
         }
     }
@@ -1308,7 +1343,7 @@ impl Device {
             kernel.wgsl_source(),
             kernel.vertex_entry_point(),
             kernel.fragment_entry_point(),
-            kernel.vertex_stride() != 0,
+            kernel,
         )
         .map_err(map_raster_pipeline_create_error)?;
         #[cfg(not(all(windows, any(feature = "dx12", feature = "vulkan"))))]
@@ -1317,7 +1352,7 @@ impl Device {
             kernel.wgsl_source(),
             kernel.vertex_entry_point(),
             kernel.fragment_entry_point(),
-            kernel.vertex_stride() != 0,
+            kernel,
         )
         .map_err(RasterCreateError::NativeObjectCreation)?;
         Ok(RasterPipeline(Arc::new(RasterPipelineShared {
@@ -1719,11 +1754,8 @@ mod tests {
         drop(incomplete);
 
         let pending = device.upload_immutable_buffer(descriptor, &[2; 8]).unwrap();
-        crate::imp::inject_wait_pending_once();
-        assert_eq!(
-            pending.wait(Duration::ZERO).unwrap(),
-            CompletionStatus::Pending
-        );
+        crate::imp::inject_completion_pending_once();
+        assert_eq!(pending.status().unwrap(), CompletionStatus::Pending);
         assert_eq!(
             pending.wait(Duration::from_secs(10)).unwrap(),
             CompletionStatus::Complete
@@ -1732,7 +1764,7 @@ mod tests {
         let diagnostics = crate::imp::validation_diagnostics(&device.inner);
         assert!(diagnostics.is_empty(), "{backend:?}: {diagnostics:?}");
         eprintln!(
-            "artifact case=U01-failure backend={backend:?} submit_rejected=true accepted_unknown=DeviceLost timeout=Pending completion=Complete diagnostics={diagnostics:?}"
+            "artifact case=U01-failure backend={backend:?} submit_rejected=true accepted_unknown=DeviceLost observation=Pending completion=Complete diagnostics={diagnostics:?}"
         );
     }
 
@@ -1917,9 +1949,11 @@ mod tests {
     fn raster_identities_are_portable_but_recipes_remain_distinct() {
         let triangle = RasterKernel::Triangle.portable_identity();
         let indexed = RasterKernel::IndexedPositionColor.portable_identity();
+        let indexed_f32x3 = RasterKernel::IndexedPositionFloat32x3.portable_identity();
         assert_eq!(triangle.target_format, TextureFormat::Rgba8Unorm);
         assert_eq!(triangle.vertex_stride, 0);
         assert_eq!(triangle.vertex_layout, RasterVertexLayout::None);
+        assert_eq!(triangle.index_format, None);
         assert_eq!(indexed.vertex_stride, 12);
         assert_eq!(
             indexed.vertex_layout,
@@ -1927,6 +1961,13 @@ mod tests {
         );
         assert_ne!(triangle.module_source_hash, indexed.module_source_hash);
         assert_eq!(triangle.fragment_entry_point, indexed.fragment_entry_point);
+        assert_eq!(indexed_f32x3.vertex_stride, 12);
+        assert_eq!(indexed_f32x3.index_format, Some(IndexFormat::Uint32));
+        assert_eq!(
+            indexed_f32x3.vertex_layout,
+            RasterVertexLayout::PositionFloat32x3
+        );
+        assert_ne!(indexed.module_source_hash, indexed_f32x3.module_source_hash);
     }
 
     #[test]
