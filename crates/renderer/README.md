@@ -18,7 +18,7 @@ pipeline/bind-group API, or present pixels.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.3"
+tag = "v0.2.4"
 features = ["gpu-upload"]
 ```
 
@@ -45,8 +45,11 @@ exposed.
 upload; only proven completion publishes `BaseColorTextureSnapshot`.
 `TexturedBasicMaterial` couples that snapshot to `BasicMaterial`, and
 `FixedFrameRenderer::draw_textured` uses a fixed mip-zero `textureLoad` mapping
-derived from model-space `position.xy`. This deliberately exposes no sampler,
-filter/wrap/LOD, UV vertex attribute, sRGB, or PBR contract. The textured path
+derived from model-space `position.xy`. `TexturedGeometry` and
+`TexturedIndexedMeshUpload` add an isolated three-stream position/index/UV
+generation; `draw_textured_uv` consumes its explicit finite `f32x2` coordinates
+through a closed second vertex slot. Both paths deliberately expose no sampler,
+filter/wrap/LOD, sRGB, or PBR contract. The textured paths
 accepts only finite, positive-w triangles wholly inside the clip volume, and
 mesh/texture generations share one atomic draw reservation outcome.
 
@@ -88,6 +91,8 @@ no `unsafe`.
 
 The 0.2.3 U04 fixtures compare this textured draw byte-for-byte with an
 independent CPU oracle on DX12 and Vulkan under Required validation.
+The 0.2.4 U05 fixtures separately prove explicit UV perspective interpolation
+against position-derived and linear CPU counter-oracles on both backends.
 
 The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend

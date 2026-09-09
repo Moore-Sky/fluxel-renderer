@@ -17,7 +17,8 @@ use fluxel_rendergraph::{
 use crate::{
     Buffer, BufferDescriptor, ComputeBindings, ComputeCreateError, ComputePipeline, Device,
     MemoryPolicy, RasterPipeline, RasterTextureBindings, RasterUniformBindings,
-    ResourceCreateError, ResourceLease, Texture, TextureDescriptor, TexturePackBindings,
+    RasterUvTextureBindings, ResourceCreateError, ResourceLease, Texture, TextureDescriptor,
+    TexturePackBindings,
 };
 
 /// Failure while lowering or executing the current native fixed command slice.
@@ -52,6 +53,40 @@ pub enum NativeExecutionError {
     ComputeBindingMismatch,
     /// The active raster state does not satisfy a fixed draw recipe.
     RasterStateMismatch,
+    /// A UV-textured fixed recipe addressed a vertex slot outside its ABI.
+    RasterVertexSlotOutOfRange {
+        /// The requested vertex-buffer slot.
+        slot: u32,
+    },
+    /// A vertex buffer does not match the role assigned to its UV ABI slot.
+    RasterVertexRoleMismatch {
+        /// The requested vertex-buffer slot.
+        slot: u32,
+    },
+    /// A UV ABI vertex slot was already successfully bound in this epoch.
+    RasterVertexSlotAlreadyBound {
+        /// The requested vertex-buffer slot.
+        slot: u32,
+    },
+    /// A required UV ABI vertex slot was not bound in this epoch.
+    RasterVertexSlotMissing {
+        /// The required vertex-buffer slot.
+        slot: u32,
+    },
+    /// A UV ABI vertex buffer range is not the required full stream.
+    RasterVertexRangeMismatch {
+        /// The requested vertex-buffer slot.
+        slot: u32,
+    },
+    /// A UV ABI vertex buffer lacks vertex usage.
+    RasterVertexUsageMismatch {
+        /// The requested vertex-buffer slot.
+        slot: u32,
+    },
+    /// UV bindings were already successfully set in this pipeline epoch.
+    RasterBindingsAlreadySet,
+    /// A UV recipe object belongs to a previous pipeline epoch.
+    RasterEpochMismatch,
 }
 
 impl fmt::Display for NativeExecutionError {
@@ -86,6 +121,33 @@ impl fmt::Display for NativeExecutionError {
             }
             Self::RasterStateMismatch => {
                 formatter.write_str("raster command does not satisfy the active fixed recipe")
+            }
+            Self::RasterVertexSlotOutOfRange { slot } => write!(
+                formatter,
+                "UV raster vertex slot {slot} is outside the fixed ABI"
+            ),
+            Self::RasterVertexRoleMismatch { slot } => write!(
+                formatter,
+                "UV raster vertex slot {slot} has the wrong buffer role"
+            ),
+            Self::RasterVertexSlotAlreadyBound { slot } => {
+                write!(formatter, "UV raster vertex slot {slot} is already bound")
+            }
+            Self::RasterVertexSlotMissing { slot } => {
+                write!(formatter, "UV raster vertex slot {slot} is missing")
+            }
+            Self::RasterVertexRangeMismatch { slot } => write!(
+                formatter,
+                "UV raster vertex slot {slot} has an invalid range"
+            ),
+            Self::RasterVertexUsageMismatch { slot } => {
+                write!(formatter, "UV raster vertex slot {slot} lacks vertex usage")
+            }
+            Self::RasterBindingsAlreadySet => {
+                formatter.write_str("UV raster bindings are already set for this epoch")
+            }
+            Self::RasterEpochMismatch => {
+                formatter.write_str("UV raster object does not belong to the active pipeline epoch")
             }
         }
     }
@@ -128,6 +190,11 @@ pub struct CopyEncoder {
     active_raster: Option<RasterPipeline>,
     bound_raster_uniform: Option<RasterUniformBindings>,
     bound_raster_texture: Option<RasterTextureBindings>,
+    bound_raster_uv_texture: Option<RasterUvTextureBindings>,
+    raster_uv_epoch: u64,
+    raster_uv_binding_epoch: Option<u64>,
+    raster_uv_vertex_slots: [Option<(Buffer, u64)>; 2],
+    raster_uv_index_ready: bool,
     vertex_buffer: Option<(Buffer, u64)>,
     index_buffer: Option<(Buffer, u64, IndexFormat)>,
     raster_extent: Option<(u32, u32)>,
@@ -1410,6 +1477,114 @@ mod tests {
             .unwrap();
         backend.draw_indexed(&mut encoder, 0..3, 0, 0..1).unwrap();
         backend.end_raster(&mut encoder).unwrap();
+        drop(encoder);
+
+        // The UV recipe has two non-interchangeable vertex slots. Every
+        // negative result below drops its encoder without finish/submit; a
+        // subsequent legal call proves rejected setters did not poison the
+        // current epoch's readiness.
+        let uv_pipeline = device
+            .create_raster_pipeline(
+                crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv,
+            )
+            .unwrap();
+        let positions = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 36 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let texture_coordinates = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 24 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let uv_index = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 12 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Index]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let uv_bindings = RasterBindings::RasterUvTexture(
+            device
+                .create_raster_uv_texture_bindings(
+                    &uv_pipeline,
+                    &uniform,
+                    &sampled_texture,
+                    &positions,
+                    &texture_coordinates,
+                    3,
+                )
+                .unwrap(),
+        );
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend
+            .transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentReadWrite,
+            )
+            .unwrap();
+        backend.begin_raster(&mut encoder, &descriptor).unwrap();
+        backend
+            .set_raster_pipeline(&mut encoder, &uv_pipeline)
+            .unwrap();
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 2, &positions, 0),
+            Err(NativeExecutionError::RasterVertexSlotOutOfRange { slot: 2 })
+        );
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(NativeExecutionError::RasterStateMismatch)
+        );
+        backend.set_bindings(&mut encoder, &uv_bindings).unwrap();
+        assert_eq!(
+            backend.set_bindings(&mut encoder, &uv_bindings),
+            Err(NativeExecutionError::RasterBindingsAlreadySet)
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 2, &positions, 0),
+            Err(NativeExecutionError::RasterVertexSlotOutOfRange { slot: 2 })
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 0, &texture_coordinates, 0),
+            Err(NativeExecutionError::RasterVertexRoleMismatch { slot: 0 })
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 0, &positions, 4),
+            Err(NativeExecutionError::RasterVertexRangeMismatch { slot: 0 })
+        );
+        backend
+            .set_vertex_buffer(&mut encoder, 0, &positions, 0)
+            .unwrap();
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 0, &positions, 0),
+            Err(NativeExecutionError::RasterVertexSlotAlreadyBound { slot: 0 })
+        );
+        backend
+            .set_index_buffer(&mut encoder, &uv_index, 0, IndexFormat::Uint32)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 })
+        );
+        backend
+            .set_vertex_buffer(&mut encoder, 1, &texture_coordinates, 0)
+            .unwrap();
+        backend.draw_indexed(&mut encoder, 0..3, 0, 0..1).unwrap();
+        backend
+            .set_raster_pipeline(&mut encoder, &uv_pipeline)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(NativeExecutionError::RasterEpochMismatch)
+        );
         drop(encoder);
 
         // Nothing above finishes/submits; validation must remain silent.
@@ -3315,6 +3490,8 @@ pub enum RasterBindings {
     RasterUniform(RasterUniformBindings),
     /// The closed camera/material uniform plus whole sampled texture binding.
     RasterTexture(RasterTextureBindings),
+    /// The closed UV-textured raster binding with two expected vertex streams.
+    RasterUvTexture(RasterUvTextureBindings),
 }
 
 /// A serial DX12/Vulkan backend for the fixed Raster→Compute→Copy slice.
@@ -3339,6 +3516,16 @@ pub struct RasterObjectProvider {
         fluxel_rendergraph::BindingSetId,
         (fluxel_rendergraph::RasterPipelineId, RasterPipeline),
     >,
+    raster_uv_bindings: HashMap<
+        fluxel_rendergraph::BindingSetId,
+        (
+            fluxel_rendergraph::RasterPipelineId,
+            RasterPipeline,
+            Buffer,
+            Buffer,
+            u32,
+        ),
+    >,
 }
 
 impl RasterObjectProvider {
@@ -3351,6 +3538,7 @@ impl RasterObjectProvider {
             compute: HashMap::new(),
             bindings: HashMap::new(),
             raster_bindings: HashMap::new(),
+            raster_uv_bindings: HashMap::new(),
         }
     }
 
@@ -3434,6 +3622,46 @@ impl RasterObjectProvider {
             .insert(id, (expected_pipeline, pipeline.clone()));
         Ok(())
     }
+
+    /// Registers the closed two-vertex-stream UV textured raster recipe.
+    pub fn register_raster_uv_textured_bindings(
+        &mut self,
+        id: fluxel_rendergraph::BindingSetId,
+        expected_pipeline: fluxel_rendergraph::RasterPipelineId,
+        positions: &Buffer,
+        texture_coordinates: &Buffer,
+        vertex_count: u32,
+    ) -> Result<(), NativeExecutionError> {
+        let pipeline = self
+            .raster
+            .get(&expected_pipeline)
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        if pipeline.kernel() != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        require_device(
+            positions.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        require_device(
+            texture_coordinates.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        self.raster_uv_bindings.insert(
+            id,
+            (
+                expected_pipeline,
+                pipeline.clone(),
+                positions.clone(),
+                texture_coordinates.clone(),
+                vertex_count,
+            ),
+        );
+        Ok(())
+    }
 }
 
 impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectProvider {
@@ -3503,6 +3731,55 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
                 fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
                 "fixed bindings do not accept dynamic offsets",
             ));
+        }
+        if let Some((_, pipeline, positions, texture_coordinates, vertex_count)) =
+            self.raster_uv_bindings.get(&id)
+        {
+            let [
+                fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                    physical: uniform,
+                    range: BufferRange::Whole,
+                    semantic:
+                        fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                            fluxel_rendergraph::BufferReadUse::Uniform,
+                        ),
+                },
+                fluxel_rendergraph::ResolvedBindingResource::Texture {
+                    physical: texture,
+                    range: fluxel_rendergraph::TextureRange::Whole,
+                    semantic:
+                        fluxel_rendergraph::BindingResourceSemantic::TextureRead(
+                            fluxel_rendergraph::TextureReadUse::Sampled,
+                        ),
+                },
+            ] = resources
+            else {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "UV textured raster binding requires whole Uniform then whole Sampled texture",
+                ));
+            };
+            let value = self
+                .owner
+                .create_raster_uv_texture_bindings(
+                    pipeline,
+                    uniform,
+                    texture,
+                    positions,
+                    texture_coordinates,
+                    *vertex_count,
+                )
+                .map_err(|error| {
+                    provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        error.to_string(),
+                    )
+                })?;
+            return Ok(fluxel_rendergraph::BoundBindings {
+                device: self.device,
+                lease: value.lease().into(),
+                physical: RasterBindings::RasterUvTexture(value),
+            });
         }
         if let Some((_, pipeline)) = self.raster_bindings.get(&id) {
             if pipeline.kernel()
@@ -3681,6 +3958,7 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
             RasterBindings::TexturePack(value) => value.lease().into(),
             RasterBindings::RasterUniform(value) => value.lease().into(),
             RasterBindings::RasterTexture(value) => value.lease().into(),
+            RasterBindings::RasterUvTexture(value) => value.lease().into(),
         };
         Ok(fluxel_rendergraph::BoundBindings {
             device: self.device,
@@ -3817,6 +4095,11 @@ impl ExecutionBackend for CopyBackend {
                 active_raster: None,
                 bound_raster_uniform: None,
                 bound_raster_texture: None,
+                bound_raster_uv_texture: None,
+                raster_uv_epoch: 0,
+                raster_uv_binding_epoch: None,
+                raster_uv_vertex_slots: [None, None],
+                raster_uv_index_ready: false,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -4210,6 +4493,11 @@ impl ExecutionBackend for ComputeBackend {
                 active_raster: None,
                 bound_raster_uniform: None,
                 bound_raster_texture: None,
+                bound_raster_uv_texture: None,
+                raster_uv_epoch: 0,
+                raster_uv_binding_epoch: None,
+                raster_uv_vertex_slots: [None, None],
+                raster_uv_index_ready: false,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -4596,6 +4884,11 @@ impl ExecutionBackend for RasterBackend {
                 active_raster: None,
                 bound_raster_uniform: None,
                 bound_raster_texture: None,
+                bound_raster_uv_texture: None,
+                raster_uv_epoch: 0,
+                raster_uv_binding_epoch: None,
+                raster_uv_vertex_slots: [None, None],
+                raster_uv_index_ready: false,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -4685,6 +4978,10 @@ impl ExecutionBackend for RasterBackend {
         encoder.active_raster = None;
         encoder.vertex_buffer = None;
         encoder.index_buffer = None;
+        encoder.bound_raster_uv_texture = None;
+        encoder.raster_uv_binding_epoch = None;
+        encoder.raster_uv_vertex_slots = [None, None];
+        encoder.raster_uv_index_ready = false;
         Ok(())
     }
     fn end_raster(&mut self, encoder: &mut CopyEncoder) -> Result<(), Self::Error> {
@@ -4697,6 +4994,10 @@ impl ExecutionBackend for RasterBackend {
         encoder.active_raster = None;
         encoder.vertex_buffer = None;
         encoder.index_buffer = None;
+        encoder.bound_raster_uv_texture = None;
+        encoder.raster_uv_binding_epoch = None;
+        encoder.raster_uv_vertex_slots = [None, None];
+        encoder.raster_uv_index_ready = false;
         Ok(())
     }
     fn begin_compute(&mut self, encoder: &mut CopyEncoder, label: &str) -> Result<(), Self::Error> {
@@ -4740,9 +5041,21 @@ impl ExecutionBackend for RasterBackend {
         }
         crate::imp::set_raster_pipeline(&mut encoder.native, pipeline.native())
             .map_err(NativeExecutionError::Recording)?;
+        let resets_uv_epoch = matches!(
+            encoder.active_raster.as_ref().map(RasterPipeline::kernel),
+            Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv)
+        ) || pipeline.kernel()
+            == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv;
         encoder.active_raster = Some(pipeline.clone());
         encoder.bound_raster_uniform = None;
         encoder.bound_raster_texture = None;
+        if resets_uv_epoch {
+            encoder.raster_uv_epoch = encoder.raster_uv_epoch.wrapping_add(1);
+            encoder.bound_raster_uv_texture = None;
+            encoder.raster_uv_binding_epoch = None;
+            encoder.raster_uv_vertex_slots = [None, None];
+            encoder.raster_uv_index_ready = false;
+        }
         encoder.leases.push(pipeline.lease().into());
         Ok(())
     }
@@ -4779,6 +5092,22 @@ impl ExecutionBackend for RasterBackend {
                 .as_ref()
                 .ok_or(NativeExecutionError::RasterStateMismatch)?;
             match bindings {
+                RasterBindings::RasterUvTexture(value)
+                    if pipeline.kernel()
+                        == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+                        && value.device_identity() == self.device.identity()
+                        && value.pipeline().same_object(pipeline) =>
+                {
+                    if encoder.raster_uv_binding_epoch == Some(encoder.raster_uv_epoch) {
+                        return Err(NativeExecutionError::RasterBindingsAlreadySet);
+                    }
+                    crate::imp::set_raster_uv_texture_bindings(&mut encoder.native, value.native())
+                        .map_err(NativeExecutionError::Recording)?;
+                    encoder.bound_raster_uv_texture = Some(value.clone());
+                    encoder.raster_uv_binding_epoch = Some(encoder.raster_uv_epoch);
+                    encoder.leases.push(value.lease().into());
+                    return Ok(());
+                }
                 RasterBindings::RasterUniform(value)
                     if pipeline.kernel()
                         == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
@@ -4964,6 +5293,53 @@ impl RasterBackend {
     ) -> Result<(), NativeExecutionError> {
         self.check_encoder(encoder)?;
         self.check_buffer(buffer)?;
+        if encoder.active_raster.as_ref().map(RasterPipeline::kernel)
+            == Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv)
+        {
+            if slot > 1 {
+                return Err(NativeExecutionError::RasterVertexSlotOutOfRange { slot });
+            }
+            if encoder.raster_uv_binding_epoch != Some(encoder.raster_uv_epoch) {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            let bindings = encoder
+                .bound_raster_uv_texture
+                .as_ref()
+                .ok_or(NativeExecutionError::RasterStateMismatch)?;
+            if encoder.raster_uv_vertex_slots[slot as usize].is_some() {
+                return Err(NativeExecutionError::RasterVertexSlotAlreadyBound { slot });
+            }
+            let expected_identity = if slot == 0 {
+                bindings.position_identity()
+            } else {
+                bindings.texture_coordinate_identity()
+            };
+            if buffer.identity() != expected_identity {
+                return Err(NativeExecutionError::RasterVertexRoleMismatch { slot });
+            }
+            let stride = if slot == 0 { 12 } else { 8 };
+            let required = u64::from(bindings.vertex_count()) * stride;
+            if offset != 0 || buffer.descriptor().buffer.size != required {
+                return Err(NativeExecutionError::RasterVertexRangeMismatch { slot });
+            }
+            if !buffer.allowed_usage().contains(BufferUsageKind::Vertex) {
+                return Err(NativeExecutionError::RasterVertexUsageMismatch { slot });
+            }
+            crate::imp::set_vertex_buffer(
+                &mut encoder.native,
+                buffer.native(),
+                offset,
+                required,
+                crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv,
+                slot,
+                buffer.identity(),
+                Some(bindings.native()),
+            )
+            .map_err(NativeExecutionError::Recording)?;
+            encoder.raster_uv_vertex_slots[slot as usize] = Some((buffer.clone(), offset));
+            encoder.leases.push(buffer.lease().into());
+            return Ok(());
+        }
         if slot != 0
             || encoder.raster_extent.is_none()
             || offset > buffer.descriptor().buffer.size
@@ -4994,6 +5370,9 @@ impl RasterBackend {
             offset,
             buffer.descriptor().buffer.size - offset,
             pipeline.kernel(),
+            slot,
+            buffer.identity(),
+            None,
         )
         .map_err(NativeExecutionError::Recording)?;
         encoder.vertex_buffer = Some((buffer.clone(), offset));
@@ -5010,6 +5389,33 @@ impl RasterBackend {
     ) -> Result<(), NativeExecutionError> {
         self.check_encoder(encoder)?;
         self.check_buffer(buffer)?;
+        if encoder.active_raster.as_ref().map(RasterPipeline::kernel)
+            == Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv)
+        {
+            if encoder.raster_uv_binding_epoch != Some(encoder.raster_uv_epoch)
+                || encoder.bound_raster_uv_texture.is_none()
+            {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            if format != IndexFormat::Uint32
+                || offset != 0
+                || !buffer.allowed_usage().contains(BufferUsageKind::Index)
+            {
+                return Err(NativeExecutionError::RasterStateMismatch);
+            }
+            crate::imp::set_index_buffer(
+                &mut encoder.native,
+                buffer.native(),
+                offset,
+                buffer.descriptor().buffer.size,
+                format,
+            )
+            .map_err(NativeExecutionError::Recording)?;
+            encoder.index_buffer = Some((buffer.clone(), offset, format));
+            encoder.raster_uv_index_ready = true;
+            encoder.leases.push(buffer.lease().into());
+            return Ok(());
+        }
         if encoder.raster_extent.is_none()
             || !offset.is_multiple_of(match format {
                 IndexFormat::Uint16 => 2,
@@ -5155,6 +5561,8 @@ impl RasterBackend {
         instances: Range<u32>,
     ) -> Result<(), NativeExecutionError> {
         self.check_encoder(encoder)?;
+        let uv_kernel = encoder.active_raster.as_ref().map(RasterPipeline::kernel)
+            == Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv);
         if indices.start >= indices.end
             || !raster_recipe_allows_first_index(
                 encoder.active_raster.as_ref().map(RasterPipeline::kernel),
@@ -5163,7 +5571,7 @@ impl RasterBackend {
             || base_vertex != 0
             || instances != (0..1)
             || encoder.raster_extent.is_none()
-            || encoder.vertex_buffer.is_none()
+            || (!uv_kernel && encoder.vertex_buffer.is_none())
             || encoder.index_buffer.is_none()
         {
             return Err(NativeExecutionError::RasterStateMismatch);
@@ -5177,7 +5585,8 @@ impl RasterBackend {
             Some(crate::RasterKernel::IndexedPositionColor) => IndexFormat::Uint16,
             Some(crate::RasterKernel::IndexedPositionFloat32x3)
             | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial)
-            | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture) => {
+            | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture)
+            | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv) => {
                 IndexFormat::Uint32
             }
             _ => return Err(NativeExecutionError::RasterStateMismatch),
@@ -5202,6 +5611,20 @@ impl RasterBackend {
             && encoder.bound_raster_texture.is_none()
         {
             return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        if kernel == Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv) {
+            if encoder.raster_uv_binding_epoch != Some(encoder.raster_uv_epoch) {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            if encoder.raster_uv_vertex_slots[0].is_none() {
+                return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 0 });
+            }
+            if encoder.raster_uv_vertex_slots[1].is_none() {
+                return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 });
+            }
+            if !encoder.raster_uv_index_ready {
+                return Err(NativeExecutionError::RasterStateMismatch);
+            }
         }
         crate::imp::draw_indexed(
             &mut encoder.native,
@@ -5253,6 +5676,7 @@ fn raster_recipe_allows_vertex_offset(kernel: crate::RasterKernel, offset: u64) 
         crate::RasterKernel::IndexedPositionFloat32x3
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
     ) || offset == 0
 }
 
@@ -5263,6 +5687,7 @@ fn raster_recipe_allows_index_offset(kernel: crate::RasterKernel, offset: u64) -
         crate::RasterKernel::IndexedPositionFloat32x3
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
     ) || offset == 0
 }
 
@@ -5275,6 +5700,7 @@ fn raster_recipe_allows_first_index(kernel: Option<crate::RasterKernel>, first_i
             crate::RasterKernel::IndexedPositionFloat32x3
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
         )
     ) || first_index == 0
 }
@@ -5657,6 +6083,22 @@ mod contract_tests {
         assert!(!valid_compute_dispatch([5, 1, 1], maximum));
         assert!(!valid_compute_dispatch([1, 9, 1], maximum));
         assert!(!valid_compute_dispatch([1, 1, 17], maximum));
+    }
+
+    #[test]
+    fn uv_vertex_failures_remain_structured_and_slot_specific() {
+        assert_eq!(
+            NativeExecutionError::RasterVertexRoleMismatch { slot: 0 },
+            NativeExecutionError::RasterVertexRoleMismatch { slot: 0 }
+        );
+        assert_ne!(
+            NativeExecutionError::RasterVertexRoleMismatch { slot: 0 },
+            NativeExecutionError::RasterVertexRoleMismatch { slot: 1 }
+        );
+        assert_ne!(
+            NativeExecutionError::RasterVertexSlotMissing { slot: 0 },
+            NativeExecutionError::RasterEpochMismatch
+        );
     }
 
     #[test]

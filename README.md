@@ -1,6 +1,6 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is a `0.2.3` workspace milestone for Fluxel's typed render graph,
+`fluxel-renderer` is a `0.2.4` workspace milestone for Fluxel's typed render graph,
 native RHI boundary, and renderer layer. It starts an independent release line
 from a pre-migration source snapshot and does not inherit prior version numbers
 or Git history.
@@ -82,12 +82,17 @@ texture snapshot, and `draw_textured`. The fixed shader derives planar
 coordinates from model-space position and performs an integer mip-zero
 `textureLoad`; it adds no sampler, UV vertex layout, mip/LOD, sRGB, or PBR API.
 Mesh and texture generations are reserved and released or poisoned together.
+The `0.2.4` slice adds a separate typed geometry/upload/snapshot path with one
+finite `f32x2` texture coordinate per vertex. `draw_textured_uv` feeds those
+coordinates through a closed second vertex slot while retaining the same
+perspective-center, integer mip-zero `textureLoad` semantics. The earlier
+position-derived path remains available and unchanged; neither path adds a sampler.
 
 | Component | Next milestones |
 | --- | --- |
 | RHI / RenderGraph integration `0.1` | Complete: Windows DX12/Vulkan owned resources and fixed Copy → Compute → Raster→Compute→Copy exact-oracle execution |
 | Renderer / Shader / Assets `0.1` | Headless Camera/Mesh/Geometry/BasicMaterial/DrawList → minimal shader compile/reflection and resource lifetime/cache/handles |
-| Renderer `0.2` | In progress: GPU-ready mesh/texture snapshots and fixed textured unlit draw → sampler/UV only when required → basic PBR → one real static scene |
+| Renderer `0.2` | In progress: GPU-ready mesh/texture/UV snapshots and fixed textured unlit draws → sampler only when required → basic PBR → one real static scene |
 | RenderGraph `0.2` | WebGPU and WebGL2 compatibility adapters |
 | Renderer `0.3` / Assets `0.2` / Shader `0.2` | GLTF, loading/reuse, variants/layout metadata, caches, culling, batching |
 | RenderGraph `0.3` / Renderer `0.4` | Surface/Present/resize/lost, then a visible Windows/Web renderer |

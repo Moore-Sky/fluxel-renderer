@@ -1,6 +1,6 @@
 # Fluxel RHI Design
 
-**Status: 0.2.0 RHI with 0.2.3 renderer texture support**
+**Status: 0.3.0 RHI with 0.2.4 explicit-UV renderer support**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
 not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
@@ -38,6 +38,15 @@ fragment-visible `texture_2d<f32>` at group 0/binding 1 beside the existing
 80-byte uniform. It uses no sampler and records its complete texture ABI and
 mapping version in the portable identity. Expanding the formerly exhaustive
 closed artifact enums is reflected by the RHI crate's 0.2.0 semver bump.
+
+0.3.0 adds one closed explicit-UV raster recipe. It fixes position at vertex
+slot 0/location 0/stride 12 and texture coordinates at slot 1/location 1/stride
+8. A per-draw opaque binding retains both expected physical buffer identities,
+their leases, the uniform and the sampled texture. The encoder uses a UV-only
+pipeline epoch and rejects swapped, repeated, missing, partial-range, wrong-
+usage, or stale roles before HAL calls; the native boundary repeats pass,
+pipeline, usage, identity, slot, and exact-range validation. Existing closed
+artifact identities and state machines are unchanged.
 
 The companion [render-graph design](design-rendergraph.md) defines the logical
 graph and its execution SPI. This document defines the native boundary that

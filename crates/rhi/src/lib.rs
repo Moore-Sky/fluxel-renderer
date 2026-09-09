@@ -278,7 +278,7 @@ impl std::error::Error for OpenError {}
 
 #[cfg(test)]
 mod tests {
-    #[cfg(windows)]
+    #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
     use super::{Backend, Device, DeviceOptions, Validation};
 
     #[cfg(not(windows))]
@@ -449,7 +449,7 @@ mod tests {
         open_with_required_validation(Backend::Vulkan);
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
     fn open_with_required_validation(backend: Backend) {
         let device = Device::open(
             backend,
@@ -512,6 +512,19 @@ pub mod test_support {
         crate::imp::inject_submit_rejected_once();
     }
 
+    /// Makes the submission after exactly `successful_submits` accepted
+    /// submissions fail before queue acceptance.
+    ///
+    /// Passing zero is identical to [`inject_submit_rejected_once`]. This is
+    /// conformance-only and fixtures must serialize configuration with their
+    /// existing guard.
+    pub fn inject_submit_rejected_after(successful_submits: usize) {
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+        crate::imp::inject_submit_rejected_after(successful_submits);
+        #[cfg(not(all(windows, any(feature = "dx12", feature = "vulkan"))))]
+        let _ = successful_submits;
+    }
+
     /// Makes the next native submission report accepted-but-unknown failure.
     ///
     /// This conformance-only hook is one-shot and exercises quarantine of all
@@ -519,6 +532,19 @@ pub mod test_support {
     pub fn inject_submit_accepted_unknown_once() {
         #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
         crate::imp::inject_submit_accepted_unknown_once();
+    }
+
+    /// Makes the submission after exactly `successful_submits` accepted
+    /// submissions report accepted-but-unknown failure.
+    ///
+    /// Passing zero is identical to [`inject_submit_accepted_unknown_once`].
+    /// This is conformance-only and fixtures must serialize configuration with
+    /// their existing guard.
+    pub fn inject_submit_accepted_unknown_after(successful_submits: usize) {
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+        crate::imp::inject_submit_accepted_unknown_after(successful_submits);
+        #[cfg(not(all(windows, any(feature = "dx12", feature = "vulkan"))))]
+        let _ = successful_submits;
     }
 
     /// Makes the next nonblocking native completion observation report `Pending`.
@@ -719,7 +745,7 @@ mod imp {
     pub(super) fn validation_diagnostics(_: &Arc<OpenedDevice>) -> Vec<String> {
         Vec::new()
     }
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn readback_buffer_for_test(
         _: &Arc<OpenedDevice>,
         _: &OwnedBuffer,
@@ -729,13 +755,13 @@ mod imp {
     ) -> Result<Vec<u8>, String> {
         Err("native readback is unavailable without a Windows backend".into())
     }
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) struct TextureReadback {
         pub(super) tight: Vec<u8>,
         pub(super) padded: Vec<u8>,
         pub(super) bytes_per_row: u32,
     }
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn readback_texture_for_test(
         _: &Arc<OpenedDevice>,
         _: &OwnedTexture,
@@ -795,6 +821,22 @@ mod imp {
         _: &NativeRasterPipeline,
         _: &OwnedBuffer,
         _: &OwnedTexture,
+    ) -> Result<NativeRasterTextureBindings, String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the closed native UV recipe passes all independently validated role facts"
+    )]
+    pub(super) fn create_raster_uv_texture_bindings(
+        _: &Arc<OpenedDevice>,
+        _: &NativeRasterPipeline,
+        _: &OwnedBuffer,
+        _: &OwnedTexture,
+        _: fluxel_rendergraph::PhysicalResourceIdentity,
+        _: u64,
+        _: fluxel_rendergraph::PhysicalResourceIdentity,
+        _: u64,
     ) -> Result<NativeRasterTextureBindings, String> {
         Err("native raster is only supported on Windows".into())
     }
@@ -872,12 +914,25 @@ mod imp {
     ) -> Result<(), String> {
         Err("native raster is only supported on Windows".into())
     }
+    pub(super) fn set_raster_uv_texture_bindings(
+        _: &mut CopyEncoder,
+        _: &NativeRasterTextureBindings,
+    ) -> Result<(), String> {
+        Err("native raster is only supported on Windows".into())
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the closed native UV recipe passes all independently validated role facts"
+    )]
     pub(super) fn set_vertex_buffer(
         _: &mut CopyEncoder,
         _: &OwnedBuffer,
         _: u64,
         _: u64,
         _: crate::RasterKernel,
+        _: u32,
+        _: fluxel_rendergraph::PhysicalResourceIdentity,
+        _: Option<&NativeRasterTextureBindings>,
     ) -> Result<(), String> {
         Err("native raster is only supported on Windows".into())
     }

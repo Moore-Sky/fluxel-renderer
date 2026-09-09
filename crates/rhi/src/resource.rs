@@ -388,6 +388,14 @@ pub enum RasterCreateError {
     InvalidBindingRange,
     /// The buffer's native creation facts do not authorize uniform reads.
     UniformUsageRequired,
+    /// The position stream is not the exact closed f32x3 vertex range.
+    InvalidPositionStreamRange,
+    /// The texture-coordinate stream is not the exact closed f32x2 vertex range.
+    InvalidTextureCoordinateStreamRange,
+    /// A closed vertex stream was created without vertex usage.
+    VertexUsageRequired,
+    /// The two closed vertex streams do not describe the requested vertex count.
+    VertexStreamCountMismatch,
     /// Native creation of a validated fixed raster binding failed.
     NativeFailure(String),
     /// The fixed WGSL artifact failed Naga parsing or validation.
@@ -408,6 +416,18 @@ impl fmt::Display for RasterCreateError {
             Self::InvalidBindingRange => f.write_str("invalid fixed raster uniform range"),
             Self::UniformUsageRequired => {
                 f.write_str("raster uniform binding requires uniform usage")
+            }
+            Self::InvalidPositionStreamRange => {
+                f.write_str("invalid fixed raster position stream range")
+            }
+            Self::InvalidTextureCoordinateStreamRange => {
+                f.write_str("invalid fixed raster texture-coordinate stream range")
+            }
+            Self::VertexUsageRequired => {
+                f.write_str("fixed raster vertex streams require vertex usage")
+            }
+            Self::VertexStreamCountMismatch => {
+                f.write_str("fixed raster vertex stream count mismatch")
             }
             Self::NativeFailure(reason) => {
                 write!(f, "native raster binding creation failed: {reason}")
@@ -653,6 +673,9 @@ pub enum RasterKernel {
     IndexedPositionFloat32x3CameraMaterial,
     /// An indexed camera/material mesh with one closed `textureLoad` RGBA8 binding.
     IndexedPositionFloat32x3CameraMaterialTexture,
+    /// An indexed camera/material mesh with separate f32x3 position and f32x2
+    /// UV streams plus one closed `textureLoad` RGBA8 binding.
+    IndexedPositionFloat32x3CameraMaterialTextureUv,
 }
 
 /// The non-configurable vertex layout selected by a fixed raster artifact.
@@ -665,6 +688,9 @@ pub enum RasterVertexLayout {
     PositionFloat32x2ColorUnorm8x4,
     /// One vertex is `float32x3 position` at byte zero, for a 12-byte stride.
     PositionFloat32x3,
+    /// Slot zero is tightly packed f32x3 position and slot one is tightly
+    /// packed f32x2 texture coordinates.
+    PositionFloat32x3AndTextureCoordinateFloat32x2,
 }
 
 /// Shader-stage visibility recorded by a closed raster binding identity.
@@ -729,6 +755,12 @@ pub struct RasterArtifactIdentity {
     pub texture_mip_level: Option<u32>,
     /// Version of the fixed texture-coordinate mapping recipe.
     pub texture_mapping_recipe_version: u32,
+    /// Slot-one layout, only present for the explicit-UV recipe.
+    pub texture_coordinate_vertex_layout: Option<RasterVertexLayout>,
+    /// Slot-one byte stride, only present for the explicit-UV recipe.
+    pub texture_coordinate_vertex_stride: Option<u32>,
+    /// Shader location consumed from slot one, only present for the explicit-UV recipe.
+    pub texture_coordinate_shader_location: Option<u32>,
     /// Version of the fixed vertex/index/target recipe.
     pub recipe_version: u32,
 }
@@ -775,6 +807,21 @@ impl fmt::Debug for RasterArtifactIdentity {
                     &self.texture_mapping_recipe_version,
                 );
         }
+        if self.texture_coordinate_vertex_layout.is_some() {
+            identity
+                .field(
+                    "texture_coordinate_vertex_layout",
+                    &self.texture_coordinate_vertex_layout,
+                )
+                .field(
+                    "texture_coordinate_vertex_stride",
+                    &self.texture_coordinate_vertex_stride,
+                )
+                .field(
+                    "texture_coordinate_shader_location",
+                    &self.texture_coordinate_shader_location,
+                );
+        }
         identity
             .field("recipe_version", &self.recipe_version)
             .finish()
@@ -790,13 +837,17 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3 => "position_f32x3_vertex",
             Self::IndexedPositionFloat32x3CameraMaterial => "camera_material_vertex",
             Self::IndexedPositionFloat32x3CameraMaterialTexture => "camera_material_texture_vertex",
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUv => {
+                "camera_material_texture_uv_vertex"
+            }
         }
     }
 
     /// Returns the shared fixed fragment entry point.
     pub const fn fragment_entry_point(self) -> &'static str {
         match self {
-            Self::IndexedPositionFloat32x3CameraMaterialTexture => "texture_color_fragment",
+            Self::IndexedPositionFloat32x3CameraMaterialTexture
+            | Self::IndexedPositionFloat32x3CameraMaterialTextureUv => "texture_color_fragment",
             _ => "color_fragment",
         }
     }
@@ -814,6 +865,7 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3 => 12,
             Self::IndexedPositionFloat32x3CameraMaterial => 12,
             Self::IndexedPositionFloat32x3CameraMaterialTexture => 12,
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUv => 12,
         }
     }
 
@@ -825,6 +877,7 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3 => Some(IndexFormat::Uint32),
             Self::IndexedPositionFloat32x3CameraMaterial => Some(IndexFormat::Uint32),
             Self::IndexedPositionFloat32x3CameraMaterialTexture => Some(IndexFormat::Uint32),
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUv => Some(IndexFormat::Uint32),
         }
     }
 
@@ -837,6 +890,9 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterial => RasterVertexLayout::PositionFloat32x3,
             Self::IndexedPositionFloat32x3CameraMaterialTexture => {
                 RasterVertexLayout::PositionFloat32x3
+            }
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUv => {
+                RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2
             }
         }
     }
@@ -852,7 +908,11 @@ impl RasterKernel {
             vertex_stride: self.vertex_stride(),
             index_format: self.index_format(),
             binding_count: if self.has_frame_uniform() {
-                if matches!(self, Self::IndexedPositionFloat32x3CameraMaterialTexture) {
+                if matches!(
+                    self,
+                    Self::IndexedPositionFloat32x3CameraMaterialTexture
+                        | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
+                ) {
                     2
                 } else {
                     1
@@ -875,13 +935,17 @@ impl RasterKernel {
             texture_binding_recipe_version: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
                 1
             } else {
                 0
             },
-            texture_binding: if matches!(self, Self::IndexedPositionFloat32x3CameraMaterialTexture)
-            {
+            texture_binding: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
+            ) {
                 Some(1)
             } else {
                 None
@@ -889,12 +953,17 @@ impl RasterKernel {
             texture_dimension: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
                 Some(TextureDimension::D2)
             } else {
                 None
             },
-            texture_format: if matches!(self, Self::IndexedPositionFloat32x3CameraMaterialTexture) {
+            texture_format: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
+            ) {
                 Some(TextureFormat::Rgba8Unorm)
             } else {
                 None
@@ -902,6 +971,7 @@ impl RasterKernel {
             texture_visibility: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
                 Some(RasterBindingVisibility::Fragment)
             } else {
@@ -910,6 +980,7 @@ impl RasterKernel {
             texture_sample_type: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
                 Some(RasterTextureSampleType::Float)
             } else {
@@ -918,6 +989,7 @@ impl RasterKernel {
             texture_mip_level: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
                 Some(0)
             } else {
@@ -926,10 +998,39 @@ impl RasterKernel {
             texture_mapping_recipe_version: if matches!(
                 self,
                 Self::IndexedPositionFloat32x3CameraMaterialTexture
+                    | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
-                1
+                if matches!(self, Self::IndexedPositionFloat32x3CameraMaterialTextureUv) {
+                    2
+                } else {
+                    1
+                }
             } else {
                 0
+            },
+            texture_coordinate_vertex_layout: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTextureUv
+            ) {
+                Some(RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2)
+            } else {
+                None
+            },
+            texture_coordinate_vertex_stride: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTextureUv
+            ) {
+                Some(8)
+            } else {
+                None
+            },
+            texture_coordinate_shader_location: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialTextureUv
+            ) {
+                Some(1)
+            } else {
+                None
             },
             recipe_version: 1,
         }
@@ -1006,6 +1107,15 @@ impl RasterKernel {
          @vertex fn camera_material_texture_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.position.xy * vec2(0.5, -0.5) + vec2(0.5)); }\n\
          @fragment fn texture_color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { let dimensions = textureDimensions(tex, 0); let texel = min(vec2<u32>(floor(clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(dimensions))), dimensions - vec2<u32>(1)); return frame.base_color * textureLoad(tex, vec2<i32>(texel), 0); }"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialTextureUv => {
+                "struct FrameUniforms { view_projection: mat4x4<f32>, base_color: vec4<f32>, };\n\
+         @group(0) @binding(0) var<uniform> frame: FrameUniforms;\n\
+         @group(0) @binding(1) var tex: texture_2d<f32>;\n\
+         struct VertexInput { @location(0) position: vec3<f32>, @location(1) uv: vec2<f32>, };\n\
+         struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) @interpolate(perspective, center) uv: vec2<f32>, };\n\
+         @vertex fn camera_material_texture_uv_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.uv); }\n\
+         @fragment fn texture_color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { let dimensions = textureDimensions(tex, 0); let texel = min(vec2<u32>(floor(clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(dimensions))), dimensions - vec2<u32>(1)); return frame.base_color * textureLoad(tex, vec2<i32>(texel), 0); }"
+            }
         }
     }
 
@@ -1014,6 +1124,7 @@ impl RasterKernel {
             self,
             Self::IndexedPositionFloat32x3CameraMaterial
                 | Self::IndexedPositionFloat32x3CameraMaterialTexture
+                | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
         )
     }
 }
@@ -1084,6 +1195,38 @@ impl fmt::Debug for RasterTextureBindingsLease {
     }
 }
 
+struct RasterUvTextureBindingsShared {
+    _native: crate::imp::NativeRasterTextureBindings,
+    pipeline: RasterPipeline,
+    _uniform: BufferLease,
+    _texture: TextureLease,
+    _positions: BufferLease,
+    _texture_coordinates: BufferLease,
+    position_identity: PhysicalResourceIdentity,
+    texture_coordinate_identity: PhysicalResourceIdentity,
+    vertex_count: u32,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// Closed explicit-UV raster binding. It retains every resource and records
+/// the two physical vertex-role identities that native recording must match.
+#[derive(Clone)]
+pub struct RasterUvTextureBindings(Arc<RasterUvTextureBindingsShared>);
+
+/// Strong lease retaining the explicit-UV binding and all its resources.
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "retained through ResourceLease for terminal native completion"
+)]
+pub struct RasterUvTextureBindingsLease(Arc<RasterUvTextureBindingsShared>);
+
+impl fmt::Debug for RasterUvTextureBindingsLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RasterUvTextureBindingsLease(..)")
+    }
+}
+
 struct TexturePackBindingsShared {
     _native: crate::imp::NativeTexturePackBindings,
     pipeline: ComputePipeline,
@@ -1121,6 +1264,8 @@ pub enum ResourceLease {
     RasterUniformBindings(RasterUniformBindingsLease),
     /// Retains the closed textured raster binding.
     RasterTextureBindings(RasterTextureBindingsLease),
+    /// Retains the closed explicit-UV textured raster binding.
+    RasterUvTextureBindings(RasterUvTextureBindingsLease),
     /// Retains the closed sampled-texture-to-storage-buffer binding object.
     TexturePackBindings(TexturePackBindingsLease),
 }
@@ -1260,6 +1405,11 @@ impl From<RasterUniformBindingsLease> for ResourceLease {
 impl From<RasterTextureBindingsLease> for ResourceLease {
     fn from(value: RasterTextureBindingsLease) -> Self {
         Self::RasterTextureBindings(value)
+    }
+}
+impl From<RasterUvTextureBindingsLease> for ResourceLease {
+    fn from(value: RasterUvTextureBindingsLease) -> Self {
+        Self::RasterUvTextureBindings(value)
     }
 }
 
@@ -1630,6 +1780,35 @@ impl RasterTextureBindings {
     }
     pub(crate) fn native(&self) -> &crate::imp::NativeRasterTextureBindings {
         &self.0._native
+    }
+}
+
+impl RasterUvTextureBindings {
+    /// Returns the sole explicit-UV pipeline accepted by this binding.
+    pub fn pipeline(&self) -> &RasterPipeline {
+        &self.0.pipeline
+    }
+    /// Returns the physical buffer generation required at vertex slot zero.
+    pub fn position_identity(&self) -> PhysicalResourceIdentity {
+        self.0.position_identity
+    }
+    /// Returns the physical buffer generation required at vertex slot one.
+    pub fn texture_coordinate_identity(&self) -> PhysicalResourceIdentity {
+        self.0.texture_coordinate_identity
+    }
+    /// Returns the exact number of vertices represented by both streams.
+    pub fn vertex_count(&self) -> u32 {
+        self.0.vertex_count
+    }
+    /// Acquires a terminal-lifetime lease for the complete binding.
+    pub fn lease(&self) -> RasterUvTextureBindingsLease {
+        RasterUvTextureBindingsLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeRasterTextureBindings {
+        &self.0._native
+    }
+    pub(crate) fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
     }
 }
 
@@ -2029,6 +2208,82 @@ impl Device {
                 pipeline: pipeline.clone(),
                 _uniform: uniform.lease(),
                 _texture: texture.lease(),
+                device: self.identity,
+            },
+        )))
+    }
+
+    /// Creates the closed explicit-UV textured raster binding. Both vertex
+    /// streams are whole, tightly packed, same-device vertex buffers and are
+    /// retained with their physical identities for later role validation.
+    pub fn create_raster_uv_texture_bindings(
+        &self,
+        pipeline: &RasterPipeline,
+        uniform: &Buffer,
+        texture: &Texture,
+        positions: &Buffer,
+        texture_coordinates: &Buffer,
+        vertex_count: u32,
+    ) -> Result<RasterUvTextureBindings, RasterCreateError> {
+        if pipeline.kernel() != RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv {
+            return Err(RasterCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity
+            || uniform.device_identity() != self.identity
+            || texture.device_identity() != self.identity
+            || positions.device_identity() != self.identity
+            || texture_coordinates.device_identity() != self.identity
+        {
+            return Err(RasterCreateError::ForeignDevice);
+        }
+        validate_raster_uniform_contract(
+            RasterKernel::IndexedPositionFloat32x3CameraMaterial,
+            uniform.descriptor().buffer.size,
+            uniform.allowed_usage(),
+        )?;
+        validate_texture_pack_texture_desc(texture.descriptor().texture, texture.allowed_usage())
+            .map_err(|_| RasterCreateError::BindingRecipeMismatch)?;
+        let position_size = u64::from(vertex_count)
+            .checked_mul(12)
+            .ok_or(RasterCreateError::VertexStreamCountMismatch)?;
+        let uv_size = u64::from(vertex_count)
+            .checked_mul(8)
+            .ok_or(RasterCreateError::VertexStreamCountMismatch)?;
+        if vertex_count == 0 || positions.descriptor().buffer.size != position_size {
+            return Err(RasterCreateError::InvalidPositionStreamRange);
+        }
+        if texture_coordinates.descriptor().buffer.size != uv_size {
+            return Err(RasterCreateError::InvalidTextureCoordinateStreamRange);
+        }
+        if !positions.allowed_usage().contains(BufferUsageKind::Vertex)
+            || !texture_coordinates
+                .allowed_usage()
+                .contains(BufferUsageKind::Vertex)
+        {
+            return Err(RasterCreateError::VertexUsageRequired);
+        }
+        let native = crate::imp::create_raster_uv_texture_bindings(
+            &self.inner,
+            pipeline.native(),
+            uniform.native(),
+            texture.native(),
+            positions.identity(),
+            position_size,
+            texture_coordinates.identity(),
+            uv_size,
+        )
+        .map_err(RasterCreateError::NativeFailure)?;
+        Ok(RasterUvTextureBindings(Arc::new(
+            RasterUvTextureBindingsShared {
+                _native: native,
+                pipeline: pipeline.clone(),
+                _uniform: uniform.lease(),
+                _texture: texture.lease(),
+                _positions: positions.lease(),
+                _texture_coordinates: texture_coordinates.lease(),
+                position_identity: positions.identity(),
+                texture_coordinate_identity: texture_coordinates.identity(),
+                vertex_count,
                 device: self.identity,
             },
         )))
@@ -2609,7 +2864,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
     #[test]
     fn compute_pipeline_creation_stages_map_to_public_error_variants() {
         let cases = [
@@ -2631,7 +2886,7 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
     #[test]
     fn raster_pipeline_creation_stages_map_to_public_error_variants() {
         let cases = [
@@ -3021,5 +3276,28 @@ mod tests {
         );
         assert_eq!(identity.texture_mip_level, Some(0));
         assert_eq!(identity.texture_mapping_recipe_version, 1);
+        assert_eq!(
+            format!("{identity:?}"),
+            "RasterArtifactIdentity { module_source_hash: 8313758755579089945, vertex_entry_point: \"camera_material_texture_vertex\", fragment_entry_point: \"texture_color_fragment\", target_format: Rgba8Unorm, vertex_layout: PositionFloat32x3, vertex_stride: 12, index_format: Some(Uint32), binding_count: 2, uniform_binding_size: 80, binding_recipe_version: 1, texture_binding_recipe_version: 1, texture_binding: Some(1), texture_dimension: Some(D2), texture_format: Some(Rgba8Unorm), uniform_binding: Some(0), uniform_visibility: Some(VertexFragment), texture_visibility: Some(Fragment), texture_sample_type: Some(Float), texture_mip_level: Some(0), texture_mapping_recipe_version: 1, recipe_version: 1 }"
+        );
+        let uv = RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv.portable_identity();
+        assert_eq!(uv.texture_mapping_recipe_version, 2);
+        assert_eq!(
+            uv.vertex_layout,
+            RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2
+        );
+        assert_eq!(
+            uv.texture_coordinate_vertex_layout,
+            Some(RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2)
+        );
+        assert_eq!(uv.texture_coordinate_vertex_stride, Some(8));
+        assert_eq!(uv.texture_coordinate_shader_location, Some(1));
+        assert_eq!(
+            format!("{uv:?}"),
+            "RasterArtifactIdentity { module_source_hash: 13201511842499328436, vertex_entry_point: \"camera_material_texture_uv_vertex\", fragment_entry_point: \"texture_color_fragment\", target_format: Rgba8Unorm, vertex_layout: PositionFloat32x3AndTextureCoordinateFloat32x2, vertex_stride: 12, index_format: Some(Uint32), binding_count: 2, uniform_binding_size: 80, binding_recipe_version: 1, texture_binding_recipe_version: 1, texture_binding: Some(1), texture_dimension: Some(D2), texture_format: Some(Rgba8Unorm), uniform_binding: Some(0), uniform_visibility: Some(VertexFragment), texture_visibility: Some(Fragment), texture_sample_type: Some(Float), texture_mip_level: Some(0), texture_mapping_recipe_version: 2, texture_coordinate_vertex_layout: Some(PositionFloat32x3AndTextureCoordinateFloat32x2), texture_coordinate_vertex_stride: Some(8), texture_coordinate_shader_location: Some(1), recipe_version: 1 }"
+        );
+        // Conditional UV fields must not perturb the exact legacy artifact
+        // representation consumed by the earlier conformance evidence.
+        assert!(!format!("{identity:?}").contains("texture_coordinate_vertex"));
     }
 }

@@ -1,6 +1,6 @@
 # Fluxel Renderer design
 
-**Status: 0.2.3 fixed headless textured indexed snapshot draw**
+**Status: 0.2.4 fixed headless explicit-UV indexed snapshot draw**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
@@ -134,6 +134,15 @@ a fixed clamped mip-zero integer `textureLoad`. There is no sampler contract.
 The renderer fail-closes non-finite, non-positive-w, or clipped textured input.
 Mesh and texture reservations roll back together before acceptance and are
 released or poisoned together after it.
+
+0.2.4 keeps that path intact and adds a separate `TexturedGeometry` /
+`TexturedIndexedMeshSnapshot` generation containing positions, indices, and one
+finite `f32x2` UV per vertex. All three uploads must complete before publication.
+`draw_textured_uv` binds positions and UVs in two closed vertex slots and uses
+perspective-center interpolation before the same clamped integer mip-zero
+`textureLoad`. The typed snapshot and RHI binding retain physical stream roles,
+so equally sized generic buffers cannot be silently swapped. This still adds no
+sampler, filtering, mip selection, sRGB, normals, lighting, or PBR contract.
 
 This is evidence for one fixed textured snapshot-to-plan-to-native path, not a
 claim that model transforms, `DrawList` lowering, samplers, UV attributes,

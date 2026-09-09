@@ -32,7 +32,7 @@ usage; its private staging rows are padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.3"
+tag = "v0.2.4"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -44,7 +44,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.3"
+tag = "v0.2.4"
 default-features = false
 features = ["dx12"]
 ```
@@ -117,7 +117,16 @@ layout. The 0.2.3 variant adds a fragment-visible whole `texture_2d<f32>` at
 binding 1 and a fixed mip-zero integer `textureLoad` mapping; its portable
 identity explicitly records binding numbers, visibility, dimension, format,
 sample type, mip and mapping version. It does not add a sampler. Neither recipe
-makes those choices configurable. X01 samples that complete color texture in
+makes those choices configurable.
+
+The 0.3.0 RHI API adds one further closed raster artifact for renderer 0.2.4:
+slot 0 is tightly packed `f32x3` position at shader location 0 and slot 1 is
+tightly packed `f32x2` texture coordinate at location 1. Its binding retains
+the expected physical identities for both streams, and safe/native recording
+rejects swapped, missing, repeated, partial, or foreign roles before submission.
+It preserves the same no-sampler mip-zero `textureLoad` fragment recipe.
+
+X01 samples that complete color texture in
 a closed compute artifact, packs row-major RGBA8 pixels into an RW storage
 buffer, and copies the result to an export. Texture-row padding is stripped for
 the exact CPU oracle. Readback consumes the exported outgoing state and lease

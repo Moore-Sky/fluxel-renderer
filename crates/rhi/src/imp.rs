@@ -291,6 +291,15 @@ pub(super) struct NativeRasterUniformBindings {
 pub(super) struct NativeRasterTextureBindings {
     native: Option<NativeRasterTextureBindingsInner>,
     pipeline: NativeRasterPipeline,
+    // Only the explicit-UV closed artifact populates this. The opaque
+    // generation identities and exact whole-stream ranges are rechecked at
+    // the unsafe vertex binding edge.
+    expected_uv_vertex_streams: Option<(
+        fluxel_rendergraph::PhysicalResourceIdentity,
+        u64,
+        fluxel_rendergraph::PhysicalResourceIdentity,
+        u64,
+    )>,
 }
 
 enum NativeRasterTextureBindingsInner {
@@ -1275,6 +1284,11 @@ pub(super) fn create_raster_pipeline(
         offset: 0,
         shader_location: 0,
     }];
+    let texture_coordinate_f32x2_attributes = [wgt::VertexAttribute {
+        format: wgt::VertexFormat::Float32x2,
+        offset: 0,
+        shader_location: 1,
+    }];
     let buffers = match kernel {
         crate::RasterKernel::Triangle => vec![],
         crate::RasterKernel::IndexedPositionColor => vec![Some(wgpu_hal::VertexBufferLayout {
@@ -1301,6 +1315,18 @@ pub(super) fn create_raster_pipeline(
                 attributes: &position_f32x3_attributes,
             })]
         }
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv => vec![
+            Some(wgpu_hal::VertexBufferLayout {
+                array_stride: 12,
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: &position_f32x3_attributes,
+            }),
+            Some(wgpu_hal::VertexBufferLayout {
+                array_stride: 8,
+                step_mode: wgt::VertexStepMode::Vertex,
+                attributes: &texture_coordinate_f32x2_attributes,
+            }),
+        ],
     };
     let color_targets = [Some(wgt::ColorTargetState::from(
         wgt::TextureFormat::Rgba8Unorm,
@@ -1328,12 +1354,15 @@ pub(super) fn create_raster_pipeline(
             count: None,
         },
     ];
-    let raster_binding_entries: &[wgt::BindGroupLayoutEntry] =
-        if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture {
-            &textured_frame_entries
-        } else {
-            &frame_uniform_entries
-        };
+    let raster_binding_entries: &[wgt::BindGroupLayoutEntry] = if matches!(
+        kernel,
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+    ) {
+        &textured_frame_entries
+    } else {
+        &frame_uniform_entries
+    };
     let constants = naga::back::PipelineConstants::default();
     let native = match &owner.native {
         #[cfg(feature = "dx12")]
@@ -1375,6 +1404,7 @@ pub(super) fn create_raster_pipeline(
                 kernel,
                 crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
                 match unsafe {
                     // SAFETY: the static one-entry descriptor is valid and
@@ -1534,6 +1564,7 @@ pub(super) fn create_raster_pipeline(
                 kernel,
                 crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
             ) {
                 match unsafe {
                     // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.
@@ -1883,6 +1914,7 @@ pub(super) fn create_raster_texture_bindings(
                 Ok(group) => Ok(NativeRasterTextureBindings {
                     native: Some(NativeRasterTextureBindingsInner::Dx12 { group, view }),
                     pipeline: pipeline.clone(),
+                    expected_uv_vertex_streams: None,
                 }),
                 Err(e) => {
                     // SAFETY: creation failed before ownership escaped; `view`
@@ -1931,6 +1963,7 @@ pub(super) fn create_raster_texture_bindings(
                 Ok(group) => Ok(NativeRasterTextureBindings {
                     native: Some(NativeRasterTextureBindingsInner::Vulkan { group, view }),
                     pipeline: pipeline.clone(),
+                    expected_uv_vertex_streams: None,
                 }),
                 Err(e) => {
                     // SAFETY: creation failed before ownership escaped; `view`
@@ -1944,6 +1977,32 @@ pub(super) fn create_raster_texture_bindings(
         }
         _ => Err("textured raster bindings do not match textured raster pipeline".into()),
     }
+}
+
+/// Creates the explicit-UV variant of the fixed texture binding and records
+/// the two opaque stream generations for a final native-boundary role check.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private native boundary receives each fixed binding and both independently checked stream identity/range pairs"
+)]
+pub(super) fn create_raster_uv_texture_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    uniform: &OwnedBuffer,
+    texture: &OwnedTexture,
+    positions: fluxel_rendergraph::PhysicalResourceIdentity,
+    position_size: u64,
+    texture_coordinates: fluxel_rendergraph::PhysicalResourceIdentity,
+    texture_coordinate_size: u64,
+) -> Result<NativeRasterTextureBindings, String> {
+    let mut bindings = create_raster_texture_bindings(owner, pipeline, uniform, texture)?;
+    bindings.expected_uv_vertex_streams = Some((
+        positions,
+        position_size,
+        texture_coordinates,
+        texture_coordinate_size,
+    ));
+    Ok(bindings)
 }
 
 pub(super) fn set_raster_texture_bindings(
@@ -1990,6 +2049,15 @@ pub(super) fn set_raster_texture_bindings(
         _ => return Err("textured raster binding backend mismatch".into()),
     }
     Ok(())
+}
+
+/// The explicit-UV artifact uses the same closed uniform-plus-texture native
+/// group, while its distinct safe wrapper carries the vertex-role identities.
+pub(super) fn set_raster_uv_texture_bindings(
+    encoder: &mut CopyEncoder,
+    bindings: &NativeRasterTextureBindings,
+) -> Result<(), String> {
+    set_raster_texture_bindings(encoder, bindings)
 }
 
 /// Creates the sole RW storage binding for a validated buffer subrange.
@@ -2534,23 +2602,71 @@ pub(super) fn set_raster_pipeline(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private native boundary deliberately receives every independently validated closed-ABI fact"
+)]
 pub(super) fn set_vertex_buffer(
     encoder: &mut CopyEncoder,
     buffer: &OwnedBuffer,
     offset: u64,
     size: u64,
     kernel: crate::RasterKernel,
+    slot: u32,
+    actual_identity: fluxel_rendergraph::PhysicalResourceIdentity,
+    uv_bindings: Option<&NativeRasterTextureBindings>,
 ) -> Result<(), String> {
+    if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv {
+        if encoder.active_render_view.is_none() {
+            return Err("explicit-UV vertex binding requires an active raster pass".into());
+        }
+        let bindings = uv_bindings
+            .ok_or_else(|| "explicit-UV vertex binding requires UV bindings".to_owned())?;
+        if !Arc::ptr_eq(&encoder.owner, &bindings.pipeline.0.owner)
+            || encoder.active_raster_pipeline != Some(Arc::as_ptr(&bindings.pipeline.0) as usize)
+        {
+            return Err("explicit-UV vertex binding requires its active pipeline".into());
+        }
+        if slot > 1 {
+            return Err("explicit-UV vertex slot is out of range".into());
+        }
+        if !buffer.allowed_usage.contains(BufferUsageKind::Vertex) {
+            return Err("explicit-UV vertex buffer requires vertex usage".into());
+        }
+        let expected = bindings
+            .expected_uv_vertex_streams
+            .ok_or_else(|| "explicit-UV native binding lacks stream identities".to_owned())?;
+        let (expected_identity, expected_size) = if slot == 0 {
+            (expected.0, expected.1)
+        } else {
+            (expected.2, expected.3)
+        };
+        if actual_identity != expected_identity {
+            return Err("explicit-UV vertex role identity mismatch".into());
+        }
+        if offset != 0 || size != expected_size || buffer.size != expected_size {
+            return Err("explicit-UV vertex stream range mismatch".into());
+        }
+    }
     if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
         || !offset.is_multiple_of(4)
-        || matches!(
+        || (matches!(
             kernel,
             crate::RasterKernel::IndexedPositionFloat32x3
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
-        ) && offset != 0
+        ) && offset != 0)
+        || (kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+            && (slot > 1 || offset != 0 || size < if slot == 0 { 12 } else { 8 }))
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
-        || size < 12
+        || size
+            < if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+                && slot == 1
+            {
+                8
+            } else {
+                12
+            }
     {
         return Err("invalid raster vertex buffer range".into());
     }
@@ -2564,7 +2680,7 @@ pub(super) fn set_vertex_buffer(
             // SAFETY: safe and native checks prove same device, active raster
             // pass, aligned in-bounds non-empty range, and retained buffer life.
             encoder.set_vertex_buffer(
-                0,
+                slot,
                 wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
             )
         },
@@ -2572,7 +2688,7 @@ pub(super) fn set_vertex_buffer(
         (NativeEncoder::Vulkan(encoder), Some(NativeBuffer::Vulkan(buffer))) => unsafe {
             // SAFETY: same pass/device/range/alignment/lifetime proof as DX12.
             encoder.set_vertex_buffer(
-                0,
+                slot,
                 wgpu_hal::BufferBinding::new_unchecked(buffer, offset, size),
             )
         },
@@ -3238,7 +3354,7 @@ fn submit_copy_with_staging(
 ) -> Result<NativeCompletion, String> {
     let finished = buffer.native.take().expect("finished command buffer");
     #[cfg(any(test, feature = "test-support"))]
-    let injected_submit_fault = TEST_SUBMIT_FAULT.swap(0, std::sync::atomic::Ordering::SeqCst);
+    let injected_submit_fault = take_submit_fault();
     #[cfg(not(any(test, feature = "test-support")))]
     let injected_submit_fault = 0;
     if injected_submit_fault == 1 {
@@ -3528,6 +3644,12 @@ pub(super) fn wait_completion(
 
 #[cfg(any(test, feature = "test-support"))]
 static TEST_SUBMIT_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Number of successful queue accepts to allow before consuming the configured
+/// test-only submit fault. The fixture guard serializes configuration; the CAS
+/// loop below makes individual submit consumption deterministic nonetheless.
+#[cfg(any(test, feature = "test-support"))]
+static TEST_SUBMIT_FAULT_AFTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 #[cfg(any(test, feature = "test-support"))]
 static TEST_COMPLETION_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -3535,11 +3657,63 @@ static TEST_COMPLETION_PENDING: std::sync::atomic::AtomicBool =
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn inject_submit_rejected_once() {
     TEST_SUBMIT_FAULT.store(1, std::sync::atomic::Ordering::SeqCst);
+    TEST_SUBMIT_FAULT_AFTER.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn inject_submit_accepted_unknown_once() {
     TEST_SUBMIT_FAULT.store(2, std::sync::atomic::Ordering::SeqCst);
+    TEST_SUBMIT_FAULT_AFTER.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn inject_submit_rejected_after(successful_submits: usize) {
+    TEST_SUBMIT_FAULT_AFTER.store(successful_submits, std::sync::atomic::Ordering::SeqCst);
+    TEST_SUBMIT_FAULT.store(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn inject_submit_accepted_unknown_after(successful_submits: usize) {
+    TEST_SUBMIT_FAULT_AFTER.store(successful_submits, std::sync::atomic::Ordering::SeqCst);
+    TEST_SUBMIT_FAULT.store(2, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Returns a configured test fault only after exactly the requested number of
+/// earlier calls passed. AcqRel CAS makes each successful decrement correspond
+/// to one submission attempt even if a fixture accidentally records in more
+/// than one thread.
+#[cfg(any(test, feature = "test-support"))]
+fn take_submit_fault() -> u8 {
+    loop {
+        let fault = TEST_SUBMIT_FAULT.load(std::sync::atomic::Ordering::Acquire);
+        if fault == 0 {
+            return 0;
+        }
+        let after = TEST_SUBMIT_FAULT_AFTER.load(std::sync::atomic::Ordering::Acquire);
+        if after == 0 {
+            if TEST_SUBMIT_FAULT
+                .compare_exchange(
+                    fault,
+                    0,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return fault;
+            }
+        } else if TEST_SUBMIT_FAULT_AFTER
+            .compare_exchange(
+                after,
+                after - 1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return 0;
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -4958,5 +5132,18 @@ mod tests {
         let _guard = lock_queue_operations(&lock);
         // The recovered guard is still held here, so a future caller remains
         // serialized even after an unrelated panic poisoned the mutex.
+    }
+
+    #[test]
+    fn submit_fault_countdown_consumes_exactly_the_requested_attempt() {
+        inject_submit_rejected_after(2);
+        assert_eq!(take_submit_fault(), 0);
+        assert_eq!(take_submit_fault(), 0);
+        assert_eq!(take_submit_fault(), 1);
+        assert_eq!(take_submit_fault(), 0);
+
+        inject_submit_accepted_unknown_after(0);
+        assert_eq!(take_submit_fault(), 2);
+        assert_eq!(take_submit_fault(), 0);
     }
 }
