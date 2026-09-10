@@ -3,7 +3,8 @@
 //! These tests exercise the public packet entry points against a real DX12 or
 //! Vulkan device.  Fault injection distinguishes pre-raster release from
 //! accepted-raster poison, while D01 and D02 compare one packet graph's exact
-//! target bytes with an independent CPU triangle oracle.
+//! target bytes with independent CPU triangle oracles. D03 additionally
+//! proves per-draw model placement while reusing one immutable mesh snapshot.
 
 use std::{
     sync::Arc,
@@ -23,7 +24,7 @@ use super::super::{
 };
 use crate::{
     BasicMaterial, Camera, DrawList, FixedFrameRenderer, Geometry, IndexedMeshSnapshot,
-    IndexedMeshUpload, IndexedMeshUploadStatus, Mesh,
+    IndexedMeshUpload, IndexedMeshUploadStatus, Mesh, ModelTransform,
 };
 
 #[test]
@@ -48,6 +49,18 @@ fn d02_later_overlapping_draw_wins_dx12() {
 #[ignore = "requires a Windows Vulkan device with required validation"]
 fn d02_later_overlapping_draw_wins_vulkan() {
     run_oracle(Backend::Vulkan, Case::Overlap);
+}
+
+#[test]
+#[ignore = "requires a Windows DX12 device with required validation"]
+fn d03_transformed_reused_snapshot_dx12() {
+    run_d03(Backend::Dx12);
+}
+
+#[test]
+#[ignore = "requires a Windows Vulkan device with required validation"]
+fn d03_transformed_reused_snapshot_vulkan() {
+    run_d03(Backend::Vulkan);
 }
 
 #[test]
@@ -150,6 +163,51 @@ fn packet_build_contract_rejects_global_and_indexed_input_errors() {
         .lower_draw_list(&one, &snapshots[..1], [8, 8])
         .unwrap();
     drop(sibling_renderer.submit_packet(packet).unwrap());
+
+    // All inputs are finite, but the model product itself overflows.  This is
+    // a draw-local build failure and must be reported before any submission.
+    let overflow_camera = Camera::new(
+        *Camera::default().view(),
+        [
+            [f32::MAX, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    );
+    let overflow_model = ModelTransform::from_column_major([
+        [2.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    .unwrap();
+    let mut overflow = DrawList::new(&overflow_camera);
+    overflow.push_transformed(&meshes[0], overflow_model);
+    assert!(matches!(
+        renderer.lower_draw_list(&overflow, &snapshots[..1], [8, 8]),
+        Err(super::super::RenderPacketBuildError::Draw {
+            index: 0,
+            reason: super::super::RenderPacketDrawBuildError::ModelTransformProductNonFinite,
+        })
+    ));
+
+    let outside_model = ModelTransform::from_column_major([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [3.0, 0.0, 0.0, 1.0],
+    ])
+    .unwrap();
+    let mut outside = DrawList::new(&camera);
+    outside.push_transformed(&meshes[0], outside_model);
+    assert!(matches!(
+        renderer.lower_draw_list(&outside, &snapshots[..1], [8, 8]),
+        Err(super::super::RenderPacketBuildError::Draw {
+            index: 0,
+            reason: super::super::RenderPacketDrawBuildError::ClipOutOfBounds,
+        })
+    ));
 }
 
 #[test]
@@ -200,6 +258,40 @@ fn d01_d02_paired_backend_oracles() {
             "{case:?} DX12/Vulkan full readback"
         );
     }
+}
+
+#[test]
+#[ignore = "requires Windows DX12 and Vulkan devices with required validation"]
+fn d03_paired_backend_oracle_uses_one_compiled_graph() {
+    let _guard = crate::native_fixture_guard();
+    let dx12_device = open(Backend::Dx12);
+    let vulkan_device = open(Backend::Vulkan);
+    let dx12_renderer = FixedFrameRenderer::new(dx12_device.clone());
+    let vulkan_renderer = FixedFrameRenderer::new(vulkan_device.clone());
+    assert_eq!(dx12_renderer.capabilities, vulkan_renderer.capabilities);
+    let dx12_fixture = d03_fixture(&dx12_device);
+    let vulkan_fixture = d03_fixture(&vulkan_device);
+    let dx12_packet = d03_packet(&dx12_renderer, &dx12_fixture);
+    let vulkan_packet = d03_packet(&vulkan_renderer, &vulkan_fixture);
+    let graph =
+        super::super::graph::build_packet_graph(&dx12_packet, &dx12_renderer.capabilities).unwrap();
+    let vulkan_graph = graph.clone();
+    assert!(Arc::ptr_eq(&graph.compiled, &vulkan_graph.compiled));
+    test_support::clear_validation_diagnostics(&dx12_device);
+    let dx12 = observe_d03(
+        &dx12_device,
+        dx12_renderer
+            .submit_packet_with_graph_for_test(dx12_packet, graph)
+            .unwrap(),
+    );
+    test_support::clear_validation_diagnostics(&vulkan_device);
+    let vulkan = observe_d03(
+        &vulkan_device,
+        vulkan_renderer
+            .submit_packet_with_graph_for_test(vulkan_packet, vulkan_graph)
+            .unwrap(),
+    );
+    assert_eq!(dx12.bytes, vulkan.bytes, "D03 DX12/Vulkan full readback");
 }
 
 #[test]
@@ -303,6 +395,315 @@ fn run_oracle_locked(backend: Backend, case: Case) -> OracleResult {
         .submit_packet(packet(&renderer, &camera, &meshes, &snapshots))
         .unwrap();
     observe_packet(&device, case, submission)
+}
+
+fn run_d03(backend: Backend) {
+    let _guard = crate::native_fixture_guard();
+    let device = open(backend);
+    let renderer = FixedFrameRenderer::new(device.clone());
+    let fixture = d03_fixture(&device);
+    test_support::clear_validation_diagnostics(&device);
+    let submission = renderer
+        .submit_packet(d03_packet(&renderer, &fixture))
+        .unwrap();
+    let _ = observe_d03(&device, submission);
+}
+
+struct D03Fixture {
+    camera: Camera,
+    mesh: Mesh,
+    snapshots: [IndexedMeshSnapshot; 2],
+    transforms: [ModelTransform; 2],
+}
+
+fn d03_fixture(device: &Device) -> D03Fixture {
+    let oracle = d03_oracle_fixture();
+    let mesh = Mesh::new(
+        oracle.geometry.clone(),
+        BasicMaterial::new([1.0, 0.0, 0.0, 1.0]),
+    );
+    let snapshot = ready_snapshot(device, mesh.geometry());
+    D03Fixture {
+        camera: oracle.camera,
+        mesh,
+        snapshots: [snapshot.clone(), snapshot],
+        transforms: oracle.transforms,
+    }
+}
+
+struct D03OracleFixture {
+    camera: Camera,
+    geometry: Geometry,
+    transforms: [ModelTransform; 2],
+}
+
+fn d03_oracle_fixture() -> D03OracleFixture {
+    let camera = Camera::new(
+        [
+            [1.0, 0.15, 0.0, 0.0],
+            [0.10, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.05, -0.04, 0.0, 1.0],
+        ],
+        [
+            [0.85, 0.0, 0.0, 0.0],
+            [0.0, 0.90, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    );
+    let geometry =
+        Geometry::from_positions(vec![[-0.6, -0.5, 0.0], [0.6, -0.5, 0.0], [-0.6, 0.5, 0.0]])
+            .with_indices(vec![0, 1, 2])
+            .unwrap();
+    let transforms = [
+        ModelTransform::from_column_major([
+            [0.45, 0.0, 0.0, 0.0],
+            [0.0, 0.50, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [-0.55, 0.15, 0.0, 1.0],
+        ])
+        .unwrap(),
+        ModelTransform::from_column_major([
+            [0.50, 0.12, 0.0, 0.0],
+            [0.08, 0.42, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.52, -0.18, 0.0, 1.0],
+        ])
+        .unwrap(),
+    ];
+    assert_ne!(
+        multiply(
+            transforms[0].world_from_model(),
+            transforms[1].world_from_model()
+        ),
+        multiply(
+            transforms[1].world_from_model(),
+            transforms[0].world_from_model()
+        ),
+        "D03 placements must be noncommuting"
+    );
+    D03OracleFixture {
+        camera,
+        geometry,
+        transforms,
+    }
+}
+
+fn d03_packet(renderer: &FixedFrameRenderer, fixture: &D03Fixture) -> RenderPacket {
+    let mut list = DrawList::new(&fixture.camera);
+    list.push_transformed(&fixture.mesh, fixture.transforms[0]);
+    list.push_transformed(&fixture.mesh, fixture.transforms[1]);
+    let packet = renderer
+        .lower_draw_list(&list, &fixture.snapshots, [8, 8])
+        .unwrap();
+    let projection_view = multiply(fixture.camera.projection(), fixture.camera.view());
+    for (draw, transform) in packet.draws().iter().zip(fixture.transforms) {
+        assert_eq!(
+            draw.uniform().view_projection(),
+            &multiply(&projection_view, transform.world_from_model()),
+            "D03 packet uniforms must preserve DrawList insertion order"
+        );
+    }
+    packet
+}
+
+fn observe_d03(device: &Device, mut submission: RenderPacketSubmission) -> OracleResult {
+    let backend = device.hardware().backend;
+    wait_complete(&mut submission);
+    let frame = submission.completed.as_ref().unwrap();
+    let graph = submission.packet_graph();
+    assert_eq!(
+        graph.snapshots.len(),
+        1,
+        "D03 imports one snapshot generation"
+    );
+    assert_eq!(
+        graph.draws.len(),
+        2,
+        "D03 retains two independent draw uniforms"
+    );
+    for snapshot in &graph.snapshots {
+        assert_eq!(
+            frame
+                .exports
+                .buffer(snapshot.position_export)
+                .unwrap()
+                .outgoing_state,
+            ResourceAccessState::CopyDestination
+        );
+        assert_eq!(
+            frame
+                .exports
+                .buffer(snapshot.index_export)
+                .unwrap()
+                .outgoing_state,
+            ResourceAccessState::CopyDestination
+        );
+    }
+    let readback = readback_exported_raster_texture_for_test(
+        device,
+        frame
+            .exports
+            .texture(submission.target_export.unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        readback
+            .padded
+            .chunks_exact(readback.bytes_per_row as usize)
+            .all(|row| row[8 * 4..].iter().all(|byte| *byte == 0))
+    );
+    let fixture = d03_oracle_fixture();
+    let expected = d03_oracle(&fixture);
+    assert!(
+        expected
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0, 0, 0, 255])
+    );
+    assert!(
+        expected
+            .chunks_exact(4)
+            .any(|pixel| pixel == [255, 0, 0, 255])
+    );
+    assert_eq!(
+        readback.tight,
+        expected,
+        "{backend:?} D03 first difference: {:?}",
+        first_difference(&readback.tight, &expected)
+    );
+    let diagnostics = test_support::validation_diagnostics(device);
+    assert!(diagnostics.is_empty(), "{backend:?} D03: {diagnostics:?}");
+    artifact_d03(
+        device,
+        graph.compiled.execution_plan(),
+        &fixture,
+        &expected,
+        &readback.tight,
+        &diagnostics,
+    );
+    OracleResult {
+        bytes: readback.tight,
+    }
+}
+
+/// Independently applies column-major `projection * view * model`; it does
+/// not share renderer uniform construction or serialization code.
+fn d03_oracle(fixture: &D03OracleFixture) -> Vec<u8> {
+    let mut out = vec![0; 8 * 8 * 4];
+    for pixel in out.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[0, 0, 0, 255]);
+    }
+    let projection_view = multiply(fixture.camera.projection(), fixture.camera.view());
+    let mut occupied = [false; 8 * 8];
+    for (draw_index, transform) in fixture.transforms.into_iter().enumerate() {
+        let clip_from_model = multiply(&projection_view, transform.world_from_model());
+        let positions = fixture.geometry.positions();
+        let points = [positions[0], positions[1], positions[2]].map(|position| {
+            let clip = multiply_vector(
+                &clip_from_model,
+                [position[0], position[1], position[2], 1.0],
+            );
+            (
+                (clip[0] / clip[3] + 1.0) * 4.0,
+                (1.0 - clip[1] / clip[3]) * 4.0,
+            )
+        });
+        let mut draw = vec![0; 8 * 8 * 4];
+        fill_points(&mut draw, points, [255, 0, 0, 255]);
+        let coverage = draw
+            .chunks_exact(4)
+            .map(|pixel| pixel == [255, 0, 0, 255])
+            .collect::<Vec<_>>();
+        assert!(
+            coverage.iter().any(|covered| *covered),
+            "D03 draw {draw_index} must cover at least one sample"
+        );
+        assert!(
+            coverage
+                .iter()
+                .zip(occupied)
+                .all(|(covered, previous)| !covered || !previous),
+            "D03 transformed coverage must remain disjoint"
+        );
+        for (pixel_index, covered) in coverage.into_iter().enumerate() {
+            if covered {
+                occupied[pixel_index] = true;
+                out[pixel_index * 4..pixel_index * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+    }
+    out
+}
+
+fn multiply(left: &[[f32; 4]; 4], right: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut output = [[0.0; 4]; 4];
+    for column in 0..4 {
+        for row in 0..4 {
+            output[column][row] = (0..4).map(|k| left[k][row] * right[column][k]).sum();
+        }
+    }
+    output
+}
+
+fn multiply_vector(matrix: &[[f32; 4]; 4], vector: [f32; 4]) -> [f32; 4] {
+    [0, 1, 2, 3].map(|row| {
+        (0..4)
+            .map(|column| matrix[column][row] * vector[column])
+            .sum()
+    })
+}
+
+fn fill_points(out: &mut [u8], points: [(f32, f32); 3], color: [u8; 4]) {
+    let edge = |a: (f32, f32), b: (f32, f32), p: (f32, f32)| {
+        (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
+    };
+    let top_left = |a: (f32, f32), b: (f32, f32)| b.1 < a.1 || (b.1 == a.1 && b.0 < a.0);
+    let winding = edge(points[0], points[1], points[2]);
+    for y in 0..8 {
+        for x in 0..8 {
+            let sample = (x as f32 + 0.5, y as f32 + 0.5);
+            let edges = [
+                (points[0], points[1]),
+                (points[1], points[2]),
+                (points[2], points[0]),
+            ];
+            if edges.iter().all(|&(a, b)| {
+                let value = edge(a, b, sample);
+                if winding > 0.0 {
+                    value > 0.0 || (value == 0.0 && top_left(a, b))
+                } else {
+                    value < 0.0 || (value == 0.0 && top_left(b, a))
+                }
+            }) {
+                out[(y * 8 + x) * 4..(y * 8 + x + 1) * 4].copy_from_slice(&color);
+            }
+        }
+    }
+}
+
+fn artifact_d03(
+    device: &Device,
+    plan: &fluxel_rendergraph::ExecutionPlan,
+    fixture: &D03OracleFixture,
+    expected: &[u8],
+    actual: &[u8],
+    diagnostics: &[String],
+) {
+    let commit = std::env::var("FLUXEL_TEST_COMMIT")
+        .expect("D03 evidence requires FLUXEL_TEST_COMMIT at the exact tested SHA");
+    assert!(commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    println!(
+        "artifact schema=fluxel-draw-packet-d03-v1; commit={commit}; backend={:?}; hardware={:?}; driver={}; camera={:?}; transforms={:?}; positions={:?}; draw_order=[0,1]; snapshot_imports=1; draw_uniforms=2; execution_plan={plan:?}; expected={expected:?}; actual={actual:?}; first_difference={:?}; snapshot_outgoing=CopyDestination; target_outgoing=CopySource; completion=Complete; diagnostics={diagnostics:?}",
+        device.hardware().backend,
+        device.hardware(),
+        device.hardware().driver,
+        fixture.camera,
+        fixture.transforms,
+        fixture.geometry.positions(),
+        first_difference(actual, expected),
+    );
 }
 
 fn observe_packet(

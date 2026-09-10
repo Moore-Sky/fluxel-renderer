@@ -1,6 +1,6 @@
 //! Fixed camera/material uniform ABI for closed raster recipes.
 
-use crate::{BasicMaterial, Camera};
+use crate::{BasicMaterial, Camera, ModelTransform};
 
 /// Exact byte length of the closed `mat4x4<f32> + vec4<f32>` ABI.
 pub(crate) const FRAME_UNIFORM_BYTES: usize = 80;
@@ -50,12 +50,39 @@ impl FrameUniform {
         })
     }
 
+    /// Validates and serializes `projection * view * model` followed by base color.
+    pub(crate) fn new_with_model_transform(
+        camera: &Camera,
+        material: &BasicMaterial,
+        model: ModelTransform,
+    ) -> Result<Self, FrameUniformError> {
+        if model
+            .world_from_model()
+            .iter()
+            .flatten()
+            .zip(ModelTransform::IDENTITY.world_from_model().iter().flatten())
+            .all(|(value, identity)| value.to_bits() == identity.to_bits())
+        {
+            return Self::new(camera, material);
+        }
+        let mut uniform = Self::new(camera, material)?;
+        let matrix = matrix_times_model(*uniform.view_projection(), *model.world_from_model())?;
+        for (column, values) in matrix.iter().enumerate() {
+            for (row, value) in values.iter().enumerate() {
+                let start = (column * 4 + row) * 4;
+                uniform.bytes[start..start + 4].copy_from_slice(&value.to_bits().to_le_bytes());
+            }
+        }
+        uniform.view_projection = matrix;
+        Ok(uniform)
+    }
+
     /// Returns the exact immutable-upload payload.
     pub(crate) fn bytes(&self) -> &[u8; FRAME_UNIFORM_BYTES] {
         &self.bytes
     }
 
-    /// Returns the validated column-major projection-times-view matrix.
+    /// Returns the validated column-major matrix from model space to clip space.
     pub(crate) const fn view_projection(&self) -> &[[f32; 4]; 4] {
         &self.view_projection
     }
@@ -72,6 +99,8 @@ pub(crate) enum FrameUniformError {
     ColorOutOfRange,
     /// A finite matrix input produced a non-finite product or accumulation.
     MatrixProductNonFinite,
+    /// A finite model transform made the `projection * view * model` product non-finite.
+    ModelTransformProductNonFinite,
 }
 
 fn projection_times_view(
@@ -90,6 +119,30 @@ fn projection_times_view(
                 value += product;
                 if !value.is_finite() {
                     return Err(FrameUniformError::MatrixProductNonFinite);
+                }
+            }
+            output[column][row] = value;
+        }
+    }
+    Ok(output)
+}
+
+fn matrix_times_model(
+    left: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
+) -> Result<[[f32; 4]; 4], FrameUniformError> {
+    let mut output = [[0.0; 4]; 4];
+    for column in 0..4 {
+        for row in 0..4 {
+            let mut value = 0.0;
+            for (k, left_column) in left.iter().enumerate() {
+                let product = left_column[row] * model[column][k];
+                if !product.is_finite() {
+                    return Err(FrameUniformError::ModelTransformProductNonFinite);
+                }
+                value += product;
+                if !value.is_finite() {
+                    return Err(FrameUniformError::ModelTransformProductNonFinite);
                 }
             }
             output[column][row] = value;

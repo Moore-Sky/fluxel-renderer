@@ -46,13 +46,20 @@ exposed.
 `FixedFrameRenderer::lower_draw_list` accepts an insertion-ordered `DrawList`
 and one ready `IndexedMeshSnapshot` for each draw at the same positional index.
 It checks exact CPU geometry metadata and copies the camera, material uniforms,
-and snapshot leases into a non-`Clone`, device-affine `RenderPacket`; building
-or dropping the packet does not reserve a snapshot. `submit_packet` reserves
-each unique snapshot generation once, uploads draw uniforms one at a time
-without blocking, and submits one legacy-unlit raster graph only after all
-uniforms complete. Raster completion releases reservations; an unproven
-accepted raster outcome poisons them. Multiple packet entries may reference
-one snapshot generation while retaining their own ordered draws and uniforms.
+per-draw model transform, and snapshot leases into a non-`Clone`, device-affine
+`RenderPacket`; building or dropping the packet does not reserve a snapshot.
+`DrawList::push_transformed` associates one finite affine `ModelTransform` with
+one draw, while `push` retains identity placement. A transform belongs to the
+draw/packet rather than `Mesh`, so one mesh can be placed independently by
+multiple ordered draws. For this legacy-unlit packet path, the renderer lowers
+the column-major transform as `projection * view * model` into the existing
+80-byte `mat4x4<f32> + vec4<f32>` uniform ABI; it does not add a new RHI binding
+layout. `submit_packet` reserves each unique snapshot generation once, uploads
+draw uniforms one at a time without blocking, and submits one legacy-unlit
+raster graph only after all uniforms complete. Raster completion releases
+reservations; an unproven accepted raster outcome poisons them. Multiple packet
+entries may reference one snapshot generation while retaining their own ordered
+draws and uniforms.
 
 `Rgba8Image` validates a nonzero two-dimensional tight RGBA8 payload.
 `BaseColorTextureUpload::begin` borrows it and starts a non-blocking immutable
@@ -77,15 +84,16 @@ generations share one atomic draw reservation outcome.
 position/index/normal generation, and `FixedFrameRenderer::draw_lambert` uses a
 fixed object-space `+Z` direction. The fragment shader perspective-interpolates
 and safely normalizes the normal, multiplies only linear RGB by Lambert, and
-preserves material alpha. No light, transform, normal-map, or PBR descriptor is
-exposed.
+preserves material alpha. Model transforms currently apply only to the
+legacy-unlit packet path: Lambert drawing has no transformed normals, normal
+matrix, light, normal-map, or PBR descriptor.
 
 ## Use today
 
 Build a mesh and schedule it for a camera:
 
 ```rust
-use fluxel_renderer::{BasicMaterial, Camera, DrawList, Geometry, Mesh};
+use fluxel_renderer::{BasicMaterial, Camera, DrawList, Geometry, Mesh, ModelTransform};
 
 let camera = Camera::default();
 let geometry = Geometry::from_positions(vec![
@@ -98,8 +106,15 @@ let mesh = Mesh::new(geometry, BasicMaterial::new([0.2, 0.7, 1.0, 1.0]));
 
 let mut draws = DrawList::new(&camera);
 draws.push(&mesh);
-assert_eq!(draws.len(), 1);
-# Ok::<(), fluxel_renderer::GeometryError>(())
+let translated = ModelTransform::from_column_major([
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.25, 0.0, 0.0, 1.0],
+])?;
+draws.push_transformed(&mesh, translated);
+assert_eq!(draws.len(), 2);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `Geometry::with_indices` checks indices when the geometry is constructed.

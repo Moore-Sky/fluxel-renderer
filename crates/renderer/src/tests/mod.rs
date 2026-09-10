@@ -38,3 +38,44 @@ fn draw_list_preserves_submission_order() {
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
     );
 }
+
+#[test]
+fn model_transform_validates_affinity_and_draw_list_preserves_placements() {
+    let camera = Camera::default();
+    let mesh = Mesh::new(
+        Geometry::from_positions(vec![[0.0, 0.0, 0.0]]),
+        BasicMaterial::default(),
+    );
+    let translation = ModelTransform::from_column_major([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [2.0, 3.0, 4.0, 1.0],
+    ])
+    .unwrap();
+    assert_eq!(ModelTransform::default(), ModelTransform::IDENTITY);
+    assert_eq!(translation.world_from_model()[3], [2.0, 3.0, 4.0, 1.0]);
+    assert_eq!(
+        ModelTransform::from_column_major([[f32::NAN; 4]; 4]),
+        Err(ModelTransformError::NonFinite)
+    );
+    assert_eq!(
+        ModelTransform::from_column_major([
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]),
+        Err(ModelTransformError::NonAffine)
+    );
+
+    let mut list = DrawList::new(&camera);
+    list.push(&mesh);
+    list.push_transformed(&mesh, translation);
+    assert_eq!(list.len(), 2);
+    assert_eq!(
+        list.iter().next().unwrap().transform(),
+        ModelTransform::IDENTITY
+    );
+    assert_eq!(list.iter().nth(1).unwrap().transform(), translation);
+}

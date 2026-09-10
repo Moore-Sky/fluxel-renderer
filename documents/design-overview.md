@@ -96,14 +96,18 @@ or pipeline API; see [ADR-0007](adr/0007-closed-fixed-renderer-recipes.md).
 For the legacy unlit indexed contract, the renderer lowers a `DrawList` and a
 positionally matching sequence of ready indexed snapshots into an owned,
 opaque, device-affine `RenderPacket`. Construction copies camera/material
-values, retains snapshot leases, and validates exact CPU snapshot metadata; it
-does not reserve a generation or expose graph/native objects. Submission
-deduplicates repeated snapshot generations for graph imports and reservations,
-but retains one ordered draw and uniform per list entry. It compiles one graph
-with one raster pass, advances uniform uploads serially without blocking, then
-submits the raster work once. Per-draw transforms, general material/layout
-variation, PBR, scene loading, culling, batching, and a real static scene are
-not implemented.
+values and each draw's affine model-to-world placement, retains snapshot
+leases, and validates exact CPU snapshot metadata; it does not reserve a
+generation or expose graph/native objects. The renderer computes column-major
+`projection * view * model` into the existing legacy-unlit uniform ABI, so
+placement is draw/packet policy rather than a mesh property or an RHI binding
+change. Submission deduplicates repeated snapshot generations for graph imports
+and reservations, but retains one ordered draw and uniform per list entry. It
+compiles one graph with one raster pass, advances uniform uploads serially
+without blocking, then submits the raster work once. This placement currently
+does not extend Lambert normal handling. General material/layout variation,
+PBR, scene loading, culling, batching, and a real static scene are not
+implemented.
 
 ### RenderGraph declaration and compilation
 

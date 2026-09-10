@@ -46,8 +46,17 @@ impl super::super::FixedFrameRenderer {
             if snapshot.index_count() == 0 || !snapshot.index_count().is_multiple_of(3) {
                 return Err(reason(RenderPacketDrawBuildError::InvalidIndexCount));
             }
-            let uniform = FrameUniform::new(&camera, item.mesh().material())
-                .map_err(|_| reason(RenderPacketDrawBuildError::InvalidCameraMaterial))?;
+            let uniform = FrameUniform::new_with_model_transform(
+                &camera,
+                item.mesh().material(),
+                item.transform(),
+            )
+            .map_err(|error| match error {
+                crate::frame_uniform::FrameUniformError::ModelTransformProductNonFinite => {
+                    reason(RenderPacketDrawBuildError::ModelTransformProductNonFinite)
+                }
+                _ => reason(RenderPacketDrawBuildError::InvalidCameraMaterial),
+            })?;
             super::super::renderer::validate_clip(
                 snapshot.position_metadata(),
                 snapshot.index_metadata(),

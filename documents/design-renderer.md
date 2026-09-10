@@ -64,8 +64,8 @@ The current renderer intentionally has no:
 - stable asset/resource handles or cache;
 - arbitrary shaders, reflection, pipeline layouts, bindings, vertex layouts,
   samplers, views, or material parameters;
-- per-draw transforms, lights, depth, blending, culling, batching, instancing,
-  PBR, animation, or scene-file loading;
+- transformed-normal Lambert shading, lights, depth, blending, culling,
+  batching, instancing, PBR, animation, or scene-file loading;
 - Surface acquisition, presentation, resize, or lost-surface recovery; or
 - multi-queue scheduling, parallel recording, aliasing, or performance policy.
 
@@ -117,7 +117,12 @@ Fields are private, so constructors and accessors, not struct literals, define
 the supported contract.
 
 `DrawList<'a>` borrows a camera and meshes for one preparation scope and
-preserves insertion order. For the legacy unlit indexed recipe,
+preserves insertion order. Each `DrawItem` owns a finite affine
+column-major `ModelTransform` from model space to world space; `push` supplies
+identity and `push_transformed` supplies an explicit placement. The transform
+belongs to an ordered draw rather than `Mesh`, allowing one mesh to be reused
+at different placements without changing immutable geometry/material data. For
+the legacy unlit indexed recipe,
 `FixedFrameRenderer::lower_draw_list` accepts a positionally corresponding
 slice of ready `IndexedMeshSnapshot` values and creates an opaque owned,
 non-`Clone`, device-affine `RenderPacket`. It compares positions by float bit
@@ -273,11 +278,14 @@ outcome poisons every reserved generation.
 
 ### Uniform ABI
 
-`FrameUniform` is exactly 80 bytes: `0..64` is the column-major
-`projection * view` matrix; `64..80` is linear RGBA base color. Camera input,
-the computed matrix, and each color component must be finite; color is in
-`[0, 1]`. The payload is visible to the fixed vertex and fragment stages and is
-not a general uniform-layout API.
+`FrameUniform` is exactly 80 bytes: `0..64` is the column-major object-to-clip
+matrix and `64..80` is linear RGBA base color. Single-draw fixed recipes
+serialize `projection * view`; each legacy-unlit packet draw serializes
+`projection * view * model` with its own affine `ModelTransform`. The latter
+reuses the same ABI and does not add a per-draw RHI binding contract. Camera
+input, model input, the computed matrix, and each color component must be
+finite; color is in `[0, 1]`. The payload is visible to the fixed vertex and
+fragment stages and is not a general uniform-layout API.
 
 ### Geometry, UVs, and clipping
 
@@ -299,7 +307,8 @@ independently from actual device capabilities.
 
 `draw_lambert` perspective-interpolates canonical object-space normals, safely
 normalizes a nonzero interpolation, applies a fixed object-space `+Z` Lambert
-factor to RGB, and preserves alpha. It has no transforms, normal matrix,
+factor to RGB, and preserves alpha. Per-draw model transforms currently do not
+apply to this path: it has no transformed normals, normal matrix,
 caller-visible lights, or PBR semantics.
 
 ## Errors, lifetime, and concurrency
@@ -335,9 +344,11 @@ Windows hardware fixtures run the fixed contracts on both supported native
 backends with required validation and compare readback to CPU oracles. Cases
 distinguish perspective interpolation, integer versus linear sampling, clamp,
 sRGB decode-before-filter, normal-stream binding, Lambert shading, and
-pre-accept versus accepted-unknown faults. Unexpected validation diagnostics
-are failures. RHI readback consumes the graph-exported outgoing state as its
-actual incoming state, so it cannot silently repair a wrong export.
+pre-accept versus accepted-unknown faults. The legacy-unlit packet fixture also
+uses non-commuting camera and model matrices to compare per-draw placement with
+an independent CPU `projection * view * model` oracle. Unexpected validation
+diagnostics are failures. RHI readback consumes the graph-exported outgoing
+state as its actual incoming state, so it cannot silently repair a wrong export.
 
 See [ADR-0005](adr/0005-gpu-conformance-evidence.md) and
 [ADR-0008](adr/0008-native-platform-test-gates.md). Native conformance is

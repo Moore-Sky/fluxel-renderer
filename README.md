@@ -19,6 +19,9 @@ and its matching ready indexed snapshots into an owned, opaque, device-affine
 `RenderPacket`, then execute all of its legacy unlit indexed draws through one
 compiled graph, raster pass, and submission. Existing single-draw paths also
 cover closed textured and fixed-Lambert recipes.
+Each legacy-unlit packet draw may carry an independent affine model-to-world
+placement; the renderer lowers it into the existing camera/material uniform
+contract without exposing a general scene or pipeline API.
 The default build remains the portable headless domain model.
 
 The fixed renderer and RHI slices are split into single-responsibility modules.
@@ -65,7 +68,7 @@ beyond the current work are goals, not version or schedule commitments.
 - [x] Fixed Lambert lighting
 - [x] Consolidate fixed slices into private closed recipes
 - [x] Lower `DrawList` into renderer-owned packets
-- [ ] Add per-draw transform and object state
+- [x] Add per-draw transform and object state for legacy-unlit packets
 - [ ] Introduce minimal shader, material, and layout variation
 - [ ] Add basic PBR and one representative static scene
 

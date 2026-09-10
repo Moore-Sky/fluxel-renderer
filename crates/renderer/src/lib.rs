@@ -93,6 +93,76 @@ impl Default for Camera {
     }
 }
 
+/// A finite affine transform from model space to world space.
+///
+/// Matrices use column-major storage and multiply column vectors. This value
+/// deliberately permits singular transforms, reflections, and shear: those
+/// are valid placements for the current unlit draw path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelTransform {
+    column_major: [[f32; 4]; 4],
+}
+
+impl ModelTransform {
+    /// The identity model-to-world transform.
+    pub const IDENTITY: Self = Self {
+        column_major: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+
+    /// Validates a column-major finite affine model-to-world matrix.
+    pub fn from_column_major(column_major: [[f32; 4]; 4]) -> Result<Self, ModelTransformError> {
+        if !column_major.iter().flatten().all(|value| value.is_finite()) {
+            return Err(ModelTransformError::NonFinite);
+        }
+        if column_major[0][3] != 0.0
+            || column_major[1][3] != 0.0
+            || column_major[2][3] != 0.0
+            || column_major[3][3] != 1.0
+        {
+            return Err(ModelTransformError::NonAffine);
+        }
+        Ok(Self { column_major })
+    }
+
+    /// Returns the validated column-major matrix mapping model space to world space.
+    #[must_use]
+    pub const fn world_from_model(&self) -> &[[f32; 4]; 4] {
+        &self.column_major
+    }
+}
+
+impl Default for ModelTransform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+/// Why a model transform cannot be scheduled for drawing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ModelTransformError {
+    /// One or more matrix elements were NaN or infinite.
+    NonFinite,
+    /// The matrix did not have the affine final row `[0, 0, 0, 1]`.
+    NonAffine,
+}
+
+impl fmt::Display for ModelTransformError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFinite => formatter.write_str("model transform contains a non-finite value"),
+            Self::NonAffine => formatter.write_str("model transform is not affine"),
+        }
+    }
+}
+
+impl std::error::Error for ModelTransformError {}
+
 /// Vertex positions and optional triangle indices for one mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Geometry {
@@ -231,6 +301,7 @@ impl Mesh {
 #[derive(Clone, Copy, Debug)]
 pub struct DrawItem<'a> {
     mesh: &'a Mesh,
+    transform: ModelTransform,
 }
 
 impl<'a> DrawItem<'a> {
@@ -238,6 +309,12 @@ impl<'a> DrawItem<'a> {
     #[must_use]
     pub const fn mesh(self) -> &'a Mesh {
         self.mesh
+    }
+
+    /// Returns this draw's model-to-world placement.
+    #[must_use]
+    pub const fn transform(self) -> ModelTransform {
+        self.transform
     }
 }
 
@@ -266,7 +343,12 @@ impl<'a> DrawList<'a> {
 
     /// Appends `mesh` after all existing items.
     pub fn push(&mut self, mesh: &'a Mesh) {
-        self.items.push(DrawItem { mesh });
+        self.push_transformed(mesh, ModelTransform::IDENTITY);
+    }
+
+    /// Appends `mesh` with a finite affine model-to-world placement.
+    pub fn push_transformed(&mut self, mesh: &'a Mesh, transform: ModelTransform) {
+        self.items.push(DrawItem { mesh, transform });
     }
 
     /// Returns the scheduled items in submission order.

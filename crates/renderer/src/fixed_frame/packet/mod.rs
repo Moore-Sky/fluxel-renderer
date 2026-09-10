@@ -114,6 +114,8 @@ pub enum RenderPacketDrawBuildError {
     InvalidIndexCount,
     /// Camera or material values cannot form the closed uniform ABI.
     InvalidCameraMaterial,
+    /// The finite camera and model transform overflowed while forming `P * V * M`.
+    ModelTransformProductNonFinite,
     /// A vertex position was not finite.
     NonFinitePosition,
     /// Matrix application produced a non-finite clip coordinate.

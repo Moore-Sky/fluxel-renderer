@@ -66,3 +66,82 @@ fn rejects_non_finite_out_of_range_and_overflowing_inputs() {
         Err(FrameUniformError::MatrixProductNonFinite)
     );
 }
+
+#[test]
+fn model_transform_precomposition_is_column_major_and_identity_is_bitwise_compatible() {
+    let camera = Camera::new(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 3.0, 0.0],
+            [4.0, 5.0, 6.0, 1.0],
+        ],
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0, 0.0],
+            [0.0, 0.0, 5.0, 0.0],
+            [7.0, 0.0, 0.0, 1.0],
+        ],
+    );
+    let material = BasicMaterial::new([0.25, 0.5, 0.75, 1.0]);
+    let identity = FrameUniform::new(&camera, &material).unwrap();
+    let transformed_identity =
+        FrameUniform::new_with_model_transform(&camera, &material, ModelTransform::IDENTITY)
+            .unwrap();
+    assert_eq!(identity.bytes(), transformed_identity.bytes());
+
+    let model = ModelTransform::from_column_major([
+        [2.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [10.0, 20.0, 30.0, 1.0],
+    ])
+    .unwrap();
+    let uniform = FrameUniform::new_with_model_transform(&camera, &material, model).unwrap();
+    assert_eq!(
+        uniform.view_projection(),
+        &[
+            [4.0, 0.0, 0.0, 0.0],
+            [0.0, 6.0, 0.0, 0.0],
+            [0.0, 0.0, 15.0, 0.0],
+            [35.0, 135.0, 480.0, 1.0],
+        ]
+    );
+    assert_eq!(
+        &uniform.bytes()[64..],
+        &material
+            .base_color()
+            .into_iter()
+            .flat_map(|value| value.to_bits().to_le_bytes())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rejects_a_finite_model_product_that_overflows() {
+    let model = ModelTransform::from_column_major([
+        [f32::MAX, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    .unwrap();
+    let camera = Camera::new(
+        [
+            [f32::MAX, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    );
+    assert_eq!(
+        FrameUniform::new_with_model_transform(&camera, &BasicMaterial::default(), model),
+        Err(FrameUniformError::ModelTransformProductNonFinite)
+    );
+}
