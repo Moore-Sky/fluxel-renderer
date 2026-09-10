@@ -18,14 +18,14 @@ after native uploads complete. It can lower an insertion-ordered `DrawList`
 and its matching ready indexed snapshots into an owned, opaque, device-affine
 `RenderPacket`, then execute all of its legacy unlit indexed draws through one
 compiled graph, raster pass, and submission. Existing single-draw paths also
-cover closed textured and fixed-Lambert recipes.
+cover closed textured, vertex-color, and fixed-Lambert recipes.
 Each legacy-unlit packet draw may carry an independent affine model-to-world
 placement; the renderer lowers it into the existing camera/material uniform
 contract without exposing a general scene or pipeline API.
 The default build remains the portable headless domain model.
 
 The fixed renderer and RHI slices are split into single-responsibility modules.
-Six proven raster paths share one private, closed recipe mapping.
+Seven proven raster paths share one private, closed recipe mapping.
 
 Package READMEs are the detailed user documentation published with each crate;
 this file is only the workspace entry point.
@@ -37,6 +37,7 @@ this file is only the workspace entry point.
 - [RHI design](documents/design-rhi.md)
 - [Renderer design](documents/design-renderer.md)
 - [Architecture decisions](documents/adr/README.md)
+- [Fluxel ecosystem map](documents/fluxel-ecosystem.md)
 - [RenderGraph guide](crates/rendergraph/README.md)
 - [RHI guide](crates/rhi/README.md)
 
@@ -56,39 +57,33 @@ real-GPU conformance remains an explicit local release gate.
 
 ## Roadmap
 
-Near-term work is intentionally more specific than distant direction. Items
-beyond the current work are goals, not version or schedule commitments.
+This roadmap covers this workspace only. Near-term work is deliberately more
+specific than distant direction; no item is a version or schedule commitment.
+For ownership outside the renderer workspace, see the
+[Fluxel ecosystem map](documents/fluxel-ecosystem.md).
 
-### Current — Renderer foundation
+### Current — Renderer submission model
 
-- [x] DX12/Vulkan owned resources and RenderGraph Copy/Compute/Raster
-- [x] Immutable mesh, texture, UV, and normal GPU snapshots
-- [x] Indexed draw with Camera and BasicMaterial uniforms
-- [x] Linear-clamp sampling and sRGB decode-before-filter
-- [x] Fixed Lambert lighting
-- [x] Consolidate fixed slices into private closed recipes
-- [x] Lower `DrawList` into renderer-owned packets
-- [x] Add per-draw transform and object state for legacy-unlit packets
-- [ ] Introduce minimal shader, material, and layout variation
-- [ ] Add basic PBR and one representative static scene
+- [x] Establish closed recipes for proven fixed raster combinations.
+- [x] Publish immutable GPU snapshots and lower ordered `DrawList` input into
+  owned, device-affine render packets.
+- [x] Lower one packet through RenderGraph into a compiled plan and one native
+  submission.
+- [ ] Make render intent, packet construction, recipe selection, and graph
+  lowering explicit parts of one renderer submission model.
+- [ ] Support deterministic multi-draw ordering and compatible packet grouping.
+- [x] Add only the minimal material, shader, and vertex-layout variation that
+  packet lowering can describe without a public general-pipeline API.
 
-### Next — Static renderer
+### Next — Renderer execution
 
-- [ ] Load and render a static GLTF scene
-- [ ] Compile and reflect shader variants
-- [ ] Add stable resource handles, caching, and reuse
-- [ ] Add culling, batching, and instancing
-- [ ] Complete Surface/Present, resize, and lost-surface recovery on Windows
-
-### Mid-term — Web and dynamic scenes
-
-- [ ] Establish WebGPU/WebGL2-compatible renderer paths
-- [ ] Support animation, skinning, morph targets, and richer scene submission
-
-### Long-term — Platform runtime
-
-- [ ] Bring up Metal, Android, and iOS under one renderer/runtime model
-- [ ] Keep Windows, Web, Android, and iOS semantics aligned by conformance tests
+- [ ] Batch compatible render packets while preserving declared ordering.
+- [ ] Lower compatible repeated draws as instances where the chosen recipe
+  permits it.
+- [ ] Reuse compatible renderer-side pipelines and bindings across a frame.
+- [ ] Separate frame preparation, graph construction, and submission cleanly.
+- [ ] Establish representative renderer-level correctness and performance
+  benchmarks.
 
 ### Performance evolution
 
@@ -97,11 +92,11 @@ resource aliasing, and more aggressive GPU scheduling or memory optimization
 enter the roadmap only after representative benchmarks or profiling demonstrate
 a concrete need. They are not current feature TODOs.
 
-### Future / TBD
+### Out of scope
 
-A TypeScript or Three.js-style façade and a declarative UI runtime are possible
-long-term directions. They have no current plan, version, schedule, or
-compatibility commitment.
+Asset identity and caching, file/URL loading, scene graphs, animation,
+presentation and platform lifecycle, backend bring-up, and higher-level JS or
+UI APIs belong to other Fluxel layers rather than this renderer workspace.
 
 ## License
 
