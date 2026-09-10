@@ -71,9 +71,10 @@ fn normal_upload_failure_mapping_preserves_stream_role_and_acceptance_boundary()
     geometry::normal_upload_failure_mapping_preserves_stream_role_and_acceptance_boundary();
 }
 
+#[cfg(windows)]
 #[test]
 fn normal_fault_commit_helper_accepts_only_full_hex_sha_values() {
-    geometry::normal_fault_commit_helper_accepts_only_full_hex_sha_values();
+    geometry::normal_fault_commit_helper_contract();
 }
 
 #[test]

@@ -180,7 +180,7 @@ pub(crate) fn normal_upload_failure_mapping_preserves_stream_role_and_acceptance
 }
 
 #[cfg(windows)]
-pub(crate) fn normal_fault_commit_helper_accepts_only_full_hex_sha_values() {
+pub(crate) fn normal_fault_commit_helper_contract() {
     assert!(normal_fault_commit_is_valid(&"0".repeat(40)));
     assert!(normal_fault_commit_is_valid(
         "0123456789abcdef0123456789abcdef01234567"
@@ -380,6 +380,7 @@ pub(crate) fn textured_upload_failure_mapping_preserves_stream_and_acceptance_bo
     }
 }
 
+#[cfg(windows)]
 fn normal_fault_commit_is_valid(commit: &str) -> bool {
     commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

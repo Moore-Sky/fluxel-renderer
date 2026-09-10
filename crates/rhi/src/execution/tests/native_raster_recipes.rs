@@ -1,7 +1,7 @@
 //! Vertex-recipe rejection witness.
 
 use crate::*;
-use fluxel_rendergraph::*;
+
 #[allow(clippy::too_many_arguments, clippy::needless_borrow)]
 pub(super) fn run_raster_vertex_recipe_negative_paths(
     device: &Device,
