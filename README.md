@@ -93,16 +93,24 @@ For ownership outside the renderer workspace, see the
 
 ### Current — Stage 0 baseline closure
 
-- [ ] Use one release version and tag rule for workspace crates that ship
+**Status:** In progress.
+
+**Latest retained evidence:** [v0.7.0](https://github.com/fluxel-project/fluxel-renderer/releases/tag/v0.7.0),
+tag commit `6bd3a25`, with 83/83 ignored real-GPU cases passing on AMD Radeon
+780M Graphics across DX12 and Vulkan.
+
+- [x] Use one release version and tag rule for workspace crates that ship
   together, and pin every documented Git dependency example to a tag or
   revision.
-- [ ] Preserve structured renderer errors through the public boundary.
-- [ ] Provide one repeatable CPU, CI, and real-GPU conformance entry point that
+- [x] Preserve structured renderer errors through the public boundary.
+- [x] Provide one repeatable CPU, CI, and real-GPU conformance entry point that
   records the commit, environment, diagnostics, and partial failure evidence.
-- [ ] Audit and reduce the RenderGraph public export surface to the current
+- [x] Audit and reduce the RenderGraph public export surface to the current
   portable contract.
-- [ ] Freeze fixed-recipe growth; do not add another `draw_*` family member or
+- [x] Freeze fixed-recipe growth; do not add another `draw_*` family member or
   public upload-state type.
+- [ ] Re-run the complete baseline on the final fixed Stage 0 commit and retain
+  the verified Release artifacts.
 
 ### Next — Stage 1.1 DX12 first visible image
 
