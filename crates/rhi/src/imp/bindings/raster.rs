@@ -58,6 +58,7 @@ pub(crate) fn create_raster_uniform_bindings(
                 native: Some(NativeRasterUniformBindingsInner::Dx12(group)),
                 pipeline: pipeline.clone(),
                 expected_normal_vertex_streams: None,
+                expected_vertex_color_streams: None,
             })
         }
         #[cfg(feature = "vulkan")]
@@ -87,6 +88,7 @@ pub(crate) fn create_raster_uniform_bindings(
                 native: Some(NativeRasterUniformBindingsInner::Vulkan(group)),
                 pipeline: pipeline.clone(),
                 expected_normal_vertex_streams: None,
+                expected_vertex_color_streams: None,
             })
         }
         _ => Err("raster uniform binding does not match the camera/material pipeline".into()),
@@ -164,6 +166,35 @@ pub(crate) fn create_raster_normal_bindings(
         normal_identity,
         normal_size,
     ));
+    Ok(bindings)
+}
+
+/// Creates the uniform group for the closed vertex-color artifact and records
+/// both stream roles for the final unsafe command validation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the closed native ABI carries both independent stream facts"
+)]
+pub(crate) fn create_raster_vertex_color_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    uniform: &OwnedBuffer,
+    position_identity: fluxel_rendergraph::PhysicalResourceIdentity,
+    position_size: u64,
+    color_identity: fluxel_rendergraph::PhysicalResourceIdentity,
+    color_size: u64,
+) -> Result<NativeRasterUniformBindings, String> {
+    if pipeline.0.kernel != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
+        || position_size == 0
+        || color_size == 0
+        || !position_size.is_multiple_of(12)
+        || position_size / 3 != color_size
+    {
+        return Err("invalid vertex-color binding recipe".into());
+    }
+    let mut bindings = create_raster_uniform_bindings(owner, pipeline, uniform)?;
+    bindings.expected_vertex_color_streams =
+        Some((position_identity, position_size, color_identity, color_size));
     Ok(bindings)
 }
 

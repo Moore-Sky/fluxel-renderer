@@ -49,6 +49,11 @@ pub(crate) fn create_raster_pipeline(
         offset: 0,
         shader_location: 1,
     }];
+    let color_unorm8x4_attributes = [wgt::VertexAttribute {
+        format: wgt::VertexFormat::Unorm8x4,
+        offset: 0,
+        shader_location: 1,
+    }];
     let buffers = match kernel {
         crate::RasterKernel::Triangle => vec![],
         crate::RasterKernel::IndexedPositionColor => vec![Some(wgpu_hal::VertexBufferLayout {
@@ -102,6 +107,20 @@ pub(crate) fn create_raster_pipeline(
                     array_stride: 12,
                     step_mode: wgt::VertexStepMode::Vertex,
                     attributes: &normal_f32x3_attributes,
+                }),
+            ]
+        }
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor => {
+            vec![
+                Some(wgpu_hal::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgt::VertexStepMode::Vertex,
+                    attributes: &position_f32x3_attributes,
+                }),
+                Some(wgpu_hal::VertexBufferLayout {
+                    array_stride: 4,
+                    step_mode: wgt::VertexStepMode::Vertex,
+                    attributes: &color_unorm8x4_attributes,
                 }),
             ]
         }
@@ -226,6 +245,7 @@ pub(crate) fn create_raster_pipeline(
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
             ) {
                 match unsafe {
                     // SAFETY: the static one-entry descriptor is valid and
@@ -392,6 +412,7 @@ pub(crate) fn create_raster_pipeline(
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
             ) {
                 match unsafe {
                     // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.

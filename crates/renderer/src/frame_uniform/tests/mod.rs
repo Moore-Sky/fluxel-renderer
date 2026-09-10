@@ -145,3 +145,17 @@ fn rejects_a_finite_model_product_that_overflows() {
         Err(FrameUniformError::ModelTransformProductNonFinite)
     );
 }
+
+#[test]
+fn vertex_color_uniform_reuses_the_camera_matrix_and_serializes_linear_tint() {
+    let camera = Camera::default();
+    let material = VertexColorMaterial::new([0.25, 0.5, 0.75, 0.125]).unwrap();
+    let uniform = FrameUniform::new_vertex_color(&camera, &material).unwrap();
+    assert_eq!(uniform.view_projection(), Camera::default().view());
+    let expected = material
+        .tint()
+        .iter()
+        .flat_map(|value| value.to_bits().to_le_bytes())
+        .collect::<Vec<_>>();
+    assert_eq!(&uniform.bytes()[64..], expected);
+}

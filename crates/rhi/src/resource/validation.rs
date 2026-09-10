@@ -9,6 +9,7 @@ pub(super) fn validate_raster_uniform_contract(
         kernel,
         RasterKernel::IndexedPositionFloat32x3CameraMaterial
             | RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            | RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
     ) {
         return Err(RasterCreateError::BindingRecipeMismatch);
     }

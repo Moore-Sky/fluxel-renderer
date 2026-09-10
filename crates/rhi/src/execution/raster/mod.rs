@@ -38,6 +38,8 @@ pub enum RasterBindings {
     RasterUvLinearClampSrgbTexture(RasterUvLinearClampTextureBindings),
     /// Closed position-and-normal fixed Lambert binding.
     RasterNormal(RasterNormalBindings),
+    /// Closed position-and-RGBA8 vertex-color binding.
+    RasterVertexColor(RasterVertexColorBindings),
 }
 
 /// A serial DX12/Vulkan backend for the fixed Raster→Compute→Copy slice.

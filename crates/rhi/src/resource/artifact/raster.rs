@@ -21,6 +21,9 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => {
                 "camera_material_normal_lambert_vertex"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialVertexColor => {
+                "camera_material_vertex_color_vertex"
+            }
         }
     }
 
@@ -36,6 +39,7 @@ impl RasterKernel {
                 "linear_clamp_srgb_texture_color_fragment"
             }
             Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => "normal_lambert_fragment",
+            Self::IndexedPositionFloat32x3CameraMaterialVertexColor => "vertex_color_fragment",
             _ => "color_fragment",
         }
     }
@@ -57,6 +61,7 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => 12,
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => 12,
             Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => 12,
+            Self::IndexedPositionFloat32x3CameraMaterialVertexColor => 12,
         }
     }
 
@@ -76,6 +81,7 @@ impl RasterKernel {
                 Some(IndexFormat::Uint32)
             }
             Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => Some(IndexFormat::Uint32),
+            Self::IndexedPositionFloat32x3CameraMaterialVertexColor => Some(IndexFormat::Uint32),
         }
     }
 
@@ -100,6 +106,9 @@ impl RasterKernel {
             }
             Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => {
                 RasterVertexLayout::PositionFloat32x3AndNormalFloat32x3
+            }
+            Self::IndexedPositionFloat32x3CameraMaterialVertexColor => {
+                RasterVertexLayout::PositionFloat32x3AndColorUnorm8x4
             }
         }
     }
@@ -448,6 +457,54 @@ impl RasterKernel {
             } else {
                 None
             },
+            vertex_color_recipe_version: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialVertexColor
+            ) {
+                1
+            } else {
+                0
+            },
+            vertex_color_position_slot: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialVertexColor
+            ) {
+                Some(0)
+            } else {
+                None
+            },
+            vertex_color_position_shader_location: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialVertexColor
+            ) {
+                Some(0)
+            } else {
+                None
+            },
+            vertex_color_slot: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialVertexColor
+            ) {
+                Some(1)
+            } else {
+                None
+            },
+            vertex_color_stride: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialVertexColor
+            ) {
+                Some(4)
+            } else {
+                None
+            },
+            vertex_color_shader_location: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialVertexColor
+            ) {
+                Some(1)
+            } else {
+                None
+            },
             recipe_version: 1,
         }
     }
@@ -560,6 +617,14 @@ impl RasterKernel {
          @vertex fn camera_material_normal_lambert_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.normal); }\n\
          @fragment fn normal_lambert_fragment(input: VertexOutput) -> @location(0) vec4<f32> { let len2 = dot(input.normal, input.normal); if (len2 > 0.0) { let lambert = max(dot(input.normal * inverseSqrt(len2), vec3<f32>(0.0, 0.0, 1.0)), 0.0); return vec4<f32>(frame.base_color.rgb * lambert, frame.base_color.a); } return vec4<f32>(vec3<f32>(0.0), frame.base_color.a); }"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialVertexColor => {
+                "struct FrameUniforms { view_projection: mat4x4<f32>, base_color: vec4<f32>, };\n\
+         @group(0) @binding(0) var<uniform> frame: FrameUniforms;\n\
+         struct VertexInput { @location(0) position: vec3<f32>, @location(1) color: vec4<f32>, };\n\
+         struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) @interpolate(perspective, center) color: vec4<f32>, };\n\
+         @vertex fn camera_material_vertex_color_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.color); }\n\
+         @fragment fn vertex_color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { return input.color * frame.base_color; }"
+            }
         }
     }
 
@@ -572,6 +637,7 @@ impl RasterKernel {
                 | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                 | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
                 | Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+                | Self::IndexedPositionFloat32x3CameraMaterialVertexColor
         )
     }
 }

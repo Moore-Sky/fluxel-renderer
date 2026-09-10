@@ -15,6 +15,7 @@ use fluxel_rhi::Device;
 use crate::Geometry;
 
 mod texture;
+mod vertex_color;
 
 #[test]
 fn rgba8_image_requires_nonzero_extent_and_exact_tight_length() {
@@ -110,6 +111,30 @@ fn textured_three_stream_publication_never_exposes_partial_or_failed_output() {
 #[test]
 fn textured_upload_failure_mapping_preserves_stream_role_and_acceptance_boundary() {
     geometry::textured_upload_failure_mapping_preserves_stream_and_acceptance_boundary();
+}
+
+#[test]
+fn vertex_color_geometry_material_and_payload_preserve_closed_contract() {
+    vertex_color::geometry_material_and_payload_preserve_closed_contract();
+}
+
+#[test]
+fn vertex_color_publication_and_failure_mapping_preserve_three_stream_contract() {
+    vertex_color::publication_and_failure_mapping_preserve_three_stream_contract();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a Windows DX12 device with required validation and test-support fault injection"]
+fn u09_vertex_color_three_upload_fault_contract_dx12() {
+    vertex_color::u09_vertex_color_three_upload_fault_contract_dx12();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a Windows Vulkan device with required validation and test-support fault injection"]
+fn u09_vertex_color_three_upload_fault_contract_vulkan() {
+    vertex_color::u09_vertex_color_three_upload_fault_contract_vulkan();
 }
 
 #[test]

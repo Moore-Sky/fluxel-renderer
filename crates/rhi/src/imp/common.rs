@@ -265,6 +265,14 @@ pub(crate) struct NativeRasterUniformBindings {
         fluxel_rendergraph::PhysicalResourceIdentity,
         u64,
     )>,
+    /// Vertex-color bindings retain the two stream identities and exact ranges
+    /// for a final check at the unsafe vertex command boundary.
+    pub(crate) expected_vertex_color_streams: Option<(
+        fluxel_rendergraph::PhysicalResourceIdentity,
+        u64,
+        fluxel_rendergraph::PhysicalResourceIdentity,
+        u64,
+    )>,
 }
 
 /// Private holder for the closed textured raster bind group and texture view.

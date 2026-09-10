@@ -1,6 +1,25 @@
 //! Native raster-pass command recording.
 use super::*;
 
+/// Returns the least non-empty byte range accepted for one closed vertex slot.
+///
+/// This is a native-boundary range sanity check, not the whole-stream
+/// contract: typed bindings below still require the exact stream size. In
+/// particular, indexed triangles may legally reuse vertices, so slot one of
+/// the vertex-color recipe must accept two RGBA8 vertices (eight bytes).
+pub(crate) const fn raster_vertex_minimum_size(kernel: crate::RasterKernel, slot: u32) -> u64 {
+    match (kernel, slot) {
+        (
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
+            1,
+        ) => 8,
+        (crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor, 1) => 4,
+        _ => 12,
+    }
+}
+
 /// Begins the sole supported color pass. `clear=Some` selects clear; otherwise
 /// `load` selects Load and false selects DontCare. `store=false` is explicit
 /// discard. The safe caller validates the attachment's full D2 Rgba8 range.
@@ -263,6 +282,7 @@ pub(crate) fn set_vertex_buffer(
     actual_identity: fluxel_rendergraph::PhysicalResourceIdentity,
     uv_bindings: Option<&NativeRasterTextureBindings>,
     normal_bindings: Option<&NativeRasterUniformBindings>,
+    vertex_color_bindings: Option<&NativeRasterUniformBindings>,
 ) -> Result<(), String> {
     if matches!(
         kernel,
@@ -332,6 +352,35 @@ pub(crate) fn set_vertex_buffer(
             return Err("normal-Lambert vertex role or range mismatch".into());
         }
     }
+    if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor {
+        if encoder.active_render_view.is_none() {
+            return Err("vertex-color vertex binding requires an active raster pass".into());
+        }
+        let bindings = vertex_color_bindings
+            .ok_or_else(|| "vertex-color vertex binding requires bindings".to_owned())?;
+        if !Arc::ptr_eq(&encoder.owner, &bindings.pipeline.0.owner)
+            || encoder.active_raster_pipeline != Some(Arc::as_ptr(&bindings.pipeline.0) as usize)
+            || slot > 1
+            || !buffer.allowed_usage.contains(BufferUsageKind::Vertex)
+        {
+            return Err("vertex-color vertex binding has invalid pipeline, slot, or usage".into());
+        }
+        let expected = bindings
+            .expected_vertex_color_streams
+            .ok_or_else(|| "vertex-color native binding lacks stream identities".to_owned())?;
+        let (expected_identity, expected_size) = if slot == 0 {
+            (expected.0, expected.1)
+        } else {
+            (expected.2, expected.3)
+        };
+        if actual_identity != expected_identity
+            || offset != 0
+            || size != expected_size
+            || buffer.size != expected_size
+        {
+            return Err("vertex-color vertex role or range mismatch".into());
+        }
+    }
     if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
         || !offset.is_multiple_of(4)
         || (matches!(
@@ -340,6 +389,7 @@ pub(crate) fn set_vertex_buffer(
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
         ) && offset != 0)
         || (matches!(
             kernel,
@@ -347,20 +397,10 @@ pub(crate) fn set_vertex_buffer(
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
-        ) && (slot > 1 || offset != 0 || size < if slot == 0 { 12 } else { 8 }))
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
+        ) && (slot > 1 || offset != 0 || size < raster_vertex_minimum_size(kernel, slot)))
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
-        || size
-            < if matches!(
-            kernel,
-            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
-                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
-                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
-        ) && slot == 1
-            {
-                8
-            } else {
-                12
-            }
+        || size < raster_vertex_minimum_size(kernel, slot)
     {
         return Err("invalid raster vertex buffer range".into());
     }

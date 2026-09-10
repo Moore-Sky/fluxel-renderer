@@ -2,7 +2,7 @@
 use super::super::bindings::{
     RasterNormalBindingsShared, RasterPipelineShared, RasterTextureBindingsShared,
     RasterUniformBindingsShared, RasterUvLinearClampTextureBindingsShared,
-    RasterUvTextureBindingsShared,
+    RasterUvTextureBindingsShared, RasterVertexColorBindingsShared,
 };
 use super::super::validation::*;
 use super::super::*;
@@ -148,6 +148,76 @@ impl Device {
             vertex_count,
             device: self.identity,
         })))
+    }
+
+    /// Creates the closed camera/material position-and-RGBA8 vertex-color binding.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fixed ABI has independent uniform and stream roles"
+    )]
+    pub fn create_raster_vertex_color_bindings(
+        &self,
+        pipeline: &RasterPipeline,
+        uniform: &Buffer,
+        positions: &Buffer,
+        colors: &Buffer,
+        vertex_count: u32,
+    ) -> Result<RasterVertexColorBindings, RasterCreateError> {
+        if pipeline.kernel() != RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor {
+            return Err(RasterCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity
+            || uniform.device_identity() != self.identity
+            || positions.device_identity() != self.identity
+            || colors.device_identity() != self.identity
+        {
+            return Err(RasterCreateError::ForeignDevice);
+        }
+        validate_raster_uniform_contract(
+            pipeline.kernel(),
+            uniform.descriptor().buffer.size,
+            uniform.allowed_usage(),
+        )?;
+        let position_size = u64::from(vertex_count)
+            .checked_mul(12)
+            .ok_or(RasterCreateError::VertexStreamCountMismatch)?;
+        let color_size = u64::from(vertex_count)
+            .checked_mul(4)
+            .ok_or(RasterCreateError::VertexStreamCountMismatch)?;
+        if vertex_count == 0 || positions.descriptor().buffer.size != position_size {
+            return Err(RasterCreateError::InvalidPositionStreamRange);
+        }
+        if colors.descriptor().buffer.size != color_size {
+            return Err(RasterCreateError::InvalidColorStreamRange);
+        }
+        if !positions.allowed_usage().contains(BufferUsageKind::Vertex)
+            || !colors.allowed_usage().contains(BufferUsageKind::Vertex)
+        {
+            return Err(RasterCreateError::VertexUsageRequired);
+        }
+        let native = crate::imp::create_raster_vertex_color_bindings(
+            &self.inner,
+            pipeline.native(),
+            uniform.native(),
+            positions.identity(),
+            position_size,
+            colors.identity(),
+            color_size,
+        )
+        .map_err(RasterCreateError::NativeFailure)?;
+        Ok(RasterVertexColorBindings(Arc::new(
+            RasterVertexColorBindingsShared {
+                _native: native,
+                pipeline: pipeline.clone(),
+                _uniform: uniform.lease(),
+                _positions: positions.lease(),
+                _colors: colors.lease(),
+                position_identity: positions.identity(),
+                color_identity: colors.identity(),
+                vertex_count,
+                device: self.identity,
+            },
+        )))
     }
 
     /// Creates the only uniform-plus-whole-texture binding accepted by the textured raster artifact.

@@ -24,8 +24,8 @@ pub(super) use fluxel_rendergraph::{
 pub(super) use crate::{
     Buffer, BufferDescriptor, ComputeBindings, ComputePipeline, Device, MemoryPolicy,
     RasterNormalBindings, RasterPipeline, RasterTextureBindings, RasterUniformBindings,
-    RasterUvLinearClampTextureBindings, RasterUvTextureBindings, ResourceCreateError,
-    ResourceLease, Texture, TextureDescriptor, TexturePackBindings,
+    RasterUvLinearClampTextureBindings, RasterUvTextureBindings, RasterVertexColorBindings,
+    ResourceCreateError, ResourceLease, Texture, TextureDescriptor, TexturePackBindings,
 };
 
 mod compute;

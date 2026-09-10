@@ -42,3 +42,12 @@ pub(super) fn normal_lambert_pipeline() -> RasterPipelineId {
 pub(super) fn normal_lambert_bindings() -> BindingSetId {
     BindingSetId::new(0x0270_0001)
 }
+pub(super) fn vertex_color_binding() -> BufferBindingId {
+    BufferBindingId::new(0x0280_0004)
+}
+pub(super) fn vertex_color_pipeline() -> RasterPipelineId {
+    RasterPipelineId::new(0x0280_0001)
+}
+pub(super) fn vertex_color_bindings() -> BindingSetId {
+    BindingSetId::new(0x0280_0001)
+}

@@ -14,11 +14,13 @@ pub(super) struct CameraResources {
     pub(in crate::fixed_frame) uniform: Buffer,
     pub(in crate::fixed_frame) texture_coordinates: Option<Buffer>,
     pub(in crate::fixed_frame) normals: Option<Buffer>,
+    pub(in crate::fixed_frame) colors: Option<Buffer>,
     pub(in crate::fixed_frame) texture: Option<Texture>,
     pub(in crate::fixed_frame) position_state: ResourceAccessState,
     pub(in crate::fixed_frame) index_state: ResourceAccessState,
     pub(in crate::fixed_frame) texture_coordinate_state: Option<ResourceAccessState>,
     pub(in crate::fixed_frame) normal_state: Option<ResourceAccessState>,
+    pub(in crate::fixed_frame) color_state: Option<ResourceAccessState>,
     pub(in crate::fixed_frame) texture_state: Option<ResourceAccessState>,
 }
 
@@ -76,6 +78,13 @@ impl FrameResourceProvider<RasterBackend> for CameraResources {
                     "camera frame has no normal import",
                 )
             })?
+        } else if id == vertex_color_binding() {
+            self.colors.as_ref().ok_or_else(|| {
+                missing_binding(
+                    FrameBindingErrorKind::MissingBuffer,
+                    "camera frame has no vertex-color import",
+                )
+            })?
         } else {
             return Err(missing_binding(
                 FrameBindingErrorKind::MissingBuffer,
@@ -92,6 +101,9 @@ impl FrameResourceProvider<RasterBackend> for CameraResources {
         } else if id == normal_binding() {
             self.normal_state
                 .expect("normal state accompanies its buffer")
+        } else if id == vertex_color_binding() {
+            self.color_state
+                .expect("vertex-color state accompanies its buffer")
         } else {
             ResourceAccessState::CopyDestination
         };

@@ -84,6 +84,7 @@ impl ExecutionBackend for RasterBackend {
                 bound_raster_texture: None,
                 bound_raster_uv_texture: None,
                 bound_raster_normal: None,
+                bound_raster_vertex_color: None,
                 raster_uv_epoch: 0,
                 raster_uv_binding_epoch: None,
                 raster_uv_vertex_slots: [None, None],
@@ -92,6 +93,10 @@ impl ExecutionBackend for RasterBackend {
                 raster_normal_binding_epoch: None,
                 raster_normal_vertex_slots: [None, None],
                 raster_normal_index_ready: false,
+                raster_vertex_color_epoch: 0,
+                raster_vertex_color_binding_epoch: None,
+                raster_vertex_color_slots: [None, None],
+                raster_vertex_color_index_ready: false,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -186,12 +191,16 @@ impl ExecutionBackend for RasterBackend {
         encoder.index_buffer = None;
         encoder.bound_raster_uv_texture = None;
         encoder.bound_raster_normal = None;
+        encoder.bound_raster_vertex_color = None;
         encoder.raster_uv_binding_epoch = None;
         encoder.raster_uv_vertex_slots = [None, None];
         encoder.raster_uv_index_ready = false;
         encoder.raster_normal_binding_epoch = None;
         encoder.raster_normal_vertex_slots = [None, None];
         encoder.raster_normal_index_ready = false;
+        encoder.raster_vertex_color_binding_epoch = None;
+        encoder.raster_vertex_color_slots = [None, None];
+        encoder.raster_vertex_color_index_ready = false;
         Ok(())
     }
     fn end_raster(&mut self, encoder: &mut CopyEncoder) -> Result<(), Self::Error> {
@@ -206,12 +215,16 @@ impl ExecutionBackend for RasterBackend {
         encoder.index_buffer = None;
         encoder.bound_raster_uv_texture = None;
         encoder.bound_raster_normal = None;
+        encoder.bound_raster_vertex_color = None;
         encoder.raster_uv_binding_epoch = None;
         encoder.raster_uv_vertex_slots = [None, None];
         encoder.raster_uv_index_ready = false;
         encoder.raster_normal_binding_epoch = None;
         encoder.raster_normal_vertex_slots = [None, None];
         encoder.raster_normal_index_ready = false;
+        encoder.raster_vertex_color_binding_epoch = None;
+        encoder.raster_vertex_color_slots = [None, None];
+        encoder.raster_vertex_color_index_ready = false;
         Ok(())
     }
     fn begin_compute(&mut self, encoder: &mut CopyEncoder, label: &str) -> Result<(), Self::Error> {
@@ -265,6 +278,11 @@ impl ExecutionBackend for RasterBackend {
             .as_ref()
             .is_some_and(|active| Self::is_normal_kernel(active.kernel()))
             || Self::is_normal_kernel(pipeline.kernel());
+        let resets_vertex_color_epoch = encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|active| Self::is_vertex_color_kernel(active.kernel()))
+            || Self::is_vertex_color_kernel(pipeline.kernel());
         encoder.active_raster = Some(pipeline.clone());
         encoder.bound_raster_uniform = None;
         encoder.bound_raster_texture = None;
@@ -284,6 +302,13 @@ impl ExecutionBackend for RasterBackend {
             encoder.raster_normal_binding_epoch = None;
             encoder.raster_normal_vertex_slots = [None, None];
             encoder.raster_normal_index_ready = false;
+        }
+        if resets_vertex_color_epoch {
+            encoder.raster_vertex_color_epoch = encoder.raster_vertex_color_epoch.wrapping_add(1);
+            encoder.bound_raster_vertex_color = None;
+            encoder.raster_vertex_color_binding_epoch = None;
+            encoder.raster_vertex_color_slots = [None, None];
+            encoder.raster_vertex_color_index_ready = false;
         }
         encoder.leases.push(pipeline.lease().into());
         Ok(())
@@ -406,6 +431,18 @@ impl ExecutionBackend for RasterBackend {
                         .map_err(NativeExecutionError::Recording)?;
                     encoder.bound_raster_normal = Some(value.clone());
                     encoder.raster_normal_binding_epoch = Some(encoder.raster_normal_epoch);
+                    encoder.leases.push(value.lease().into());
+                    return Ok(());
+                }
+                RasterBindings::RasterVertexColor(value)
+                    if pipeline.kernel() == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
+                        && value.device_identity() == self.device.identity()
+                        && value.pipeline().same_object(pipeline) =>
+                {
+                    if encoder.raster_vertex_color_binding_epoch == Some(encoder.raster_vertex_color_epoch) { return Err(NativeExecutionError::RasterBindingsAlreadySet); }
+                    crate::imp::set_raster_uniform_bindings(&mut encoder.native, value.native()).map_err(NativeExecutionError::Recording)?;
+                    encoder.bound_raster_vertex_color = Some(value.clone());
+                    encoder.raster_vertex_color_binding_epoch = Some(encoder.raster_vertex_color_epoch);
                     encoder.leases.push(value.lease().into());
                     return Ok(());
                 }

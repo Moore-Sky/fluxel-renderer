@@ -21,6 +21,8 @@ pub enum RasterCreateError {
     InvalidPositionStreamRange,
     /// The normal stream is not the exact closed f32x3 vertex range.
     InvalidNormalStreamRange,
+    /// The color stream is not the exact closed RGBA8 whole-stream range.
+    InvalidColorStreamRange,
     /// The texture-coordinate stream is not the exact closed f32x2 vertex range.
     InvalidTextureCoordinateStreamRange,
     /// A closed vertex stream was created without vertex usage.
@@ -57,6 +59,7 @@ impl fmt::Display for RasterCreateError {
             Self::InvalidNormalStreamRange => {
                 f.write_str("invalid fixed raster normal stream range")
             }
+            Self::InvalidColorStreamRange => f.write_str("invalid fixed raster color stream range"),
             Self::InvalidTextureCoordinateStreamRange => {
                 f.write_str("invalid fixed raster texture-coordinate stream range")
             }
@@ -128,6 +131,9 @@ pub enum RasterKernel {
     /// An indexed camera/material mesh with separate f32x3 position and
     /// unit-normal streams plus fixed object-space `+Z` Lambert lighting.
     IndexedPositionFloat32x3CameraMaterialNormalLambert,
+    /// An indexed camera/material mesh with separate f32x3 position and
+    /// normalized RGBA8 vertex-color streams.
+    IndexedPositionFloat32x3CameraMaterialVertexColor,
 }
 
 /// The non-configurable vertex layout selected by a fixed raster artifact.
@@ -146,6 +152,9 @@ pub enum RasterVertexLayout {
     /// Slot zero is tightly packed f32x3 position and slot one is tightly
     /// packed f32x3 unit normal.
     PositionFloat32x3AndNormalFloat32x3,
+    /// Slot zero is tightly packed f32x3 position and slot one is tightly
+    /// packed normalized RGBA8 vertex color.
+    PositionFloat32x3AndColorUnorm8x4,
 }
 
 /// Interpolation rule for the fixed normal stream.
@@ -317,6 +326,18 @@ pub struct RasterArtifactIdentity {
     pub normal_vertex_stride: Option<u32>,
     /// Normal shader location for the normal-Lambert recipe.
     pub normal_shader_location: Option<u32>,
+    /// Version of the fixed vertex-color stream ABI; zero means no color stream.
+    pub vertex_color_recipe_version: u32,
+    /// Position stream slot for the vertex-color recipe.
+    pub vertex_color_position_slot: Option<u32>,
+    /// Position shader location for the vertex-color recipe.
+    pub vertex_color_position_shader_location: Option<u32>,
+    /// Color stream slot for the vertex-color recipe.
+    pub vertex_color_slot: Option<u32>,
+    /// Color stream byte stride for the vertex-color recipe.
+    pub vertex_color_stride: Option<u32>,
+    /// Color shader location for the vertex-color recipe.
+    pub vertex_color_shader_location: Option<u32>,
     /// Version of the fixed vertex/index/target recipe.
     pub recipe_version: u32,
 }
@@ -412,6 +433,27 @@ impl fmt::Debug for RasterArtifactIdentity {
                 .field("normal_vertex_slot", &self.normal_vertex_slot)
                 .field("normal_vertex_stride", &self.normal_vertex_stride)
                 .field("normal_shader_location", &self.normal_shader_location);
+        }
+        if self.vertex_color_recipe_version != 0 {
+            identity
+                .field(
+                    "vertex_color_recipe_version",
+                    &self.vertex_color_recipe_version,
+                )
+                .field(
+                    "vertex_color_position_slot",
+                    &self.vertex_color_position_slot,
+                )
+                .field(
+                    "vertex_color_position_shader_location",
+                    &self.vertex_color_position_shader_location,
+                )
+                .field("vertex_color_slot", &self.vertex_color_slot)
+                .field("vertex_color_stride", &self.vertex_color_stride)
+                .field(
+                    "vertex_color_shader_location",
+                    &self.vertex_color_shader_location,
+                );
         }
         identity
             .field("recipe_version", &self.recipe_version)

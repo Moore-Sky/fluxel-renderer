@@ -29,7 +29,7 @@ use crate::upload::{SnapshotDrawReservation, SnapshotUseError};
 use crate::{
     BaseColorTextureSnapshot, IndexedMeshSnapshot, NormalIndexedMeshSnapshot,
     SrgbBaseColorTextureSnapshot, SrgbTexturedBasicMaterial, TexturedBasicMaterial,
-    TexturedIndexedMeshSnapshot,
+    TexturedIndexedMeshSnapshot, VertexColorIndexedMeshSnapshot, VertexColorMaterial,
     frame_uniform::{FRAME_UNIFORM_BYTES, FrameUniform},
 };
 
@@ -73,7 +73,7 @@ pub use submission::{FixedFrameStatus, FixedFrameSubmission, FrameImage};
 
 use graph::{
     CameraGraph, build_camera_graph, build_normal_lambert_camera_graph,
-    build_textured_camera_graph, build_uv_textured_camera_graph,
+    build_textured_camera_graph, build_uv_textured_camera_graph, build_vertex_color_camera_graph,
 };
 #[cfg(all(test, windows))]
 use graph::{FixedGraph, build_graph};

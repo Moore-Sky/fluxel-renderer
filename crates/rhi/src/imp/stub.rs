@@ -214,6 +214,21 @@ pub(crate) fn create_raster_normal_bindings(
 ) -> Result<NativeRasterUniformBindings, String> {
     Err("native raster is only supported on Windows".into())
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "matches the closed native vertex-color ABI"
+)]
+pub(crate) fn create_raster_vertex_color_bindings(
+    _: &Arc<OpenedDevice>,
+    _: &NativeRasterPipeline,
+    _: &OwnedBuffer,
+    _: fluxel_rendergraph::PhysicalResourceIdentity,
+    _: u64,
+    _: fluxel_rendergraph::PhysicalResourceIdentity,
+    _: u64,
+) -> Result<NativeRasterUniformBindings, String> {
+    Err("native raster is only supported on Windows".into())
+}
 pub(crate) fn create_raster_texture_bindings(
     _: &Arc<OpenedDevice>,
     _: &NativeRasterPipeline,
@@ -362,6 +377,23 @@ pub(crate) fn set_raster_uv_linear_clamp_srgb_texture_bindings(
 ) -> Result<(), String> {
     Err("native raster is only supported on Windows".into())
 }
+/// Mirrors the native closed-slot minimum range rule on unsupported platforms.
+#[allow(
+    dead_code,
+    reason = "the non-Windows mirror is consumed only by cross-platform contract tests"
+)]
+pub(crate) const fn raster_vertex_minimum_size(kernel: crate::RasterKernel, slot: u32) -> u64 {
+    match (kernel, slot) {
+        (
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
+            1,
+        ) => 8,
+        (crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor, 1) => 4,
+        _ => 12,
+    }
+}
 #[allow(
     clippy::too_many_arguments,
     reason = "the closed native UV recipe passes all independently validated role facts"
@@ -375,6 +407,7 @@ pub(crate) fn set_vertex_buffer(
     _: u32,
     _: fluxel_rendergraph::PhysicalResourceIdentity,
     _: Option<&NativeRasterTextureBindings>,
+    _: Option<&NativeRasterUniformBindings>,
     _: Option<&NativeRasterUniformBindings>,
 ) -> Result<(), String> {
     Err("native raster is only supported on Windows".into())

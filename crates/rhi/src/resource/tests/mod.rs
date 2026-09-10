@@ -102,6 +102,11 @@ fn normal_lambert_identity_is_closed_and_additive() {
 }
 
 #[test]
+fn vertex_color_identity_is_closed_and_additive() {
+    recipes::vertex_color_identity_is_closed_and_additive();
+}
+
+#[test]
 fn texture_pack_accepts_only_full_single_sampled_rgba8_images() {
     recipes::texture_pack_accepts_only_full_single_sampled_rgba8_images();
 }

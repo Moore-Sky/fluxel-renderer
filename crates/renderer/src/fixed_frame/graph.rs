@@ -29,6 +29,7 @@ pub(super) struct CameraGraph {
     pub(super) uniform_slot: fluxel_rendergraph::ImportBufferSlot,
     pub(super) texture_coordinate_slot: Option<fluxel_rendergraph::ImportBufferSlot>,
     pub(super) normal_slot: Option<fluxel_rendergraph::ImportBufferSlot>,
+    pub(super) vertex_color_slot: Option<fluxel_rendergraph::ImportBufferSlot>,
     pub(super) texture_slot: Option<fluxel_rendergraph::ImportTextureSlot>,
     #[allow(
         dead_code,
@@ -52,6 +53,8 @@ pub(super) struct CameraGraph {
     pub(super) texture_coordinate_export: Option<fluxel_rendergraph::ExportBufferSlot>,
     #[allow(dead_code, reason = "U08 checks restored normal buffer state")]
     pub(super) normal_export: Option<fluxel_rendergraph::ExportBufferSlot>,
+    #[allow(dead_code, reason = "U09 checks restored vertex-color buffer state")]
+    pub(super) vertex_color_export: Option<fluxel_rendergraph::ExportBufferSlot>,
 }
 
 pub(super) fn build_camera_graph(
@@ -184,6 +187,7 @@ pub(super) fn build_camera_graph(
         uniform_slot: uniform.slot,
         texture_coordinate_slot: None,
         normal_slot: None,
+        vertex_color_slot: None,
         texture_slot: None,
         texture_export: None,
         pipeline: camera_pipeline(),
@@ -193,6 +197,7 @@ pub(super) fn build_camera_graph(
         index_export,
         texture_coordinate_export: None,
         normal_export: None,
+        vertex_color_export: None,
     })
 }
 
@@ -352,6 +357,7 @@ pub(super) fn build_normal_lambert_camera_graph(
         uniform_slot: uniform.slot,
         texture_coordinate_slot: None,
         normal_slot: Some(normals.slot),
+        vertex_color_slot: None,
         texture_slot: None,
         texture_export: None,
         pipeline: normal_lambert_pipeline(),
@@ -361,6 +367,167 @@ pub(super) fn build_normal_lambert_camera_graph(
         index_export,
         texture_coordinate_export: None,
         normal_export: Some(normal_export),
+        vertex_color_export: None,
+    })
+}
+
+/// Declares the closed position/color/index graph for the vertex-color recipe.
+pub(super) fn build_vertex_color_camera_graph(
+    snapshot: &VertexColorIndexedMeshSnapshot,
+    extent: [u32; 2],
+    capabilities: &DeviceCapabilities,
+) -> Result<CameraGraph, fluxel_rendergraph::CompileError> {
+    let mut graph = RenderGraph::new();
+    let import = |graph: &mut RenderGraph, name: &str, buffer: &UploadedBuffer| {
+        graph.import_buffer_slot(
+            name,
+            ImportBufferContract {
+                descriptor: buffer.buffer().descriptor().buffer,
+                initial_state: buffer.outgoing_state(),
+                ownership: ExternalOwnership::Caller,
+                initial_contents: InitialContents::Defined,
+            },
+        )
+    };
+    let positions = import(
+        &mut graph,
+        "vertex-color-frame-positions",
+        snapshot.positions(),
+    );
+    let colors = import(&mut graph, "vertex-color-frame-colors", snapshot.colors());
+    let indices = import(&mut graph, "vertex-color-frame-indices", snapshot.indices());
+    let uniform = graph.import_buffer_slot(
+        "vertex-color-frame-uniform",
+        ImportBufferContract {
+            descriptor: fluxel_rendergraph::BufferDesc {
+                size: FRAME_UNIFORM_BYTES as u64,
+            },
+            initial_state: ResourceAccessState::CopyDestination,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let target = graph.create_texture(
+        "vertex-color-frame-target",
+        TextureDesc {
+            dimension: TextureDimension::D2,
+            extent: Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        },
+    );
+    let count = snapshot.index_count();
+    let pass = graph.add_raster_pass(
+        "vertex-color-camera-material-indexed",
+        |pass| {
+            let output = pass.color_attachment(
+                target,
+                ColorAttachmentDesc {
+                    index: 0,
+                    range: TextureRange::Whole,
+                    operations: AttachmentOps {
+                        load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+                        store: StoreOp::Store,
+                        write_coverage: WriteCoverage::Full,
+                    },
+                },
+            );
+            let position_read = pass.read_buffer(
+                &positions.version,
+                fluxel_rendergraph::BufferReadUse::Vertex,
+                BufferRange::Whole,
+            );
+            let color_read = pass.read_buffer(
+                &colors.version,
+                fluxel_rendergraph::BufferReadUse::Vertex,
+                BufferRange::Whole,
+            );
+            let index_read = pass.read_buffer(
+                &indices.version,
+                fluxel_rendergraph::BufferReadUse::Index,
+                BufferRange::Whole,
+            );
+            let uniform_read = pass.read_buffer(
+                &uniform.version,
+                fluxel_rendergraph::BufferReadUse::Uniform,
+                BufferRange::Whole,
+            );
+            (
+                output,
+                (position_read, color_read, index_read, uniform_read),
+            )
+        },
+        move |commands, resolver, data, _| {
+            commands.set_pipeline(vertex_color_pipeline())?;
+            let bindings = resolver.resolve_bindings(
+                vertex_color_bindings(),
+                &[BindingResource::BufferRead(&data.3)],
+                &[],
+            )?;
+            commands.set_bindings(&bindings)?;
+            commands.set_vertex_buffer(0, &data.0)?;
+            commands.set_vertex_buffer(1, &data.1)?;
+            commands.set_index_buffer(&data.2, IndexFormat::Uint32)?;
+            commands.set_viewport(Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent[0] as f32,
+                height: extent[1] as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            })?;
+            commands.draw_indexed(0..count, 0, 0..1)
+        },
+    );
+    let position_export = graph.export_buffer(
+        positions.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let vertex_color_export = graph.export_buffer(
+        colors.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let index_export = graph.export_buffer(
+        indices.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let target_export = graph.export_texture(
+        pass.output,
+        ExportTextureContract {
+            final_state: ResourceAccessState::CopySource,
+        },
+    );
+    let compiled = graph.compile(capabilities)?.graph;
+    Ok(CameraGraph {
+        compiled,
+        position_slot: positions.slot,
+        index_slot: indices.slot,
+        uniform_slot: uniform.slot,
+        texture_coordinate_slot: None,
+        normal_slot: None,
+        vertex_color_slot: Some(colors.slot),
+        texture_slot: None,
+        texture_export: None,
+        pipeline: vertex_color_pipeline(),
+        bindings: vertex_color_bindings(),
+        target_export,
+        position_export,
+        index_export,
+        texture_coordinate_export: None,
+        normal_export: None,
+        vertex_color_export: Some(vertex_color_export),
     })
 }
 
@@ -518,6 +685,7 @@ pub(super) fn build_textured_camera_graph(
         uniform_slot: uniform.slot,
         texture_coordinate_slot: None,
         normal_slot: None,
+        vertex_color_slot: None,
         texture_slot: Some(sampled.slot),
         texture_export: Some(texture_export),
         pipeline: textured_pipeline(),
@@ -527,6 +695,7 @@ pub(super) fn build_textured_camera_graph(
         index_export,
         texture_coordinate_export: None,
         normal_export: None,
+        vertex_color_export: None,
     })
 }
 
@@ -712,6 +881,7 @@ pub(super) fn build_uv_textured_camera_graph<T: FrameTexture>(
         uniform_slot: uniform.slot,
         texture_coordinate_slot: Some(texture_coordinates.slot),
         normal_slot: None,
+        vertex_color_slot: None,
         texture_slot: Some(sampled.slot),
         texture_export: Some(texture_export),
         pipeline,
@@ -721,6 +891,7 @@ pub(super) fn build_uv_textured_camera_graph<T: FrameTexture>(
         index_export,
         texture_coordinate_export: Some(texture_coordinate_export),
         normal_export: None,
+        vertex_color_export: None,
     })
 }
 

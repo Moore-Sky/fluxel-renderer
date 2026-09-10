@@ -40,6 +40,33 @@ impl FixedFrameRenderer {
             recipe: RasterRecipe::NORMAL_LAMBERT,
         })
     }
+    pub(super) fn begin_vertex_color(
+        &self,
+        snapshot: &VertexColorIndexedMeshSnapshot,
+        graph: Arc<CameraGraph>,
+        uniform: FrameUniform,
+        reservation: SnapshotDrawReservation,
+    ) -> Result<FixedFrameSubmission, DrawStartError> {
+        self.start_with_resources(StartResources {
+            snapshot: FrameMeshSnapshot::VertexColor(snapshot.clone()),
+            texture: None,
+            graph,
+            uniform,
+            reservation,
+            texture_reservation: None,
+            recipe: RasterRecipe::VERTEX_COLOR,
+        })
+    }
+    #[cfg(all(test, windows))]
+    pub(in crate::fixed_frame) fn start_vertex_color(
+        &self,
+        snapshot: &VertexColorIndexedMeshSnapshot,
+        graph: Arc<CameraGraph>,
+        uniform: FrameUniform,
+        reservation: SnapshotDrawReservation,
+    ) -> Result<FixedFrameSubmission, DrawStartError> {
+        self.begin_vertex_color(snapshot, graph, uniform, reservation)
+    }
     #[cfg(all(test, windows))]
     pub(in crate::fixed_frame) fn start_normal_lambert(
         &self,
@@ -145,6 +172,16 @@ impl FixedFrameRenderer {
             return Err(DrawStartError::Pipeline(error.to_string()));
         }
         let binding_result = match recipe.binding() {
+            BindingRecipe::VertexColor => objects.register_raster_vertex_color_bindings(
+                graph.bindings,
+                graph.pipeline,
+                snapshot.positions().buffer(),
+                snapshot
+                    .colors()
+                    .expect("vertex-color recipe requires colors")
+                    .buffer(),
+                snapshot.position_count(),
+            ),
             BindingRecipe::NormalLambert => objects.register_raster_normal_bindings(
                 graph.bindings,
                 graph.pipeline,

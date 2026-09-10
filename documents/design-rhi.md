@@ -179,12 +179,24 @@ the hardware facts.
 Raster uses separate types for distinct ABI recipes rather than optional fields
 that could combine incompatible choices. The supported family consists of the
 current opaque triangle/indexed, camera/material uniform, texture-load,
-explicit-UV, linear-clamp UNORM, linear-clamp sRGB, and position-plus-normal
-Lambert variants. Each fixes streams, index format, texture/view domain,
-sampler behavior where used, binding slots, uniform layout, attachment domain,
-and shader semantics. The sRGB recipe retains encoded bytes and uses a sampled
-native view so decode occurs before linear filtering; it is not inferred from
-UNORM support. Lambert has its own position/normal ABI and fixed lighting rules.
+explicit-UV, linear-clamp UNORM, linear-clamp sRGB, position-plus-normal
+Lambert, and position-plus-vertex-color variants. Each fixes streams, index
+format, texture/view domain, sampler behavior where used, binding slots,
+uniform layout, attachment domain, and shader semantics. The sRGB recipe
+retains encoded bytes and uses a sampled native view so decode occurs before
+linear filtering; it is not inferred from UNORM support. Lambert has its own
+position/normal ABI and fixed lighting rules.
+
+The vertex-color artifact is likewise closed: it accepts `u32` indices,
+tightly packed `f32x3` positions in vertex slot zero, and tightly packed linear
+normalized `UNORM8x4` colors in vertex slot one. It binds exactly one 80-byte
+camera/tint uniform visible to vertex and fragment stages, rasterizes into
+`Rgba8Unorm`, perspective-interpolates the normalized color, and multiplies it
+by the linear tint. Its portable identity records the two stream slots,
+strides, shader locations, and vertex-color recipe version. The safe provider,
+recording state machine, and native boundary all require the selected pipeline,
+its one binding, both vertex slots, and the index stream before an indexed draw
+can be emitted; no arbitrary second vertex stream can be supplied.
 
 Pipelines, `ComputeBindings`, and raster binding types are opaque,
 device-affine, and lease-backed. Binding creation rechecks pipeline/identity,

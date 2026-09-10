@@ -1,4 +1,4 @@
-//! Closed mappings between the six audited fixed-frame draw contracts and RHI recipes.
+//! Closed mappings between the audited fixed-frame draw contracts and RHI recipes.
 
 use super::*;
 
@@ -8,6 +8,7 @@ pub(super) enum VertexRecipe {
     Position,
     PositionUv,
     PositionNormal,
+    PositionColor,
 }
 
 /// Texture interpretation required by one closed fixed-frame raster contract.
@@ -26,6 +27,7 @@ pub(super) enum GraphRecipe {
     Textured,
     UvTextured,
     NormalLambert,
+    VertexColor,
 }
 
 /// Binding topology token for a closed raster artifact.
@@ -37,6 +39,7 @@ pub(super) enum BindingRecipe {
     UvLinearClamp,
     UvLinearClampSrgb,
     NormalLambert,
+    VertexColor,
 }
 
 /// Mesh snapshot domain accepted by a closed raster artifact.
@@ -45,6 +48,7 @@ pub(super) enum MeshDomain {
     Indexed,
     TexturedIndexed,
     NormalIndexed,
+    VertexColorIndexed,
 }
 
 /// Texture snapshot domain accepted by a closed raster artifact.
@@ -69,6 +73,7 @@ pub(super) enum ExportRecipe {
     Texture,
     UvTexture,
     NormalLambert,
+    VertexColor,
 }
 
 /// One of exactly six audited fixed-frame contracts.
@@ -187,6 +192,19 @@ impl RasterRecipe {
         ReservationRecipe::Mesh,
         ExportRecipe::NormalLambert,
     );
+    pub(super) const VERTEX_COLOR: Self = fixed_recipe!(
+        RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor,
+        0x0280_0001,
+        0x0280_0001,
+        VertexRecipe::PositionColor,
+        TextureRecipe::None,
+        GraphRecipe::VertexColor,
+        BindingRecipe::VertexColor,
+        MeshDomain::VertexColorIndexed,
+        TextureDomain::None,
+        ReservationRecipe::Mesh,
+        ExportRecipe::VertexColor,
+    );
 
     pub(super) const fn kernel(self) -> RasterKernel {
         self.kernel
@@ -236,6 +254,10 @@ impl RasterRecipe {
                     FrameMeshSnapshot::TexturedUv(_)
                 )
                 | (MeshDomain::NormalIndexed, FrameMeshSnapshot::Normal(_))
+                | (
+                    MeshDomain::VertexColorIndexed,
+                    FrameMeshSnapshot::VertexColor(_)
+                )
         ) && matches!(
             (self.texture_domain(), texture),
             (TextureDomain::None, None)
@@ -288,6 +310,12 @@ impl RasterRecipe {
                 GraphRecipe::NormalLambert,
                 BindingRecipe::NormalLambert,
                 ExportRecipe::NormalLambert
+            ) | (
+                VertexRecipe::PositionColor,
+                TextureRecipe::None,
+                GraphRecipe::VertexColor,
+                BindingRecipe::VertexColor,
+                ExportRecipe::VertexColor
             )
         )
     }

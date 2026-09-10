@@ -64,6 +64,16 @@ pub struct RasterObjectProvider {
             u32,
         ),
     >,
+    raster_vertex_color_bindings: HashMap<
+        fluxel_rendergraph::BindingSetId,
+        (
+            fluxel_rendergraph::RasterPipelineId,
+            RasterPipeline,
+            Buffer,
+            Buffer,
+            u32,
+        ),
+    >,
 }
 
 impl RasterObjectProvider {
@@ -80,6 +90,7 @@ impl RasterObjectProvider {
             raster_uv_linear_clamp_bindings: HashMap::new(),
             raster_uv_linear_clamp_srgb_bindings: HashMap::new(),
             raster_normal_bindings: HashMap::new(),
+            raster_vertex_color_bindings: HashMap::new(),
         }
     }
 
@@ -329,6 +340,48 @@ impl RasterObjectProvider {
         );
         Ok(())
     }
+
+    /// Registers the closed position-and-RGBA8 vertex-color raster recipe.
+    pub fn register_raster_vertex_color_bindings(
+        &mut self,
+        id: fluxel_rendergraph::BindingSetId,
+        expected_pipeline: fluxel_rendergraph::RasterPipelineId,
+        positions: &Buffer,
+        colors: &Buffer,
+        vertex_count: u32,
+    ) -> Result<(), NativeExecutionError> {
+        let pipeline = self
+            .raster
+            .get(&expected_pipeline)
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        if pipeline.kernel()
+            != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
+            || vertex_count == 0
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        require_device(
+            positions.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        require_device(
+            colors.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        self.raster_vertex_color_bindings.insert(
+            id,
+            (
+                expected_pipeline,
+                pipeline.clone(),
+                positions.clone(),
+                colors.clone(),
+                vertex_count,
+            ),
+        );
+        Ok(())
+    }
 }
 
 impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectProvider {
@@ -398,6 +451,46 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
                 fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
                 "fixed bindings do not accept dynamic offsets",
             ));
+        }
+        if let Some((_, pipeline, positions, colors, vertex_count)) =
+            self.raster_vertex_color_bindings.get(&id)
+        {
+            let [
+                fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                    physical: uniform,
+                    range: BufferRange::Whole,
+                    semantic:
+                        fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                            fluxel_rendergraph::BufferReadUse::Uniform,
+                        ),
+                },
+            ] = resources
+            else {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "vertex-color raster binding requires one whole Uniform buffer",
+                ));
+            };
+            let value = self
+                .owner
+                .create_raster_vertex_color_bindings(
+                    pipeline,
+                    uniform,
+                    positions,
+                    colors,
+                    *vertex_count,
+                )
+                .map_err(|error| {
+                    provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        error.to_string(),
+                    )
+                })?;
+            return Ok(fluxel_rendergraph::BoundBindings {
+                device: self.device,
+                lease: value.lease().into(),
+                physical: RasterBindings::RasterVertexColor(value),
+            });
         }
         if let Some((_, pipeline, positions, normals, vertex_count)) =
             self.raster_normal_bindings.get(&id)
@@ -761,6 +854,7 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
             RasterBindings::RasterUvLinearClampTexture(value) => value.lease().into(),
             RasterBindings::RasterUvLinearClampSrgbTexture(value) => value.lease().into(),
             RasterBindings::RasterNormal(value) => value.lease().into(),
+            RasterBindings::RasterVertexColor(value) => value.lease().into(),
         };
         Ok(fluxel_rendergraph::BoundBindings {
             device: self.device,

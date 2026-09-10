@@ -76,6 +76,46 @@ impl FixedFrameRenderer {
         self.begin_normal_lambert(snapshot, graph, uniform, reservation)
     }
 
+    /// Starts the closed perspective-interpolated RGBA8 vertex-color draw.
+    pub fn draw_vertex_color(
+        &self,
+        snapshot: &VertexColorIndexedMeshSnapshot,
+        camera: &crate::Camera,
+        material: &VertexColorMaterial,
+        extent: [u32; 2],
+    ) -> Result<FixedFrameSubmission, DrawStartError> {
+        if extent[0] == 0 || extent[1] == 0 {
+            return Err(DrawStartError::InvalidExtent);
+        }
+        if snapshot.positions().buffer().device_identity() != self.device.identity()
+            || snapshot.colors().buffer().device_identity() != self.device.identity()
+            || snapshot.indices().buffer().device_identity() != self.device.identity()
+        {
+            return Err(DrawStartError::ForeignSnapshotDevice);
+        }
+        if snapshot.index_count() == 0 || !snapshot.index_count().is_multiple_of(3) {
+            return Err(DrawStartError::InvalidIndexCount);
+        }
+        debug_assert_eq!(
+            snapshot.color_metadata().len(),
+            snapshot.position_count() as usize,
+            "VertexColorIndexedMeshSnapshot publication keeps vertex streams aligned"
+        );
+        let uniform = FrameUniform::new_vertex_color(camera, material)
+            .map_err(|_| DrawStartError::InvalidCameraMaterial)?;
+        validate_clip(
+            snapshot.position_metadata(),
+            snapshot.index_metadata(),
+            uniform.view_projection(),
+        )?;
+        let graph = Arc::new(
+            build_vertex_color_camera_graph(snapshot, extent, &self.capabilities)
+                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+        );
+        let reservation = snapshot.reserve_for_draw().map_err(map_snapshot_use)?;
+        self.begin_vertex_color(snapshot, graph, uniform, reservation)
+    }
+
     /// Starts one fixed indexed draw with an immutable RGBA8 `textureLoad` texture.
     pub fn draw_textured(
         &self,

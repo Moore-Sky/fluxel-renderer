@@ -22,6 +22,7 @@ pub(in crate::execution) fn raster_recipe_allows_vertex_offset(
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
     ) || offset == 0
 }
 
@@ -38,6 +39,7 @@ pub(in crate::execution) fn raster_recipe_allows_index_offset(
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
             | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+            | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
     ) || offset == 0
 }
 
@@ -56,6 +58,7 @@ pub(in crate::execution) fn raster_recipe_allows_first_index(
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
         )
     ) || first_index == 0
 }
@@ -81,6 +84,61 @@ impl RasterBackend {
     ) -> Result<(), NativeExecutionError> {
         self.check_encoder(encoder)?;
         self.check_buffer(buffer)?;
+        if encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|pipeline| Self::is_vertex_color_kernel(pipeline.kernel()))
+        {
+            if slot > 1 {
+                return Err(NativeExecutionError::RasterVertexSlotOutOfRange { slot });
+            }
+            if encoder.raster_vertex_color_binding_epoch != Some(encoder.raster_vertex_color_epoch)
+            {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            let bindings = encoder
+                .bound_raster_vertex_color
+                .as_ref()
+                .ok_or(NativeExecutionError::RasterStateMismatch)?;
+            if encoder.raster_vertex_color_slots[slot as usize].is_some() {
+                return Err(NativeExecutionError::RasterVertexSlotAlreadyBound { slot });
+            }
+            let expected_identity = if slot == 0 {
+                bindings.position_identity()
+            } else {
+                bindings.color_identity()
+            };
+            if buffer.identity() != expected_identity {
+                return Err(NativeExecutionError::RasterVertexRoleMismatch { slot });
+            }
+            let required = u64::from(bindings.vertex_count()) * if slot == 0 { 12 } else { 4 };
+            if offset != 0 || buffer.descriptor().buffer.size != required {
+                return Err(NativeExecutionError::RasterVertexRangeMismatch { slot });
+            }
+            if !buffer.allowed_usage().contains(BufferUsageKind::Vertex) {
+                return Err(NativeExecutionError::RasterVertexUsageMismatch { slot });
+            }
+            crate::imp::set_vertex_buffer(
+                &mut encoder.native,
+                buffer.native(),
+                offset,
+                required,
+                encoder
+                    .active_raster
+                    .as_ref()
+                    .expect("checked active vertex-color pipeline")
+                    .kernel(),
+                slot,
+                buffer.identity(),
+                None,
+                None,
+                Some(bindings.native()),
+            )
+            .map_err(NativeExecutionError::Recording)?;
+            encoder.raster_vertex_color_slots[slot as usize] = Some((buffer.clone(), offset));
+            encoder.leases.push(buffer.lease().into());
+            return Ok(());
+        }
         if encoder
             .active_raster
             .as_ref()
@@ -128,6 +186,7 @@ impl RasterBackend {
                 slot,
                 buffer.identity(),
                 Some(bindings.native()),
+                None,
                 None,
             )
             .map_err(NativeExecutionError::Recording)?;
@@ -182,6 +241,7 @@ impl RasterBackend {
                 buffer.identity(),
                 None,
                 Some(bindings.native()),
+                None,
             )
             .map_err(NativeExecutionError::Recording)?;
             encoder.raster_normal_vertex_slots[slot as usize] = Some((buffer.clone(), offset));
@@ -222,6 +282,7 @@ impl RasterBackend {
             buffer.identity(),
             None,
             None,
+            None,
         )
         .map_err(NativeExecutionError::Recording)?;
         encoder.vertex_buffer = Some((buffer.clone(), offset));
@@ -238,6 +299,35 @@ impl RasterBackend {
     ) -> Result<(), NativeExecutionError> {
         self.check_encoder(encoder)?;
         self.check_buffer(buffer)?;
+        if encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|pipeline| Self::is_vertex_color_kernel(pipeline.kernel()))
+        {
+            if encoder.raster_vertex_color_binding_epoch != Some(encoder.raster_vertex_color_epoch)
+                || encoder.bound_raster_vertex_color.is_none()
+            {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            if format != IndexFormat::Uint32
+                || offset != 0
+                || !buffer.allowed_usage().contains(BufferUsageKind::Index)
+            {
+                return Err(NativeExecutionError::RasterStateMismatch);
+            }
+            crate::imp::set_index_buffer(
+                &mut encoder.native,
+                buffer.native(),
+                offset,
+                buffer.descriptor().buffer.size,
+                format,
+            )
+            .map_err(NativeExecutionError::Recording)?;
+            encoder.index_buffer = Some((buffer.clone(), offset, format));
+            encoder.raster_vertex_color_index_ready = true;
+            encoder.leases.push(buffer.lease().into());
+            return Ok(());
+        }
         if encoder
             .active_raster
             .as_ref()
@@ -452,6 +542,10 @@ impl RasterBackend {
             .active_raster
             .as_ref()
             .is_some_and(|pipeline| Self::is_normal_kernel(pipeline.kernel()));
+        let vertex_color_kernel = encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|pipeline| Self::is_vertex_color_kernel(pipeline.kernel()));
         if indices.start >= indices.end
             || !raster_recipe_allows_first_index(
                 encoder.active_raster.as_ref().map(RasterPipeline::kernel),
@@ -460,7 +554,10 @@ impl RasterBackend {
             || base_vertex != 0
             || instances != (0..1)
             || encoder.raster_extent.is_none()
-            || (!uv_kernel && !normal_kernel && encoder.vertex_buffer.is_none())
+            || (!uv_kernel
+                && !normal_kernel
+                && !vertex_color_kernel
+                && encoder.vertex_buffer.is_none())
             || encoder.index_buffer.is_none()
         {
             return Err(NativeExecutionError::RasterStateMismatch);
@@ -483,6 +580,9 @@ impl RasterBackend {
                 crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
             ) => IndexFormat::Uint32,
             Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert) => {
+                IndexFormat::Uint32
+            }
+            Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor) => {
                 IndexFormat::Uint32
             }
             _ => return Err(NativeExecutionError::RasterStateMismatch),
@@ -533,6 +633,21 @@ impl RasterBackend {
                 return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 });
             }
             if !encoder.raster_normal_index_ready {
+                return Err(NativeExecutionError::RasterStateMismatch);
+            }
+        }
+        if vertex_color_kernel {
+            if encoder.raster_vertex_color_binding_epoch != Some(encoder.raster_vertex_color_epoch)
+            {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            if encoder.raster_vertex_color_slots[0].is_none() {
+                return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 0 });
+            }
+            if encoder.raster_vertex_color_slots[1].is_none() {
+                return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 });
+            }
+            if !encoder.raster_vertex_color_index_ready {
                 return Err(NativeExecutionError::RasterStateMismatch);
             }
         }

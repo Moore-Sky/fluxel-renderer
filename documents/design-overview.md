@@ -86,11 +86,15 @@ material behavior, and ordering policy are legal for the frame. Persistent CPU
 data is validated before it enters the asynchronous GPU path.
 
 The current renderer has deliberately narrow, headless fixed paths: immutable
-indexed mesh/texture/normal snapshots are published only after their uploads
-complete, and a fixed-frame coordinator selects one of a small set of private,
-closed raster recipes. A recipe jointly specifies the vertex/texture domain,
-graph access declarations, RHI kernel and bindings, reservation topology, and
-exports. It is an internal consistency mechanism, not a configurable material
+indexed mesh, texture, normal, and vertex-color snapshots are published only
+after their uploads complete, and a fixed-frame coordinator selects one of a
+small set of private, closed raster recipes. A recipe jointly specifies the
+vertex/texture domain, graph access declarations, RHI kernel and bindings,
+reservation topology, and exports. The vertex-color recipe is a representative
+closed multi-stream contract: position `f32x3` in slot zero, linear
+`UNORM8x4` color in slot one, `u32` indices, and the camera/tint uniform all
+move together from immutable snapshot through graph declaration to RHI
+recording. It is an internal consistency mechanism, not a configurable material
 or pipeline API; see [ADR-0007](adr/0007-closed-fixed-renderer-recipes.md).
 
 For the legacy unlit indexed contract, the renderer lowers a `DrawList` and a

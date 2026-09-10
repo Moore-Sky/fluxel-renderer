@@ -147,6 +147,41 @@ pub(super) fn normal_lambert_identity_is_closed_and_additive() {
     assert!(source.contains("frame.base_color.a"));
 }
 
+pub(super) fn vertex_color_identity_is_closed_and_additive() {
+    let legacy = format!(
+        "{:?}",
+        RasterKernel::IndexedPositionFloat32x3CameraMaterial.portable_identity()
+    );
+    assert!(!legacy.contains("vertex_color_recipe_version"));
+    let identity =
+        RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor.portable_identity();
+    assert_eq!(
+        identity.vertex_layout,
+        RasterVertexLayout::PositionFloat32x3AndColorUnorm8x4
+    );
+    assert_eq!(identity.index_format, Some(IndexFormat::Uint32));
+    assert_eq!(identity.binding_count, 1);
+    assert_eq!(identity.uniform_binding_size, 80);
+    assert_eq!(identity.vertex_color_recipe_version, 1);
+    assert_eq!(identity.vertex_color_position_slot, Some(0));
+    assert_eq!(identity.vertex_color_position_shader_location, Some(0));
+    assert_eq!(identity.vertex_color_slot, Some(1));
+    assert_eq!(identity.vertex_color_stride, Some(4));
+    assert_eq!(identity.vertex_color_shader_location, Some(1));
+    let source = RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor.wgsl_source();
+    assert!(source.contains("@interpolate(perspective, center) color"));
+    assert!(source.contains("input.color * frame.base_color"));
+    let uniform = BufferUsage::from_kinds([BufferUsageKind::Uniform]);
+    assert_eq!(
+        validate_raster_uniform_contract(
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor,
+            80,
+            uniform
+        ),
+        Ok(())
+    );
+}
+
 pub(super) fn texture_pack_accepts_only_full_single_sampled_rgba8_images() {
     let image = TextureDesc {
         dimension: TextureDimension::D2,

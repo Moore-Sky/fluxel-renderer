@@ -29,6 +29,8 @@ pub enum ResourceLease {
     RasterUvLinearClampTextureBindings(RasterUvLinearClampTextureBindingsLease),
     /// Retains the closed normal-Lambert binding and both vertex streams.
     RasterNormalBindings(RasterNormalBindingsLease),
+    /// Retains the closed position-and-RGBA8 vertex-color raster binding.
+    RasterVertexColorBindings(RasterVertexColorBindingsLease),
     /// Retains the closed sampled-texture-to-storage-buffer binding object.
     TexturePackBindings(TexturePackBindingsLease),
 }
@@ -184,6 +186,11 @@ impl From<RasterUvLinearClampTextureBindingsLease> for ResourceLease {
 impl From<RasterNormalBindingsLease> for ResourceLease {
     fn from(value: RasterNormalBindingsLease) -> Self {
         Self::RasterNormalBindings(value)
+    }
+}
+impl From<RasterVertexColorBindingsLease> for ResourceLease {
+    fn from(value: RasterVertexColorBindingsLease) -> Self {
+        Self::RasterVertexColorBindings(value)
     }
 }
 
@@ -388,6 +395,36 @@ impl RasterNormalBindings {
     /// Acquires a terminal-lifetime lease for the complete binding.
     pub fn lease(&self) -> RasterNormalBindingsLease {
         RasterNormalBindingsLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeRasterUniformBindings {
+        &self.0._native
+    }
+}
+
+impl RasterVertexColorBindings {
+    /// Returns the only vertex-color pipeline accepted by this binding.
+    pub fn pipeline(&self) -> &RasterPipeline {
+        &self.0.pipeline
+    }
+    /// Returns the position generation required at slot zero.
+    pub fn position_identity(&self) -> PhysicalResourceIdentity {
+        self.0.position_identity
+    }
+    /// Returns the RGBA8 color generation required at slot one.
+    pub fn color_identity(&self) -> PhysicalResourceIdentity {
+        self.0.color_identity
+    }
+    /// Returns the exact count represented by both streams.
+    pub fn vertex_count(&self) -> u32 {
+        self.0.vertex_count
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a terminal-lifetime lease for this complete binding.
+    pub fn lease(&self) -> RasterVertexColorBindingsLease {
+        RasterVertexColorBindingsLease(Arc::clone(&self.0))
     }
     pub(crate) fn native(&self) -> &crate::imp::NativeRasterUniformBindings {
         &self.0._native

@@ -162,6 +162,62 @@ fn f32x3_u32_recipe_rejects_nonzero_bases_before_native_recording() {
 }
 
 #[test]
+fn vertex_color_recipe_rejects_nonzero_bases_before_native_recording() {
+    use crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor;
+    assert!(raster_recipe_allows_vertex_offset(
+        IndexedPositionFloat32x3CameraMaterialVertexColor,
+        0
+    ));
+    assert!(!raster_recipe_allows_vertex_offset(
+        IndexedPositionFloat32x3CameraMaterialVertexColor,
+        4
+    ));
+    assert!(raster_recipe_allows_index_offset(
+        IndexedPositionFloat32x3CameraMaterialVertexColor,
+        0
+    ));
+    assert!(!raster_recipe_allows_index_offset(
+        IndexedPositionFloat32x3CameraMaterialVertexColor,
+        4
+    ));
+    assert!(raster_recipe_allows_first_index(
+        Some(IndexedPositionFloat32x3CameraMaterialVertexColor),
+        0
+    ));
+    assert!(!raster_recipe_allows_first_index(
+        Some(IndexedPositionFloat32x3CameraMaterialVertexColor),
+        1
+    ));
+}
+
+#[test]
+fn vertex_color_slot_one_accepts_two_rgba8_vertices_at_native_range_gate() {
+    use crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor;
+    // Three indices may repeat either vertex; the closed geometry contract
+    // therefore permits a two-vertex, eight-byte color stream.
+    assert_eq!(
+        crate::imp::raster_vertex_minimum_size(
+            IndexedPositionFloat32x3CameraMaterialVertexColor,
+            1
+        ),
+        4
+    );
+    assert!(
+        8 >= crate::imp::raster_vertex_minimum_size(
+            IndexedPositionFloat32x3CameraMaterialVertexColor,
+            1
+        )
+    );
+    assert_eq!(
+        crate::imp::raster_vertex_minimum_size(
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv,
+            1
+        ),
+        8
+    );
+}
+
+#[test]
 fn fixed_compute_artifacts_have_stable_entries_workgroups_and_source_hash() {
     use crate::ComputeKernel;
     for (kernel, entry) in [

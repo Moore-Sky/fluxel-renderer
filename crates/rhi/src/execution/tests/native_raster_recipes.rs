@@ -460,6 +460,177 @@ pub(super) fn run_raster_vertex_recipe_negative_paths(
     );
     drop(encoder);
 
+    // Vertex color uses the same two-stream shape as UV and normal, but its
+    // second stream has a different closed ABI (four packed bytes per
+    // vertex). Exercise that identity and epoch proof directly: every
+    // rejection below occurs before finish/submit, then one legal recording
+    // proves a rejected setter did not manufacture readiness.
+    let vertex_color_pipeline = device
+        .create_raster_pipeline(
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor,
+        )
+        .unwrap();
+    let other_vertex_color_pipeline = device
+        .create_raster_pipeline(
+            crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor,
+        )
+        .unwrap();
+    let vertex_colors = device
+        .create_buffer(BufferDescriptor {
+            buffer: BufferDesc { size: 12 },
+            usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let vertex_color_index = device
+        .create_buffer(BufferDescriptor {
+            buffer: BufferDesc { size: 12 },
+            usage: BufferUsage::from_kinds([BufferUsageKind::Index]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let foreign_vertex_colors = foreign_device
+        .create_buffer(BufferDescriptor {
+            buffer: BufferDesc { size: 12 },
+            usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let vertex_color_bindings = RasterBindings::RasterVertexColor(
+        device
+            .create_raster_vertex_color_bindings(
+                &vertex_color_pipeline,
+                &uniform,
+                &positions,
+                &vertex_colors,
+                3,
+            )
+            .unwrap(),
+    );
+    let other_vertex_color_bindings = RasterBindings::RasterVertexColor(
+        device
+            .create_raster_vertex_color_bindings(
+                &other_vertex_color_pipeline,
+                &uniform,
+                &positions,
+                &vertex_colors,
+                3,
+            )
+            .unwrap(),
+    );
+    assert!(matches!(
+        device.create_raster_vertex_color_bindings(
+            &vertex_color_pipeline,
+            &uniform,
+            &positions,
+            &vertex_colors,
+            2,
+        ),
+        Err(crate::RasterCreateError::InvalidPositionStreamRange)
+    ));
+    assert!(matches!(
+        device.create_raster_vertex_color_bindings(
+            &normal_pipeline,
+            &uniform,
+            &positions,
+            &vertex_colors,
+            3,
+        ),
+        Err(crate::RasterCreateError::BindingRecipeMismatch)
+    ));
+    assert!(matches!(
+        device.create_raster_vertex_color_bindings(
+            &vertex_color_pipeline,
+            &uniform,
+            &positions,
+            &foreign_vertex_colors,
+            3,
+        ),
+        Err(crate::RasterCreateError::ForeignDevice)
+    ));
+    let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+    backend
+        .transition_texture(
+            &mut encoder,
+            &target,
+            TextureRange::Whole,
+            ResourceAccessState::Undefined,
+            ResourceAccessState::ColorAttachmentReadWrite,
+        )
+        .unwrap();
+    backend.begin_raster(&mut encoder, &descriptor).unwrap();
+    backend
+        .set_raster_pipeline(&mut encoder, &vertex_color_pipeline)
+        .unwrap();
+    assert_eq!(
+        backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+        Err(NativeExecutionError::RasterStateMismatch)
+    );
+    assert_eq!(
+        backend.set_bindings(&mut encoder, &normal_bindings),
+        Err(NativeExecutionError::RasterStateMismatch)
+    );
+    backend
+        .set_bindings(&mut encoder, &vertex_color_bindings)
+        .unwrap();
+    assert_eq!(
+        backend.set_vertex_buffer(&mut encoder, 1, &foreign_vertex_colors, 0),
+        Err(NativeExecutionError::ForeignResource)
+    );
+    assert_eq!(
+        backend.set_bindings(&mut encoder, &vertex_color_bindings),
+        Err(NativeExecutionError::RasterBindingsAlreadySet)
+    );
+    assert_eq!(
+        backend.set_bindings(&mut encoder, &other_vertex_color_bindings),
+        Err(NativeExecutionError::RasterStateMismatch)
+    );
+    assert_eq!(
+        backend.set_vertex_buffer(&mut encoder, 2, &positions, 0),
+        Err(NativeExecutionError::RasterVertexSlotOutOfRange { slot: 2 })
+    );
+    assert_eq!(
+        backend.set_vertex_buffer(&mut encoder, 0, &vertex_colors, 0),
+        Err(NativeExecutionError::RasterVertexRoleMismatch { slot: 0 })
+    );
+    assert_eq!(
+        backend.set_vertex_buffer(&mut encoder, 1, &positions, 0),
+        Err(NativeExecutionError::RasterVertexRoleMismatch { slot: 1 })
+    );
+    assert_eq!(
+        backend.set_vertex_buffer(&mut encoder, 1, &vertex_colors, 4),
+        Err(NativeExecutionError::RasterVertexRangeMismatch { slot: 1 })
+    );
+    backend
+        .set_vertex_buffer(&mut encoder, 0, &positions, 0)
+        .unwrap();
+    assert_eq!(
+        backend.set_vertex_buffer(&mut encoder, 0, &positions, 0),
+        Err(NativeExecutionError::RasterVertexSlotAlreadyBound { slot: 0 })
+    );
+    backend
+        .set_index_buffer(&mut encoder, &vertex_color_index, 0, IndexFormat::Uint32)
+        .unwrap();
+    assert_eq!(
+        backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+        Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 })
+    );
+    backend
+        .set_vertex_buffer(&mut encoder, 1, &vertex_colors, 0)
+        .unwrap();
+    backend.draw_indexed(&mut encoder, 0..3, 0, 0..1).unwrap();
+    backend
+        .set_raster_pipeline(&mut encoder, &camera_pipeline)
+        .unwrap();
+    backend
+        .set_raster_pipeline(&mut encoder, &vertex_color_pipeline)
+        .unwrap();
+    assert_eq!(
+        backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+        Err(NativeExecutionError::RasterEpochMismatch)
+    );
+    drop(encoder);
+
     // Nothing above finishes/submits; validation must remain silent.
     assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
 }

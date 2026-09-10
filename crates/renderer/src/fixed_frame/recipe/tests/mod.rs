@@ -1,9 +1,9 @@
-//! Freezes the six audited closed recipe mappings.
+//! Freezes every audited closed recipe mapping.
 
 use super::*;
 
 #[test]
-fn six_closed_recipes_freeze_audited_kernel_and_topology() {
+fn closed_recipes_freeze_audited_kernel_and_topology() {
     let cases = [
         (
             RasterRecipe::LEGACY_UNLIT,
@@ -82,6 +82,19 @@ fn six_closed_recipes_freeze_audited_kernel_and_topology() {
             TextureDomain::None,
             ReservationRecipe::Mesh,
             ExportRecipe::NormalLambert,
+        ),
+        (
+            RasterRecipe::VERTEX_COLOR,
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor,
+            vertex_color_pipeline(),
+            vertex_color_bindings(),
+            VertexRecipe::PositionColor,
+            TextureRecipe::None,
+            BindingRecipe::VertexColor,
+            MeshDomain::VertexColorIndexed,
+            TextureDomain::None,
+            ReservationRecipe::Mesh,
+            ExportRecipe::VertexColor,
         ),
     ];
     for (

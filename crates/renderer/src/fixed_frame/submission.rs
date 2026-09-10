@@ -27,6 +27,7 @@ pub(super) enum FrameMeshSnapshot {
     Indexed(IndexedMeshSnapshot),
     Normal(NormalIndexedMeshSnapshot),
     TexturedUv(TexturedIndexedMeshSnapshot),
+    VertexColor(VertexColorIndexedMeshSnapshot),
 }
 
 impl FrameMeshSnapshot {
@@ -35,6 +36,7 @@ impl FrameMeshSnapshot {
             Self::Indexed(snapshot) => snapshot.positions(),
             Self::Normal(snapshot) => snapshot.positions(),
             Self::TexturedUv(snapshot) => snapshot.positions(),
+            Self::VertexColor(snapshot) => snapshot.positions(),
         }
     }
 
@@ -43,12 +45,13 @@ impl FrameMeshSnapshot {
             Self::Indexed(snapshot) => snapshot.indices(),
             Self::Normal(snapshot) => snapshot.indices(),
             Self::TexturedUv(snapshot) => snapshot.indices(),
+            Self::VertexColor(snapshot) => snapshot.indices(),
         }
     }
 
     pub(super) fn texture_coordinates(&self) -> Option<&UploadedBuffer> {
         match self {
-            Self::Indexed(_) | Self::Normal(_) => None,
+            Self::Indexed(_) | Self::Normal(_) | Self::VertexColor(_) => None,
             Self::TexturedUv(snapshot) => Some(snapshot.texture_coordinates()),
         }
     }
@@ -56,7 +59,14 @@ impl FrameMeshSnapshot {
     pub(super) fn normals(&self) -> Option<&UploadedBuffer> {
         match self {
             Self::Normal(snapshot) => Some(snapshot.normals()),
-            Self::Indexed(_) | Self::TexturedUv(_) => None,
+            Self::Indexed(_) | Self::TexturedUv(_) | Self::VertexColor(_) => None,
+        }
+    }
+
+    pub(super) fn colors(&self) -> Option<&UploadedBuffer> {
+        match self {
+            Self::VertexColor(snapshot) => Some(snapshot.colors()),
+            Self::Indexed(_) | Self::Normal(_) | Self::TexturedUv(_) => None,
         }
     }
 
@@ -65,6 +75,7 @@ impl FrameMeshSnapshot {
             Self::Indexed(snapshot) => snapshot.position_count(),
             Self::Normal(snapshot) => snapshot.position_count(),
             Self::TexturedUv(snapshot) => snapshot.position_count(),
+            Self::VertexColor(snapshot) => snapshot.position_count(),
         }
     }
 }
@@ -145,6 +156,7 @@ impl FixedFrameSubmission {
                 .snapshot
                 .normals()
                 .map(|normals| normals.buffer().clone()),
+            colors: self.snapshot.colors().map(|colors| colors.buffer().clone()),
             uniform: uniform.buffer().clone(),
             texture: self
                 .texture_snapshot
@@ -157,6 +169,7 @@ impl FixedFrameSubmission {
                 .texture_coordinates()
                 .map(UploadedBuffer::outgoing_state),
             normal_state: self.snapshot.normals().map(UploadedBuffer::outgoing_state),
+            color_state: self.snapshot.colors().map(UploadedBuffer::outgoing_state),
             texture_state: self
                 .texture_snapshot
                 .as_ref()
@@ -172,6 +185,9 @@ impl FixedFrameSubmission {
         }
         if let Some(slot) = graph.normal_slot {
             inputs.bind_buffer(slot, normal_binding());
+        }
+        if let Some(slot) = graph.vertex_color_slot {
+            inputs.bind_buffer(slot, vertex_color_binding());
         }
         if let Some(slot) = graph.texture_slot {
             inputs.bind_texture(slot, texture_binding());

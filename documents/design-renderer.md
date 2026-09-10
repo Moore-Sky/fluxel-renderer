@@ -11,7 +11,7 @@ graph. It never exposes native handles to its callers.
 The crate provides portable domain objects (`Camera`, `Geometry`, `Mesh`,
 `BasicMaterial`, and insertion-ordered `DrawList`); opt-in non-blocking uploads
 that publish immutable mesh and texture snapshots after GPU completion; an
-owned `RenderPacket` for ordered legacy unlit indexed draws; and six closed
+owned `RenderPacket` for ordered legacy unlit indexed draws; and seven closed
 single-draw indexed contracts which yield opaque offscreen `FrameImage`
 metadata after completion. The default crate has no graphics-backend dependency;
 GPU coordination and fixed drawing require the `gpu-upload` feature.
@@ -84,10 +84,11 @@ crates/renderer/src/
     indexed.rs           position/index snapshot upload and publication
     textured.rs          position/index/UV snapshot upload and publication
     normal.rs            position/index/normal snapshot upload and publication
+    vertex_color/        position/index/RGBA8-color domain and upload lifecycle
     texture/             separate linear-UNORM and sRGB texture domains
     shared.rs            generation allocation and snapshot-use gate
   fixed_frame/
-    recipe.rs            six closed renderer-to-RHI raster mappings
+    recipe.rs            seven closed renderer-to-RHI raster mappings
     renderer/            public draw facade, validation and transaction startup
     graph.rs             closed-recipe graph declarations and export contracts
     provider.rs          snapshot-to-graph import-slot binding adapter
@@ -139,6 +140,7 @@ With `gpu-upload`, the crate also exposes opaque-ready resource families:
 | indexed geometry | `IndexedMeshUpload` | `IndexedMeshSnapshot` | position `f32x3`, index `u32` |
 | indexed geometry plus UV | `TexturedIndexedMeshUpload` | `TexturedIndexedMeshSnapshot` | position `f32x3`, index `u32`, UV `f32x2` |
 | indexed geometry plus normals | `NormalIndexedMeshUpload` | `NormalIndexedMeshSnapshot` | position `f32x3`, index `u32`, normal `f32x3` |
+| indexed geometry plus vertex colors | `VertexColorIndexedMeshUpload` | `VertexColorIndexedMeshSnapshot` | position `f32x3`, linear color `UNORM8x4`, index `u32` |
 | linear RGBA8 image | `BaseColorTextureUpload` | `BaseColorTextureSnapshot` | `Rgba8Unorm` |
 | sRGB RGBA8 image | `SrgbBaseColorTextureUpload` | `SrgbBaseColorTextureSnapshot` | `Rgba8UnormSrgb` |
 
@@ -166,6 +168,7 @@ Publication is atomic at the renderer level:
 - indexed mesh: both position and index uploads complete;
 - textured mesh: position, index, and UV uploads complete;
 - normal mesh: position, index, and normal uploads complete; and
+- vertex-color mesh: position, color, and index uploads complete; and
 - texture: its upload completes.
 
 If a later upload cannot start after an earlier one is accepted, the operation
@@ -200,8 +203,8 @@ from that same executor/device. A draw start checks extent, device identity,
 index count, finite camera/material data, and its recipe preconditions before
 work is accepted.
 
-Private `RasterRecipe` is the sole mapping point for six audited contracts. It
-has private fields and exactly six associated constants. A recipe atomically
+Private `RasterRecipe` is the sole mapping point for seven audited contracts. It
+has private fields and exactly seven associated constants. A recipe atomically
 selects the RHI `RasterKernel`, fixed pipeline/binding IDs, vertex ABI, texture
 interpretation, graph shape, snapshot domain, reservation topology, and export
 topology. Callers cannot manufacture a new combination by mixing optional
@@ -215,6 +218,7 @@ resources, shaders, layouts, or bindings.
 | `draw_textured_uv_linear_clamp` | position, index, UV | linear UNORM, linear min/mag, nearest mip, clamp-to-edge, level zero | texture × base color |
 | `draw_textured_uv_linear_clamp_srgb` | position, index, UV | sRGB view with the same fixed sampler policy | decoded/filter result × base color |
 | `draw_lambert` | position, index, normal | none | base color RGB × fixed `+Z` Lambert factor |
+| `draw_vertex_color` | position, index, linear `UNORM8x4` color | none | perspective-interpolated vertex color × linear tint |
 
 All paths are indexed triangle draws. The fixed renderer does not expose a
 sampler, LOD, wrap mode, filter choice, vertex-slot selection, shader source,
@@ -235,11 +239,14 @@ ready snapshot(s) + Camera + material + extent
 ```
 
 The graph imports immutable streams with their reported `CopyDestination`
-outgoing state, declares vertex/index reads, imports a required texture as a
-sampled resource, creates a linear offscreen `Rgba8Unorm` target, and exports
-that target for copy-source readback. Imported snapshots are exported back in
-their declared outgoing state. RenderGraph reports portable semantics; RHI
-records transitions and fixed native commands from that plan.
+outgoing state, declares the recipe's vertex/index/uniform reads and, where
+required, its sampled texture read, creates a linear offscreen `Rgba8Unorm`
+target, and exports that target for copy-source readback. Imported snapshots
+are exported back in their declared outgoing state. The vertex-color recipe
+imports three streams—position, color, and index—and restores all three to
+`CopyDestination`; its color stream is a vertex input, not a texture or
+material binding. RenderGraph reports portable semantics; RHI records
+transitions and fixed native commands from that plan.
 
 Uniform upload and raster execution are separate accepted operations.
 `FixedFrameSubmission::poll` does not block the CPU and starts raster only
@@ -292,6 +299,9 @@ fragment stages and is not a general uniform-layout API.
 Positions are tightly packed `f32x3`; indices are tightly packed `u32`.
 Textured geometry adds one finite `f32x2` UV per position. Normal geometry adds
 one finite normal per position, canonicalized to unit `f32x3` at construction.
+Vertex-color geometry adds exactly one linear encoded `UNORM8x4` color per
+position. The bytes are normalized by the fixed vertex input and are then
+perspective-interpolated by the rasterizer; they are not sRGB texture data.
 The textured and Lambert paths validate their fixed clip-space input before
 acceptance, including non-finite values, invalid homogeneous `w`, and clipping
 outside the closed contract. UV paths use perspective-correct center
@@ -310,6 +320,14 @@ normalizes a nonzero interpolation, applies a fixed object-space `+Z` Lambert
 factor to RGB, and preserves alpha. Per-draw model transforms currently do not
 apply to this path: it has no transformed normals, normal matrix,
 caller-visible lights, or PBR semantics.
+
+`draw_vertex_color` uses the existing 80-byte camera/material ABI: bytes
+`0..64` contain `projection * view`, and bytes `64..80` contain a finite linear
+RGBA tint in `[0, 1]`. Its vertex shader consumes tightly packed position
+`f32x3` from slot zero and normalized color `UNORM8x4` from slot one; the
+fragment result is the interpolated linear color multiplied by that tint and
+written to the linear `Rgba8Unorm` target. It has no model transform, texture,
+sampler, alpha/blend policy, or configurable color-space conversion.
 
 ## Errors, lifetime, and concurrency
 
@@ -343,7 +361,8 @@ not prove DX12/Vulkan correctness.
 Windows hardware fixtures run the fixed contracts on both supported native
 backends with required validation and compare readback to CPU oracles. Cases
 distinguish perspective interpolation, integer versus linear sampling, clamp,
-sRGB decode-before-filter, normal-stream binding, Lambert shading, and
+sRGB decode-before-filter, normal-stream binding, Lambert shading,
+separate-slot linear vertex-color interpolation and tint multiplication, and
 pre-accept versus accepted-unknown faults. The legacy-unlit packet fixture also
 uses non-commuting camera and model matrices to compare per-draw placement with
 an independent CPU `projection * view * model` oracle. Unexpected validation
@@ -368,5 +387,5 @@ while RenderGraph remains per-frame access planning. Scheduling, parallel
 recording, transient aliasing, and caches are lowering optimizations only when
 measurement proves they are needed; they do not alter declared frame semantics.
 
-Until those contracts exist, the six-recipe system is the supported renderer
+Until those contracts exist, the seven-recipe system is the supported renderer
 implementation and remains deliberately closed.

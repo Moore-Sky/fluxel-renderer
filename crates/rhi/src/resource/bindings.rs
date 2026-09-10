@@ -144,6 +144,38 @@ impl fmt::Debug for RasterNormalBindingsLease {
     }
 }
 
+pub(in crate::resource) struct RasterVertexColorBindingsShared {
+    pub(in crate::resource) _native: crate::imp::NativeRasterUniformBindings,
+    pub(in crate::resource) pipeline: RasterPipeline,
+    pub(in crate::resource) _uniform: BufferLease,
+    pub(in crate::resource) _positions: BufferLease,
+    pub(in crate::resource) _colors: BufferLease,
+    pub(in crate::resource) position_identity: PhysicalResourceIdentity,
+    pub(in crate::resource) color_identity: PhysicalResourceIdentity,
+    pub(in crate::resource) vertex_count: u32,
+    pub(in crate::resource) device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// Closed camera/material plus position-and-RGBA8-color binding.
+#[derive(Clone)]
+pub struct RasterVertexColorBindings(pub(in crate::resource) Arc<RasterVertexColorBindingsShared>);
+
+/// Strong lease retaining the vertex-color binding and all streams through completion.
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "retained through ResourceLease for terminal native completion"
+)]
+pub struct RasterVertexColorBindingsLease(
+    pub(in crate::resource) Arc<RasterVertexColorBindingsShared>,
+);
+
+impl fmt::Debug for RasterVertexColorBindingsLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RasterVertexColorBindingsLease(..)")
+    }
+}
+
 /// Closed explicit-UV binding with an internally owned filtering linear-clamp
 /// sampler. The sampler is not a graph resource or a configurable public API.
 #[derive(Clone)]

@@ -8,8 +8,8 @@ immutable GPU-ready snapshot without blocking the frame-building thread. A
 snapshots into an owned opaque `RenderPacket`, then non-blockingly submit its
 ordered legacy unlit draws as one compiled graph, raster pass, and native
 submission. The feature also supports deliberately closed single-draw
-`f32x3/u32` indexed, textured, and Lambert paths that return opaque offscreen
-image metadata.
+`f32x3/u32` indexed, textured, vertex-color, and Lambert paths that return
+opaque offscreen image metadata.
 It can separately upload canonical unit normals and execute one closed,
 non-textured fixed-Lambert draw.
 
@@ -88,6 +88,14 @@ preserves material alpha. Model transforms currently apply only to the
 legacy-unlit packet path: Lambert drawing has no transformed normals, normal
 matrix, light, normal-map, or PBR descriptor.
 
+`VertexColorGeometry` adds a separate linear `UNORM8x4` color stream to indexed
+geometry, and `VertexColorIndexedMeshUpload` publishes position, color, and
+index buffers only after all three uploads complete. `draw_vertex_color`
+combines the perspective-interpolated color with a finite linear RGBA tint from
+`VertexColorMaterial`. The closed ABI fixes position at slot 0, color at slot 1,
+and the camera/tint uniform at 80 bytes; it does not expose a general vertex
+layout, shader, material, or pipeline descriptor.
+
 ## Use today
 
 Build a mesh and schedule it for a camera:
@@ -142,6 +150,9 @@ filtering, nearest/repeat, and affine UV counter-oracles on both backends.
 The U08 fixtures distinguish perspective normal interpolation and
 fragment renormalization from counter-oracles and exercise the exact-zero
 fallback on both backends.
+The U09 fixtures prove linear `UNORM8x4` transport, perspective color
+interpolation, tint application, three-stream binding, and full-readback parity
+against an independent CPU oracle on both backends.
 
 The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend

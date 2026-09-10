@@ -1,6 +1,6 @@
 //! Fixed camera/material uniform ABI for closed raster recipes.
 
-use crate::{BasicMaterial, Camera, ModelTransform};
+use crate::{BasicMaterial, Camera, ModelTransform, VertexColorMaterial};
 
 /// Exact byte length of the closed `mat4x4<f32> + vec4<f32>` ABI.
 pub(crate) const FRAME_UNIFORM_BYTES: usize = 80;
@@ -18,6 +18,18 @@ impl FrameUniform {
         camera: &Camera,
         material: &BasicMaterial,
     ) -> Result<Self, FrameUniformError> {
+        Self::new_with_color(camera, material.base_color())
+    }
+
+    /// Serializes the closed vertex-color camera and validated linear tint.
+    pub(crate) fn new_vertex_color(
+        camera: &Camera,
+        material: &VertexColorMaterial,
+    ) -> Result<Self, FrameUniformError> {
+        Self::new_with_color(camera, *material.tint())
+    }
+
+    fn new_with_color(camera: &Camera, color: [f32; 4]) -> Result<Self, FrameUniformError> {
         let view = camera.view();
         let projection = camera.projection();
         if !view.iter().flatten().all(|value| value.is_finite())
@@ -25,7 +37,6 @@ impl FrameUniform {
         {
             return Err(FrameUniformError::NonFiniteCamera);
         }
-        let color = material.base_color();
         if !color.iter().all(|value| value.is_finite()) {
             return Err(FrameUniformError::NonFiniteColor);
         }

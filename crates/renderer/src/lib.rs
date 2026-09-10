@@ -51,7 +51,11 @@ pub use upload::{
     SrgbTexturedBasicMaterial, Srgba8Image, Srgba8ImageError, TexturedBasicMaterial,
     TexturedGeometry, TexturedGeometryError, TexturedGeometryStream, TexturedIndexedMeshSnapshot,
     TexturedIndexedMeshUpload, TexturedIndexedMeshUploadFailure,
-    TexturedIndexedMeshUploadStartError, TexturedIndexedMeshUploadStatus,
+    TexturedIndexedMeshUploadStartError, TexturedIndexedMeshUploadStatus, VertexColorGeometry,
+    VertexColorGeometryError, VertexColorGeometryStream, VertexColorIndexedMeshSnapshot,
+    VertexColorIndexedMeshUpload, VertexColorIndexedMeshUploadFailure,
+    VertexColorIndexedMeshUploadStartError, VertexColorIndexedMeshUploadStatus,
+    VertexColorMaterial, VertexColorMaterialError,
 };
 
 /// A camera described by view and projection matrices.

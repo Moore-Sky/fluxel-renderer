@@ -20,6 +20,9 @@ impl RasterBackend {
     pub(in crate::execution) fn is_normal_kernel(kernel: crate::RasterKernel) -> bool {
         kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
     }
+    pub(in crate::execution) fn is_vertex_color_kernel(kernel: crate::RasterKernel) -> bool {
+        kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialVertexColor
+    }
 
     /// Creates the only backend profile that can record the fixed raster slice.
     pub fn new(device: Device) -> Self {
