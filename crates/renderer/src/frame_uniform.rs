@@ -1,4 +1,4 @@
-//! Fixed Camera/material uniform ABI for the 0.2.2 raster slice.
+//! Fixed camera/material uniform ABI for closed raster recipes.
 
 use crate::{BasicMaterial, Camera};
 

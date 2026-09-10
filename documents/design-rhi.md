@@ -35,10 +35,11 @@ command allocators, image views, or host mapping.
 
 ```text
 lib.rs
+ |- test_support.rs  feature-gated conformance observation and fault injection
  |- resource/
  |   |- creation/ safe owned-resource, immutable-upload, compute and raster factories
  |   |- artifact/ portable fixed shader/pipeline identities
- |   `- lease.rs  completion-aware resource and accepted-work lifetime
+ |   `- lease/    completion-aware resource and accepted-work lifetime
  |- execution/
  |   |- provider/ RenderGraph object resolution
  |   `- raster/   raster capabilities, registry, operations and recording state
@@ -49,8 +50,10 @@ lib.rs
      `- submission.rs / resource.rs    queue completion and native ownership
 ```
 
-`resource/` defines resource and artifact lifetime. `execution/` implements
-the RenderGraph SPI using those opaque values. `imp/` is the sole native
+`test_support.rs` is a doc-hidden, non-default fixture boundary; it exposes no
+native handles or general readback API. `resource/` defines resource and artifact
+lifetime. `execution/` implements the RenderGraph SPI using those opaque values.
+`imp/` is the sole native
 boundary: its Windows implementation contains HAL types and all `unsafe`, while
 `imp/stub.rs` is the fail-closed counterpart for non-Windows targets and for
 Windows builds with no native backend feature enabled. Splitting this tree

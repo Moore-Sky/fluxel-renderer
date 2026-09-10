@@ -88,7 +88,7 @@ crates/renderer/src/
     shared.rs            generation allocation and snapshot-use gate
   fixed_frame/
     recipe.rs            six closed renderer-to-RHI raster mappings
-    renderer.rs          draw-start validation and executor setup
+    renderer/            public draw facade, validation and transaction startup
     graph.rs             closed-recipe graph declarations and export contracts
     provider.rs          snapshot-to-graph import-slot binding adapter
     submission.rs        two-phase submission/completion lifecycle

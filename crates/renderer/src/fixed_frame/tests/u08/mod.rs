@@ -1,5 +1,7 @@
-//! The first fixed-light fixture intentionally shares U06's non-affine
-//! camera triangle, but its oracle has no renderer helpers in its path.
+//! Normal-stream fixed-Lambert conformance fixtures and CPU oracles.
+//!
+//! The first fixture shares U06's non-affine camera triangle, but its oracle has no
+//! renderer helpers in its path.
 use super::*;
 use crate::{
     BasicMaterial, Camera, Geometry, NormalGeometry, NormalIndexedMeshSnapshot,

@@ -1,5 +1,6 @@
-//! U06 deliberately uses endpoint-only RGBA8 values.  The two audited
-//! samples make U and V clamp independently observable.
+//! Linear-clamp sampling conformance fixtures and CPU oracles.
+//!
+//! The endpoint-only RGBA8 witnesses make U and V clamp independently observable.
 use super::*;
 use crate::{
     BaseColorTextureUpload, BaseColorTextureUploadStatus, BasicMaterial, Camera, Geometry,
