@@ -4,14 +4,15 @@
 
 `fluxel-renderer` is the application-facing, headless renderer layer in the
 Fluxel workspace. It owns renderer policy: it accepts typed scene-domain data,
-coordinates immutable GPU snapshots, selects one proven raster contract, and
-declares the corresponding frame graph. It never exposes native handles to its
-callers.
+coordinates immutable GPU snapshots, lowers supported scene input into owned
+packets, selects proven raster contracts, and declares the corresponding frame
+graph. It never exposes native handles to its callers.
 
 The crate provides portable domain objects (`Camera`, `Geometry`, `Mesh`,
 `BasicMaterial`, and insertion-ordered `DrawList`); opt-in non-blocking uploads
-that publish immutable mesh and texture snapshots after GPU completion; and six
-closed indexed-draw contracts which yield opaque offscreen `FrameImage`
+that publish immutable mesh and texture snapshots after GPU completion; an
+owned `RenderPacket` for ordered legacy unlit indexed draws; and six closed
+single-draw indexed contracts which yield opaque offscreen `FrameImage`
 metadata after completion. The default crate has no graphics-backend dependency;
 GPU coordination and fixed drawing require the `gpu-upload` feature.
 
@@ -60,7 +61,7 @@ construction, but it is not a graph node or graph resource owner. See
 
 The current renderer intentionally has no:
 
-- `DrawList` lowering, frame packets, stable asset/resource handles, or cache;
+- stable asset/resource handles or cache;
 - arbitrary shaders, reflection, pipeline layouts, bindings, vertex layouts,
   samplers, views, or material parameters;
 - per-draw transforms, lights, depth, blending, culling, batching, instancing,
@@ -88,16 +89,24 @@ crates/renderer/src/
   fixed_frame/
     recipe.rs            six closed renderer-to-RHI raster mappings
     renderer.rs          draw-start validation and executor setup
-    graph.rs             graph declarations and resource-provider bindings
+    graph.rs             closed-recipe graph declarations and export contracts
+    provider.rs          snapshot-to-graph import-slot binding adapter
     submission.rs        two-phase submission/completion lifecycle
     ids.rs               private fixed pipeline and binding identifiers
-    fixtures/            hardware CPU-oracle conformance fixtures
+    packet/              owned legacy-unlit draw-list packet lowering and lifecycle
+    recipe/tests/        closed recipe mapping contract tests
+    tests/               CPU contracts plus Windows native conformance suites
+  tests/                 crate-level domain and facade contract tests
 ```
 
-Each module has one responsibility. The `mod.rs` files are facades that retain
-public paths rather than accumulating implementation logic. `shader` is a
-private boundary, not a public shader system: it keeps stage selection out of
-the public domain API until a supported renderer shader contract exists.
+The `upload/tests/` tree groups publication, gate, geometry, payload, and
+texture contracts without moving private-contract tests outside their owning
+module. `fixed_frame/tests/` similarly separates clip validation, the legacy
+unlit fixture, and the fixed raster conformance suites. Each module has one
+responsibility. The `mod.rs` files are facades that retain public paths rather
+than accumulating implementation logic. `shader` is a private boundary, not a
+public shader system: it keeps stage selection out of the public domain API
+until a supported renderer shader contract exists.
 
 ## Domain model and public API boundary
 
@@ -108,9 +117,15 @@ Fields are private, so constructors and accessors, not struct literals, define
 the supported contract.
 
 `DrawList<'a>` borrows a camera and meshes for one preparation scope and
-preserves insertion order. It is currently typed submission input only: it does
-not create a graph, allocate GPU memory, sort, cull, or draw. This avoids
-presenting a borrowed transition model as a stable handle-based renderer ABI.
+preserves insertion order. For the legacy unlit indexed recipe,
+`FixedFrameRenderer::lower_draw_list` accepts a positionally corresponding
+slice of ready `IndexedMeshSnapshot` values and creates an opaque owned,
+non-`Clone`, device-affine `RenderPacket`. It compares positions by float bit
+pattern and indices exactly, then retains snapshot leases and serialized
+per-draw uniforms. The packet holds no graph slot, RHI/native handle, or
+reservation, so construction and drop do not change snapshot gates. This is a
+narrow transition model, not a stable asset-handle renderer ABI; it does not
+sort, cull, or synthesize material policy.
 
 With `gpu-upload`, the crate also exposes opaque-ready resource families:
 
@@ -231,6 +246,29 @@ Queue synchronization, encoders, barriers, leases, fences, and validation
 capture remain RHI work. See [ADR-0002](adr/0002-rhi-unsafe-containment.md) and
 [ADR-0003](adr/0003-serial-execution-lowering.md).
 
+### Ordered packet flow
+
+```text
+DrawList + matching ready indexed snapshots
+  -> validate and copy into owned RenderPacket
+  -> reserve each unique generation once
+  -> compile one graph with one legacy-unlit raster pass
+  -> upload each draw uniform serially, without a host wait
+  -> submit the raster work once
+  -> release all reservations on proven completion, otherwise poison after acceptance
+```
+
+The packet path deliberately supports only the existing position/index legacy
+unlit recipe. Repeated references to one snapshot generation share one graph
+position/index import pair and one reservation, because RenderGraph forbids
+distinct logical imports of the same physical generation. They remain separate
+ordered draws with separate uniforms and binding entries. The first uniform
+upload is part of start; a later upload starts only after its predecessor has
+proved complete. Therefore a later rejection is terminal but does not abandon
+unobserved accepted uploads. Until raster acceptance, every failure releases
+the reservation transaction; after it, any failed, unobservable, or dropped
+outcome poisons every reserved generation.
+
 ## Data semantics
 
 ### Uniform ABI
@@ -276,9 +314,11 @@ The API separates failures by ownership transition:
   reserved generations.
 
 `FixedFrameSubmission` retains the snapshots, reservations, uniform operation,
-graph, and RHI submission required by its state. Snapshot clones retain RHI
-leases; device clones in the renderer/executor path keep the native device
-alive until dependent work completes.
+graph, and RHI submission required by its state. `RenderPacketSubmission`
+retains the packet, all unique reservations, completed uniform uploads, graph,
+provider, and accepted raster submission required by its state. Snapshot clones
+retain RHI leases; device clones in the renderer/executor path keep the native
+device alive until dependent work completes.
 
 The mutex-protected gate safely coordinates snapshot clones, but is deliberately
 conservative: it is not a promise of parallel rendering. Native queue
@@ -305,9 +345,9 @@ separate from compile/link and CPU-only graph evidence.
 
 ## Extension boundaries
 
-New renderer work needs a narrow tested contract. A scene-submission path must
-resolve scene data to renderer-owned packets before graph declaration; it must
-not move asset lifetime or native commands into RenderGraph. A general material,
+New renderer work needs a narrow tested contract. Scene data must resolve to
+renderer-owned packets before graph declaration; it must not move asset lifetime
+or native commands into RenderGraph. A general material,
 shader, or pipeline API must intentionally replace/extend the closed recipe
 boundary with explicit layout, binding, capability, lifetime, and cross-backend
 semantics.

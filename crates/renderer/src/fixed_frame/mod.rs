@@ -48,6 +48,8 @@ fn actual_raster_capabilities(device: &Device) -> DeviceCapabilities {
 mod graph;
 /// Fixed identifiers shared by closed recipes and graph declarations.
 mod ids;
+/// Owned multi-draw packets and their non-blocking submission lifecycle.
+mod packet;
 /// Caller-owned snapshot bindings for graph imports.
 mod provider;
 /// Closed fixed raster-contract mappings.
@@ -60,6 +62,12 @@ mod submission;
 /// CPU and legacy fixed-frame conformance fixtures.
 mod tests;
 
+pub use packet::{
+    RenderPacket, RenderPacketBuildError, RenderPacketDrawBuildError, RenderPacketExecutionError,
+    RenderPacketFailure, RenderPacketRasterObservationError, RenderPacketReservationError,
+    RenderPacketStartError, RenderPacketStatus, RenderPacketSubmission,
+    RenderPacketUniformObservationError,
+};
 pub use renderer::{DrawStartError, FixedFrameFailure, FixedFrameRenderer};
 pub use submission::{FixedFrameStatus, FixedFrameSubmission, FrameImage};
 

@@ -1,4 +1,11 @@
-//! Fixed raster command recording and submission.
+//! Implements the closed raster `ExecutionBackend` adapter.
+//!
+//! This module implements the portable `ExecutionBackend` contract while
+//! delegating every native operation to the private `imp` boundary. Encoder
+//! state is pass-local: beginning a pass clears prior bindings, and changing a
+//! stream-dependent pipeline invalidates its binding and vertex-input proof.
+//! Resource leases remain retained through submission, queue operations stay
+//! serialized by the owning device, and no HAL or native handle escapes here.
 
 use super::*;
 use crate::execution::helpers::require_device;

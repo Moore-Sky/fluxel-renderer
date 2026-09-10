@@ -11,15 +11,14 @@ The workspace is organised around three crates:
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | Headless DX12/Vulkan ownership plus fixed Raster, Compute, and Copy RenderGraph execution. |
-| `fluxel-renderer` | Scene/domain data, immutable mesh/texture GPU snapshots, and fixed unlit or Lambert headless indexed draws. |
+| `fluxel-renderer` | Scene/domain data, immutable GPU snapshots, owned render packets, and fixed headless indexed draws. |
 
-The renderer still does not lower a `DrawList` or general material pipeline.
-Its optional `gpu-upload` slice publishes a mesh generation after both native
-uploads complete and can submit one closed `f32x3/u32` indexed draw to an
-offscreen image, optionally modulated by one immutable RGBA8 base-color texture
-through closed integer-load, fixed linear-clamp, or fixed sRGB-decode recipes.
-It also has one separate non-textured position/normal recipe with fixed
-object-space `+Z` Lambert lighting.
+The optional `gpu-upload` slice publishes immutable GPU snapshot generations
+after native uploads complete. It can lower an insertion-ordered `DrawList`
+and its matching ready indexed snapshots into an owned, opaque, device-affine
+`RenderPacket`, then execute all of its legacy unlit indexed draws through one
+compiled graph, raster pass, and submission. Existing single-draw paths also
+cover closed textured and fixed-Lambert recipes.
 The default build remains the portable headless domain model.
 
 The fixed renderer and RHI slices are split into single-responsibility modules.
@@ -65,7 +64,7 @@ beyond the current work are goals, not version or schedule commitments.
 - [x] Linear-clamp sampling and sRGB decode-before-filter
 - [x] Fixed Lambert lighting
 - [x] Consolidate fixed slices into private closed recipes
-- [ ] Lower `DrawList` into renderer-owned frame packets
+- [x] Lower `DrawList` into renderer-owned packets
 - [ ] Add per-draw transform and object state
 - [ ] Introduce minimal shader, material, and layout variation
 - [ ] Add basic PBR and one representative static scene

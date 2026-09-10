@@ -12,7 +12,7 @@
 /// after non-blocking completion observation.
 pub struct FixedFrameRenderer {
     pub(in crate::fixed_frame) device: Device,
-    capabilities: DeviceCapabilities,
+    pub(in crate::fixed_frame) capabilities: DeviceCapabilities,
     pub(in crate::fixed_frame) executor: Arc<fluxel_rendergraph::FrameExecutor<RasterBackend>>,
 }
 

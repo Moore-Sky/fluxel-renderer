@@ -3,17 +3,18 @@
 `fluxel-renderer` defines the user-facing scene inputs `Camera`, `Geometry`,
 `Mesh`, `BasicMaterial`, and insertion-ordered `DrawList`. Its optional
 `gpu-upload` feature also turns validated indexed geometry into an opaque,
-immutable GPU-ready snapshot without blocking the frame-building thread.
-The same feature can consume a ready snapshot, a `Camera`, and a
-`BasicMaterial` in one deliberately closed headless `f32x3/u32` indexed draw
-and return opaque offscreen image metadata. It can also upload one immutable
-tight linear `Rgba8Unorm` or encoded `Rgba8UnormSrgb` image and use its opaque
-snapshot in a closed textured draw.
+immutable GPU-ready snapshot without blocking the frame-building thread. A
+`FixedFrameRenderer` can lower a draw list and its matching ready indexed
+snapshots into an owned opaque `RenderPacket`, then non-blockingly submit its
+ordered legacy unlit draws as one compiled graph, raster pass, and native
+submission. The feature also supports deliberately closed single-draw
+`f32x3/u32` indexed, textured, and Lambert paths that return opaque offscreen
+image metadata.
 It can separately upload canonical unit normals and execute one closed,
 non-textured fixed-Lambert draw.
 
-It is intentionally not a complete GPU renderer: it does not lower draw lists,
-compile general material shaders, expose configurable samplers/PBR or a general
+It is intentionally not a complete GPU renderer: it does not compile general
+material shaders, expose configurable samplers/PBR or a general
 pipeline/bind-group API, or present pixels.
 
 ## Optional GPU upload
@@ -41,6 +42,17 @@ operation. `Complete` yields an opaque `FrameImage`; terminal or otherwise
 unproven accepted Raster work poisons that snapshot generation. Snapshot clones
 share the same single-in-flight state; no native texture or buffer handle is
 exposed.
+
+`FixedFrameRenderer::lower_draw_list` accepts an insertion-ordered `DrawList`
+and one ready `IndexedMeshSnapshot` for each draw at the same positional index.
+It checks exact CPU geometry metadata and copies the camera, material uniforms,
+and snapshot leases into a non-`Clone`, device-affine `RenderPacket`; building
+or dropping the packet does not reserve a snapshot. `submit_packet` reserves
+each unique snapshot generation once, uploads draw uniforms one at a time
+without blocking, and submits one legacy-unlit raster graph only after all
+uniforms complete. Raster completion releases reservations; an unproven
+accepted raster outcome poisons them. Multiple packet entries may reference
+one snapshot generation while retaining their own ordered draws and uniforms.
 
 `Rgba8Image` validates a nonzero two-dimensional tight RGBA8 payload.
 `BaseColorTextureUpload::begin` borrows it and starts a non-blocking immutable
@@ -91,8 +103,8 @@ assert_eq!(draws.len(), 1);
 ```
 
 `Geometry::with_indices` checks indices when the geometry is constructed.
-`DrawList` preserves insertion order so a future renderer has an explicit,
-inspectable submission input without adding sorting policy prematurely.
+`DrawList` preserves insertion order, which makes packet draw order explicit
+without adding sorting policy prematurely.
 
 ## Performance and compatibility
 

@@ -33,7 +33,10 @@ pub(crate) fn native_fixture_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(feature = "gpu-upload")]
 pub use fixed_frame::{
     DrawStartError, FixedFrameFailure, FixedFrameRenderer, FixedFrameStatus, FixedFrameSubmission,
-    FrameImage,
+    FrameImage, RenderPacket, RenderPacketBuildError, RenderPacketDrawBuildError,
+    RenderPacketExecutionError, RenderPacketFailure, RenderPacketRasterObservationError,
+    RenderPacketReservationError, RenderPacketStartError, RenderPacketStatus,
+    RenderPacketSubmission, RenderPacketUniformObservationError,
 };
 #[cfg(feature = "gpu-upload")]
 pub use upload::{

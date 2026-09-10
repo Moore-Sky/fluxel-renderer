@@ -29,7 +29,7 @@ It is not a general graphics API, a scene/asset database, a shader authoring
 framework, or a presentation runtime today. In particular, there is currently
 no general pipeline or bind-group builder, general shader reflection API,
 surface acquisition/present path, multi-queue scheduler, transient aliasing
-implementation, or public renderer packet/handle ABI.
+implementation, or stable asset/resource handle and cache ABI.
 
 ## Layer model and dependency direction
 
@@ -70,7 +70,7 @@ The intended frame path has a stable conceptual shape:
 ```text
 application scene/domain data
   -> renderer resolves ready GPU snapshots and frame policy
-  -> frame packet or closed fixed recipe
+  -> owned render packet or closed fixed recipe
   -> RenderGraph declarations
   -> compiled immutable ExecutionPlan
   -> RHI frame resolution and backend lowering
@@ -93,12 +93,16 @@ graph access declarations, RHI kernel and bindings, reservation topology, and
 exports. It is an internal consistency mechanism, not a configurable material
 or pipeline API; see [ADR-0007](adr/0007-closed-fixed-renderer-recipes.md).
 
-`DrawList` is currently a submission input only. General `DrawList` lowering
-to an actual renderer-owned frame packet has **not** been implemented. The
-“frame packet” in this overview therefore names the intended renderer-to-graph
-unit; today, the fixed recipe and its coordinator provide the equivalent narrow
-path for proven cases. Per-draw transforms, general material/layout variation,
-PBR, scene loading, culling, batching, and a real static scene are likewise
+For the legacy unlit indexed contract, the renderer lowers a `DrawList` and a
+positionally matching sequence of ready indexed snapshots into an owned,
+opaque, device-affine `RenderPacket`. Construction copies camera/material
+values, retains snapshot leases, and validates exact CPU snapshot metadata; it
+does not reserve a generation or expose graph/native objects. Submission
+deduplicates repeated snapshot generations for graph imports and reservations,
+but retains one ordered draw and uniform per list entry. It compiles one graph
+with one raster pass, advances uniform uploads serially without blocking, then
+submits the raster work once. Per-draw transforms, general material/layout
+variation, PBR, scene loading, culling, batching, and a real static scene are
 not implemented.
 
 ### RenderGraph declaration and compilation
@@ -152,10 +156,13 @@ The workspace keeps three lifetimes separate.
 An immutable GPU snapshot is the bridge between the first and third rows. It
 encapsulates a concrete native generation plus leases and reported state, but
 does not expose raw native handles. Publication is atomic across the resources
-that make up the snapshot. A snapshot reservation prevents unsafe concurrent
-reuse for a submitted fixed frame. Before acceptance, failure and drop release
-the reservation; after unproven acceptance, the generation is poisoned rather
-than reused with unknown native state.
+that make up the snapshot. An owned `RenderPacket` bridges the persistent
+borrowed draw-list input and one graph execution: it is device-affine, owns
+the ready snapshot leases and serialized uniforms, but owns neither a native
+reservation nor a native command. Submission reserves each unique generation
+as one transaction. Before raster acceptance, failure and drop release the
+reservations; after unproven raster acceptance, the generations are poisoned
+rather than reused with unknown native state.
 
 RHI resources are device-affine and retain the opened native device through
 shared ownership. Cloning a lease extends the resource/native-device lifetime;
@@ -214,9 +221,9 @@ inputs/outputs, and an independent CPU oracle. The evidence policy is in
 
 ```text
 crates/
-  renderer/       application-facing domain types, snapshots, fixed-frame policy
+  renderer/       application-facing domain types, snapshots, packets, fixed-frame policy
     src/upload/   immutable snapshot upload/publication domains
-    src/fixed_frame/ closed recipe coordination and fixed frame submissions
+    src/fixed_frame/ closed recipes, owned packets, and fixed-frame submissions
     src/shader/   private fixed shader sources/selection
   rendergraph/    portable graph declaration, validation, compiler, execution SPI
     src/compile/  dependency, validation, culling, transition-plan compilation
@@ -261,8 +268,8 @@ New work should extend the lowest layer that naturally owns the new fact and
 must not use a convenient lower-level escape hatch to bypass an existing
 contract.
 
-- Add scene/asset policy, snapshot selection, frame packets, transforms,
-  materials, and culling in the renderer; resolve assets before graph binding.
+- Add scene/asset policy, snapshot selection, transforms, materials, and
+  culling in the renderer; resolve assets before graph binding.
 - Add portable resource-access semantics, compiler validation, and immutable
   plan contracts in RenderGraph; do not add native handles, barriers, or queue
   operations there.

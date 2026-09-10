@@ -328,10 +328,10 @@ pub enum FixedFrameStatus {
 /// Opaque ownership plus metadata for one completed fixed target.
 #[derive(Clone, Debug)]
 pub struct FrameImage {
-    extent: [u32; 2],
-    format: TextureFormat,
+    pub(in crate::fixed_frame) extent: [u32; 2],
+    pub(in crate::fixed_frame) format: TextureFormat,
     // Retained privately so application code cannot observe or use a native object.
-    _texture: Texture,
+    pub(in crate::fixed_frame) _texture: Texture,
 }
 
 impl FrameImage {
