@@ -4,7 +4,7 @@
 RHI boundary, and renderer layer. It is the ecosystem's GPU and renderer
 foundation; cross-frame assets, loading, platform services, runtime packaging,
 and JavaScript APIs belong to adjacent Fluxel libraries described in the
-[Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/profile/README.md).
+[Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/ROADMAP.md).
 
 ## Workspace
 
@@ -54,7 +54,7 @@ release. See [RELEASING.md](RELEASING.md) for the release gate.
 - [RHI design](documents/design-rhi.md)
 - [Renderer design](documents/design-renderer.md)
 - [Architecture decisions](documents/adr/README.md)
-- [Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/profile/README.md)
+- [Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/ROADMAP.md)
 - [RenderGraph guide](crates/rendergraph/README.md)
 - [RHI guide](crates/rhi/README.md)
 
@@ -89,43 +89,49 @@ are retained on the matching [GitHub Release](https://github.com/fluxel-project/
 This roadmap covers this workspace only. Near-term work is deliberately more
 specific than distant direction; no item is a version or schedule commitment.
 For ownership outside the renderer workspace, see the
-[Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/profile/README.md).
+[Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/ROADMAP.md).
 
-### Current — Renderer submission model
+### Current — Stage 0 baseline closure
 
-- [x] Establish closed recipes for proven fixed raster combinations.
-- [x] Publish immutable GPU snapshots and lower ordered `DrawList` input into
-  owned, device-affine render packets.
-- [x] Lower one packet through RenderGraph into a compiled plan and one native
-  submission.
-- [ ] Make render intent, packet construction, recipe selection, and graph
-  lowering explicit parts of one renderer submission model.
-- [ ] Support deterministic multi-draw ordering and compatible packet grouping.
-- [x] Add only the minimal material, shader, and vertex-layout variation that
-  packet lowering can describe without a public general-pipeline API.
+- [ ] Use one release version and tag rule for workspace crates that ship
+  together, and pin every documented Git dependency example to a tag or
+  revision.
+- [ ] Preserve structured renderer errors through the public boundary.
+- [ ] Provide one repeatable CPU, CI, and real-GPU conformance entry point that
+  records the commit, environment, diagnostics, and partial failure evidence.
+- [ ] Audit and reduce the RenderGraph public export surface to the current
+  portable contract.
+- [ ] Freeze fixed-recipe growth; do not add another `draw_*` family member or
+  public upload-state type.
 
-### Next — Renderer execution
+### Next — Stage 1.1 DX12 first visible image
+
+- [ ] Create a Windows window and the narrow DX12 surface or swapchain path
+  needed by the demo.
+- [ ] Clear an acquired image, draw a fixed triangle, and present it.
+- [ ] Handle close, wait for required GPU work, and release resources in a
+  valid order.
+- [ ] Retain a screenshot, backend and adapter diagnostics, and focused tests
+  for new platform-independent state.
+
+### Unscheduled optimizations
 
 - [ ] Batch compatible render packets while preserving declared ordering.
-- [ ] Lower compatible repeated draws as instances where the chosen recipe
+- [ ] Lower compatible repeated draws as instances when the selected recipe
   permits it.
 - [ ] Reuse compatible renderer-side pipelines and bindings across a frame.
-- [ ] Separate frame preparation, graph construction, and submission cleanly.
-- [ ] Establish representative renderer-level correctness and performance
-  benchmarks.
-
-### Performance evolution
-
-Multi-queue scheduling, parallel command recording, recording caches, transient
-resource aliasing, and more aggressive GPU scheduling or memory optimization
-enter the roadmap only after representative benchmarks or profiling demonstrate
-a concrete need. They are not current feature TODOs.
+- [ ] Add multi-queue scheduling, parallel command recording, recording caches,
+  transient resource aliasing, or more aggressive GPU scheduling and memory
+  optimization only after representative benchmarks or profiling demonstrate a
+  concrete need.
 
 ### Out of scope
 
-Asset identity and caching, file/URL loading, scene graphs, animation,
-presentation and platform lifecycle, backend bring-up, and higher-level JS or
-UI APIs belong to other Fluxel layers rather than this renderer workspace.
+Durable asset identity and caching, general file or URL loading, broad scene
+graphs, animation, application host policy, and higher-level JS or UI APIs
+belong to other Fluxel layers. This workspace owns backend bring-up and the
+minimal presentation path needed to prove RHI and renderer behavior; it does
+not turn that validation host into a general platform runtime.
 
 ## License
 
