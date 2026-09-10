@@ -7,8 +7,12 @@ Package-specific examples remain beside their crates:
 
 - `crates/rendergraph/examples/` covers graph declaration, compilation, and
   the CPU-only `TestRhi` execution protocol;
-- `crates/rhi/examples/` covers native device discovery and opening.
+- `crates/rhi/examples/` covers native device discovery and opening;
+- `crates/renderer/examples/01_headless_frame.rs` exercises the public
+  upload → poll → snapshot → draw → poll lifecycle without presentation or
+  test-only readback. Run it with `--features gpu-upload` and either `dx12` or
+  `vulkan` as its backend argument.
 
-The first root integration example will accompany the headless renderer
-vertical slice. An empty placeholder executable is intentionally not presented
-as rendering evidence.
+These are API examples, not hardware conformance claims. The only workspace
+conformance entry point is `scripts/conformance.ps1` on a clean configured
+Windows checkout; it runs ignored fixtures and preserves their evidence log.

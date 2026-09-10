@@ -5,7 +5,6 @@ mod common;
 
 use std::rc::Rc;
 
-use fluxel_rendergraph::pass::{BindingResource, ColorAttachmentDesc, LoadOp, StoreOp};
 use fluxel_rendergraph::*;
 
 /// Dynamic values change each frame without rebuilding the graph.

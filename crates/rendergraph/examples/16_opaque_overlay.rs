@@ -4,7 +4,6 @@
 
 mod common;
 
-use fluxel_rendergraph::pass::{ColorAttachmentDesc, LoadOp, StoreOp};
 use fluxel_rendergraph::*;
 
 fn main() {

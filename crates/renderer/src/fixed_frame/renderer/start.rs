@@ -163,13 +163,13 @@ impl FixedFrameRenderer {
             Ok(pipeline) => pipeline,
             Err(error) => {
                 release(reservation, texture_reservation);
-                return Err(DrawStartError::Pipeline(error.to_string()));
+                return Err(DrawStartError::Pipeline(error));
             }
         };
         let mut objects = RasterObjectProvider::new(&self.device);
         if let Err(error) = objects.register_raster_pipeline(graph.pipeline, pipeline) {
             release(reservation, texture_reservation);
-            return Err(DrawStartError::Pipeline(error.to_string()));
+            return Err(DrawStartError::Provider(error));
         }
         let binding_result = match recipe.binding() {
             BindingRecipe::VertexColor => objects.register_raster_vertex_color_bindings(
@@ -233,7 +233,7 @@ impl FixedFrameRenderer {
         };
         if let Err(error) = binding_result {
             release(reservation, texture_reservation);
-            return Err(DrawStartError::Pipeline(error.to_string()));
+            return Err(DrawStartError::Provider(error));
         }
         let pending = match self.device.upload_immutable_buffer(
             BufferDescriptor {

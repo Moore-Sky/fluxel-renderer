@@ -2,7 +2,6 @@
 
 mod common;
 
-use fluxel_rendergraph::pass::{ColorAttachmentDesc, LoadOp, StoreOp};
 use fluxel_rendergraph::test_rhi::{TestBuffer, TestRasterPipeline, TestRegistry, TestRhi};
 use fluxel_rendergraph::*;
 

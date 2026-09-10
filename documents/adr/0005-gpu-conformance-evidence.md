@@ -14,6 +14,19 @@ DX12 and Vulkan with Required validation and an independent CPU oracle.
 Artifacts identify the exact commit, backend, hardware/driver, inputs,
 expected/actual result, completion, outgoing state, and diagnostics.
 
+`scripts/conformance.ps1` is the sole release entry point for these fixtures.
+It accepts only a clean Windows `x86_64-pc-windows-msvc` checkout, rejects a
+conflicting `CARGO_BUILD_TARGET`, injects the checked-out 40-character SHA as
+`FLUXEL_TEST_COMMIT`, and runs workspace ignored tests with all targets and
+features. It writes `target/conformance/<sha>/manifest.json` and `cargo.log`;
+the manifest records the command, toolchain, target, SHA, environment, GPU
+identity, timestamps, exit status, and observed test-binary/case summaries.
+The script retains both files when Cargo fails and returns Cargo's nonzero
+status. These local artifacts are release evidence, not source-controlled
+claims of success. After the matching annotated tag is pushed, both artifacts
+are attached to that tag's GitHub Release; the durable asset URLs close the
+evidence chain without changing the tested commit.
+
 ## Alternatives
 
 - Treat CI compilation, TestRhi, or one backend demo as conformance.
@@ -23,8 +36,10 @@ expected/actual result, completion, outgoing state, and diagnostics.
 ## Consequences
 
 Hardware fixtures are distinct from ordinary tests and are rerun on the final
-commit before release. CPU and compile evidence remain useful but are labeled
-as such; they do not substitute for native oracle evidence.
+commit before release through that script. CPU and compile evidence remain
+useful but are labeled as such; they do not substitute for native oracle
+evidence. A release is not tagged when either backend's required fixture is
+unavailable or fails.
 
 ## Evidence
 

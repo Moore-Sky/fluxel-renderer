@@ -11,38 +11,90 @@
 //! resource-usage requirements. Real GPU command and surface execution remain
 //! deliberate future boundaries. Start with the numbered examples and the
 //! repository's `documents/design-rendergraph.md`.
+//!
+//! The public API is intentionally available from this crate root; implementation
+//! modules are private so their layout is not a compatibility contract.
+//!
+//! ```compile_fail
+//! use fluxel_rendergraph::access::TextureRange;
+//! ```
+//!
+//! ```
+//! use fluxel_rendergraph::TextureRange;
+//! let _ = TextureRange::whole();
+//! ```
 
 #![deny(missing_docs)]
 
-pub mod access;
-pub mod backend;
-pub mod compile;
-pub mod error;
-pub mod execution;
-pub mod graph;
-pub mod handles;
+mod access;
+mod backend;
+mod compile;
+mod error;
+mod execution;
+mod graph;
+mod handles;
 mod internal;
-pub mod pass;
-pub mod plan;
-pub mod recipe;
-pub mod resource;
-pub mod rhi;
+mod pass;
+mod plan;
+mod recipe;
+mod resource;
+mod rhi;
 pub mod test_rhi;
 
-pub use access::*;
-pub use backend::*;
-pub use compile::*;
-pub use error::*;
-pub use execution::*;
+pub use access::{
+    AccessMode, BufferCopyRegion, BufferRange, BufferReadUse, BufferReadWriteUse, BufferWriteUse,
+    TextureAspect, TextureCopyRegion, TextureRange, TextureReadUse, TextureReadWriteUse,
+    TextureWriteUse, WriteCoverage,
+};
+pub use backend::{
+    BindingResourceSemantic, BoundBindings, BoundBuffer, BoundComputePipeline, BoundRasterPipeline,
+    BoundTexture, CompletionFailure, CompletionStatus, DeviceIdentity, ExecutionBackend,
+    ExecutionError, FrameBindingError, FrameBindingErrorKind, FrameResourceProvider,
+    PhysicalResourceIdentity, RasterColorAttachment, RasterDepthStencilAttachment,
+    RasterPassDescriptor, RenderObjectProvider, ResolvedBindingResource,
+};
+pub use compile::{
+    CapabilityFallback, CompileOutput, CompileReport, CompileResult, CompiledGraph, ExplicitOrder,
+    PassDependency, RetainedSideEffect,
+};
+pub use error::{
+    CompileError, CompileErrorKind, DiagnosticContext, RecordResult, RecordingError,
+    RecordingErrorKind,
+};
+pub use execution::{
+    ExecutedFrame, ExportedBuffer, ExportedTexture, FrameExecution, FrameExecutor, FrameExports,
+    FrameInputs, FrameSubmission, Local, SendMode,
+};
 pub use graph::{DeclaredPass, ExplicitOrderReason, RenderGraph, SideEffectReason};
-pub use handles::*;
+pub use handles::{
+    BindingSetId, BufferBindingId, BufferRead, BufferReadWrite, BufferVersion, BufferWrite,
+    ComputePipelineId, ExportBufferSlot, ExportTextureSlot, ImportBufferSlot, ImportTextureSlot,
+    PassId, PresentTarget, RasterPipelineId, ResourceId, SurfaceBindingId, TextureBindingId,
+    TextureRead, TextureReadWrite, TextureVersion, TextureWrite,
+};
 pub use pass::{
     AttachmentOps, BindingResource, ColorAttachmentDesc, ComputeCommands, ComputePassBuilder,
     CopyCommands, CopyPassBuilder, DepthStencilAttachmentDesc, LoadOp, PassKind,
     PassResourceResolver, RasterCommands, RasterPassBuilder, ResolvedBindings, ScissorRect,
     StoreOp, Viewport,
 };
-pub use plan::*;
-pub use recipe::*;
-pub use resource::*;
-pub use rhi::*;
+pub use plan::{
+    BufferUsage, BufferUsageKind, ExecutionPlan, PlannedColorAttachment,
+    PlannedDepthStencilAttachment, PlannedPass, PlannedResourceRange, PlannedTransition,
+    RasterPassPlan, ResourceRequirement, ResourceUsageSummary, TextureUsage, TextureUsageKind,
+};
+pub use recipe::{
+    ComputeExecute, ComputeSetup, CopyExecute, CopySetup, PassData, RasterExecute, RasterSetup,
+};
+pub use resource::{
+    ExportBufferContract, ExportTextureContract, ImportBufferContract, ImportTextureContract,
+    ImportedBuffer, ImportedTexture, InitialContents, PresentContract, SurfaceTextureContract,
+};
+pub use rhi::{
+    BufferCapabilities, BufferDesc, DeviceCapabilities, DeviceCapabilitiesBuilder, DeviceLimits,
+    Extent3d, ExternalOwnership, IndexFormat, QueueCapabilities, QueueDescriptor, QueueId,
+    RecordingCapabilities, RecordingModel, ResourceAccessState, SurfaceCapabilities,
+    SynchronizationCapabilities, TextureDesc, TextureDimension, TextureFormat,
+    TextureFormatCapabilities, TextureFormatCapabilitiesBuilder, TimestampCapabilities,
+    TransientResourceCapabilities, TransitionCapabilities,
+};

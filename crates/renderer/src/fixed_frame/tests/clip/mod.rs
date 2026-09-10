@@ -17,54 +17,54 @@ fn check(position: [f32; 3], matrix: [[f32; 4]; 4]) -> Result<(), DrawStartError
 
 #[test]
 fn clip_gate_accepts_closed_clip_volume() {
-    assert_eq!(check([1.0, -1.0, 1.0], identity()), Ok(()));
+    assert!(check([1.0, -1.0, 1.0], identity()).is_ok());
 }
 
 #[test]
 fn clip_gate_rejects_nonfinite_position_and_nonfinite_math() {
-    assert_eq!(
+    assert!(matches!(
         check([f32::NAN, 0.0, 0.0], identity()),
         Err(DrawStartError::NonFinitePosition)
-    );
+    ));
     let mut product_overflow = identity();
     product_overflow[0][0] = f32::MAX;
-    assert_eq!(
+    assert!(matches!(
         check([f32::MAX, 0.0, 0.0], product_overflow),
         Err(DrawStartError::NonFiniteClipPosition)
-    );
+    ));
     let mut accumulation_overflow = identity();
     accumulation_overflow[0][0] = 1.0;
     accumulation_overflow[1][0] = 1.0;
-    assert_eq!(
+    assert!(matches!(
         check([f32::MAX, f32::MAX, 0.0], accumulation_overflow),
         Err(DrawStartError::NonFiniteClipPosition)
-    );
+    ));
 }
 
 #[test]
 fn clip_gate_rejects_w_and_each_axis_boundary() {
     let mut no_w = identity();
     no_w[3][3] = 0.0;
-    assert_eq!(
+    assert!(matches!(
         check([0.0, 0.0, 0.0], no_w),
         Err(DrawStartError::ClipWNonPositive)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         check([1.1, 0.0, 0.0], identity()),
         Err(DrawStartError::ClipOutOfBounds)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         check([0.0, -1.1, 0.0], identity()),
         Err(DrawStartError::ClipOutOfBounds)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         check([0.0, 0.0, -0.1], identity()),
         Err(DrawStartError::ClipOutOfBounds)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         check([0.0, 0.0, 1.1], identity()),
         Err(DrawStartError::ClipOutOfBounds)
-    );
+    ));
 }
 
 #[test]

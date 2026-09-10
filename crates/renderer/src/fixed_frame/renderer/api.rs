@@ -31,7 +31,7 @@ impl FixedFrameRenderer {
             .map_err(|_| DrawStartError::InvalidCameraMaterial)?;
         let graph = Arc::new(
             build_camera_graph(snapshot, extent, &self.capabilities)
-                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+                .map_err(DrawStartError::Graph)?,
         );
         self.start_camera(snapshot, graph, uniform)
     }
@@ -70,7 +70,7 @@ impl FixedFrameRenderer {
         )?;
         let graph = Arc::new(
             build_normal_lambert_camera_graph(snapshot, extent, &self.capabilities)
-                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+                .map_err(DrawStartError::Graph)?,
         );
         let reservation = snapshot.reserve_for_draw().map_err(map_snapshot_use)?;
         self.begin_normal_lambert(snapshot, graph, uniform, reservation)
@@ -110,7 +110,7 @@ impl FixedFrameRenderer {
         )?;
         let graph = Arc::new(
             build_vertex_color_camera_graph(snapshot, extent, &self.capabilities)
-                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+                .map_err(DrawStartError::Graph)?,
         );
         let reservation = snapshot.reserve_for_draw().map_err(map_snapshot_use)?;
         self.begin_vertex_color(snapshot, graph, uniform, reservation)
@@ -155,7 +155,7 @@ impl FixedFrameRenderer {
                 extent,
                 &self.capabilities,
             )
-            .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+            .map_err(DrawStartError::Graph)?,
         );
         let (mesh_reservation, texture_reservation) = reserve_pair(
             snapshot.reserve_for_draw(),
@@ -260,7 +260,7 @@ impl FixedFrameRenderer {
                 &self.capabilities,
                 RasterRecipe::UV_LINEAR_CLAMP_SRGB,
             )
-            .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+            .map_err(DrawStartError::Graph)?,
         );
         let (reservation, texture_reservation) = reserve_pair(
             snapshot.reserve_for_draw(),
@@ -318,7 +318,7 @@ impl FixedFrameRenderer {
         let texture = FrameTextureSnapshot::Linear(material.base_color_texture().clone());
         let graph = Arc::new(
             build_uv_textured_camera_graph(snapshot, &texture, extent, &self.capabilities, recipe)
-                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+                .map_err(DrawStartError::Graph)?,
         );
         let (reservation, texture_reservation) = reserve_pair(
             snapshot.reserve_for_draw(),

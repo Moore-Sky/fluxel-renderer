@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["crates/rendergraph", "crates/renderer", "crates/rhi"]
 
+[workspace.package]
+version = "0.7.0"
+
 [profile.profiling]
 inherits = "release"
 debug = true

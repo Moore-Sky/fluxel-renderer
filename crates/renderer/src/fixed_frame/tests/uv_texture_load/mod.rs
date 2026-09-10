@@ -1,4 +1,4 @@
-//! U05 explicit-UV native conformance fixtures.
+//! Explicit-UV `textureLoad` native conformance fixtures.
 
 use super::*;
 use crate::{

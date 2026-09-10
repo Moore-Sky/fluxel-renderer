@@ -20,9 +20,12 @@ use fluxel_rendergraph::{
     RasterPipelineId, RenderGraph, ResourceAccessState, StoreOp, TextureBindingId, TextureDesc,
     TextureDimension, TextureFormat, TextureRange, TextureReadUse, Viewport, WriteCoverage,
 };
+use fluxel_rhi::experimental::fixed_artifacts::{
+    RasterBackend, RasterKernel, RasterObjectProvider,
+};
 use fluxel_rhi::{
     Buffer, BufferDescriptor, BufferUploadError, Device, MemoryPolicy, PendingBufferUpload,
-    RasterBackend, RasterKernel, RasterObjectProvider, ResourceLease, Texture, UploadedBuffer,
+    ResourceLease, Texture, UploadedBuffer,
 };
 
 use crate::upload::{SnapshotDrawReservation, SnapshotUseError};
@@ -63,12 +66,14 @@ mod submission;
 mod tests;
 
 pub use packet::{
-    RenderPacket, RenderPacketBuildError, RenderPacketDrawBuildError, RenderPacketExecutionError,
-    RenderPacketFailure, RenderPacketRasterObservationError, RenderPacketReservationError,
-    RenderPacketStartError, RenderPacketStatus, RenderPacketSubmission,
-    RenderPacketUniformObservationError,
+    RenderPacket, RenderPacketBuildError, RenderPacketDrawBuildError, RenderPacketFailure,
+    RenderPacketReservationError, RenderPacketStartError, RenderPacketStatus,
+    RenderPacketSubmission,
 };
-pub use renderer::{DrawStartError, FixedFrameFailure, FixedFrameRenderer};
+pub use renderer::{
+    DrawStartError, FixedFrameExecutionError, FixedFrameFailure, FixedFrameRasterObservationError,
+    FixedFrameRenderer, FixedFrameUniformObservationError,
+};
 pub use submission::{FixedFrameStatus, FixedFrameSubmission, FrameImage};
 
 use graph::{

@@ -1,6 +1,6 @@
-//! U07 sRGB linear-clamp native conformance fixtures.
+//! sRGB linear-clamp native conformance fixtures.
 
-use super::u06::{
+use super::linear_clamp_sampling::{
     assert_required_validation_clean, camera, channel_distance, complete, first_difference,
     geometry, mesh, open, outgoing, rgba_delta, srgb_image, wait,
 };

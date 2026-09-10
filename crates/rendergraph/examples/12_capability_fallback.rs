@@ -7,7 +7,6 @@
 
 mod common;
 
-use fluxel_rendergraph::pass::{BindingResource, ColorAttachmentDesc, LoadOp, StoreOp};
 use fluxel_rendergraph::*;
 
 struct ComputeData {

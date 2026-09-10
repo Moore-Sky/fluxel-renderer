@@ -33,6 +33,20 @@ Seven proven raster paths share one private, closed recipe mapping.
 Package READMEs are the detailed user documentation published with each crate;
 this file is only the workspace entry point.
 
+## Released source dependency
+
+The workspace releases its three crates together.  Git consumers must pin the
+release tag rather than follow `main`:
+
+```toml
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-renderer", tag = "v0.7.0" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-renderer", tag = "v0.7.0" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-renderer", tag = "v0.7.0" }
+```
+
+`v0.7.0` and each package's `0.7.0` version identify the same workspace
+release. See [RELEASING.md](RELEASING.md) for the release gate.
+
 ## Documentation
 
 - [Workspace architecture](documents/design-overview.md)
@@ -57,6 +71,18 @@ The graph compiler and `TestRhi` are CPU-only. `fluxel-rhi` provides
 headless DX12 and Vulkan fixed Raster, Compute, and Copy execution on Windows
 when the native loader and driver are available. CI is a compile/link gate;
 real-GPU conformance remains an explicit local release gate.
+
+On a clean Windows `x86_64-pc-windows-msvc` checkout, the release-only GPU
+gate is:
+
+```powershell
+./scripts/conformance.ps1
+```
+
+It runs every workspace ignored fixture, injects the checked-out commit through
+`FLUXEL_TEST_COMMIT`, and preserves a manifest and complete log under
+`target/conformance/<sha>/`, including failures. Successful release artifacts
+are retained on the matching [GitHub Release](https://github.com/fluxel-project/fluxel-renderer/releases).
 
 ## Roadmap
 

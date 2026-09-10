@@ -13,9 +13,10 @@ use std::{
 };
 
 use fluxel_rendergraph::ResourceAccessState;
+use fluxel_rhi::experimental::fixed_artifacts::RasterKernel;
 use fluxel_rhi::{
-    Backend, Device, DeviceOptions, RasterKernel, Validation,
-    readback_exported_raster_texture_for_test, test_support,
+    Backend, Device, DeviceOptions, Validation, readback_exported_raster_texture_for_test,
+    test_support,
 };
 
 use super::super::{
@@ -94,7 +95,7 @@ fn packet_build_contract_rejects_global_and_indexed_input_errors() {
 
     let mismatched_mesh = Mesh::new(
         triangle(-0.5, 0.5),
-        BasicMaterial::new([1.0, 1.0, 1.0, 1.0]),
+        BasicMaterial::new([1.0, 1.0, 1.0, 1.0]).unwrap(),
     );
     let mut mismatched = DrawList::new(&camera);
     mismatched.push(&mismatched_mesh);
@@ -420,7 +421,7 @@ fn d03_fixture(device: &Device) -> D03Fixture {
     let oracle = d03_oracle_fixture();
     let mesh = Mesh::new(
         oracle.geometry.clone(),
-        BasicMaterial::new([1.0, 0.0, 0.0, 1.0]),
+        BasicMaterial::new([1.0, 0.0, 0.0, 1.0]).unwrap(),
     );
     let snapshot = ready_snapshot(device, mesh.geometry());
     D03Fixture {
@@ -821,7 +822,7 @@ fn fixture(device: &Device, case: Case) -> (Camera, Vec<Mesh>, Vec<IndexedMeshSn
     };
     let meshes = specs
         .iter()
-        .map(|(geometry, color)| Mesh::new(geometry.clone(), BasicMaterial::new(*color)))
+        .map(|(geometry, color)| Mesh::new(geometry.clone(), BasicMaterial::new(*color).unwrap()))
         .collect::<Vec<_>>();
     let snapshots = match case {
         Case::Distinct => specs

@@ -6,6 +6,26 @@
 //! Its opt-in fixed-frame slice lowers closed constant-color, mip-zero
 //! `textureLoad`, or fixed linear-clamp `textureSampleLevel` indexed draws
 //! without exposing native resources or a configurable sampler.
+//!
+//! The default domain model validates material input before it enters a frame:
+//!
+//! ```
+//! use fluxel_renderer::{BasicMaterial, Camera, DrawList, Geometry, Mesh};
+//!
+//! let geometry = Geometry::from_positions(vec![
+//!     [-0.5, -0.5, 0.0],
+//!     [0.5, -0.5, 0.0],
+//!     [0.0, 0.5, 0.0],
+//! ])
+//! .with_indices(vec![0, 1, 2])?;
+//! let material = BasicMaterial::new([0.2, 0.7, 1.0, 1.0])?;
+//! let mesh = Mesh::new(geometry, material);
+//! let camera = Camera::default();
+//! let mut draws = DrawList::new(&camera);
+//! draws.push(&mesh);
+//! assert_eq!(draws.len(), 1);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 #![deny(missing_docs)]
 
@@ -32,11 +52,11 @@ pub(crate) fn native_fixture_guard() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(feature = "gpu-upload")]
 pub use fixed_frame::{
-    DrawStartError, FixedFrameFailure, FixedFrameRenderer, FixedFrameStatus, FixedFrameSubmission,
+    DrawStartError, FixedFrameExecutionError, FixedFrameFailure, FixedFrameRasterObservationError,
+    FixedFrameRenderer, FixedFrameStatus, FixedFrameSubmission, FixedFrameUniformObservationError,
     FrameImage, RenderPacket, RenderPacketBuildError, RenderPacketDrawBuildError,
-    RenderPacketExecutionError, RenderPacketFailure, RenderPacketRasterObservationError,
-    RenderPacketReservationError, RenderPacketStartError, RenderPacketStatus,
-    RenderPacketSubmission, RenderPacketUniformObservationError,
+    RenderPacketFailure, RenderPacketReservationError, RenderPacketStartError, RenderPacketStatus,
+    RenderPacketSubmission,
 };
 #[cfg(feature = "gpu-upload")]
 pub use upload::{
@@ -255,10 +275,17 @@ pub struct BasicMaterial {
 }
 
 impl BasicMaterial {
-    /// Creates a basic material with the supplied linear RGBA base color.
-    #[must_use]
-    pub const fn new(base_color: [f32; 4]) -> Self {
-        Self { base_color }
+    /// Creates a basic material after checking each linear RGBA component is finite and in `[0, 1]`.
+    pub fn new(base_color: [f32; 4]) -> Result<Self, BasicMaterialError> {
+        for (component, value) in base_color.into_iter().enumerate() {
+            if !value.is_finite() {
+                return Err(BasicMaterialError::NonFinite { component });
+            }
+            if !(0.0..=1.0).contains(&value) {
+                return Err(BasicMaterialError::OutOfRange { component });
+            }
+        }
+        Ok(Self { base_color })
     }
 
     /// Returns the linear RGBA base color.
@@ -270,9 +297,42 @@ impl BasicMaterial {
 
 impl Default for BasicMaterial {
     fn default() -> Self {
-        Self::new([1.0, 1.0, 1.0, 1.0])
+        Self::new([1.0, 1.0, 1.0, 1.0]).expect("unit RGBA is a valid basic material")
     }
 }
+
+/// Why [`BasicMaterial`] cannot be constructed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BasicMaterialError {
+    /// A base-color component was NaN or infinite.
+    NonFinite {
+        /// Zero-based RGBA component index.
+        component: usize,
+    },
+    /// A finite base-color component was outside the unit interval.
+    OutOfRange {
+        /// Zero-based RGBA component index.
+        component: usize,
+    },
+}
+impl fmt::Display for BasicMaterialError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFinite { component } => {
+                write!(
+                    f,
+                    "basic-material base-color component {component} is non-finite"
+                )
+            }
+            Self::OutOfRange { component } => write!(
+                f,
+                "basic-material base-color component {component} is outside [0, 1]"
+            ),
+        }
+    }
+}
+impl std::error::Error for BasicMaterialError {}
 
 /// A renderable geometry and material pair.
 #[derive(Clone, Debug, PartialEq)]

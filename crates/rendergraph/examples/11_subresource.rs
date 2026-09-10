@@ -2,7 +2,6 @@
 
 mod common;
 
-use fluxel_rendergraph::pass::BindingResource;
 use fluxel_rendergraph::*;
 
 struct WriteData {

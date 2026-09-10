@@ -22,6 +22,7 @@ pipeline/bind-group API, or present pixels.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/fluxel-project/fluxel-renderer"
+tag = "v0.7.0"
 features = ["gpu-upload"]
 ```
 
@@ -110,7 +111,10 @@ let geometry = Geometry::from_positions(vec![
     [0.0, 0.5, 0.0],
 ])
 .with_indices(vec![0, 1, 2])?;
-let mesh = Mesh::new(geometry, BasicMaterial::new([0.2, 0.7, 1.0, 1.0]));
+let mesh = Mesh::new(
+    geometry,
+    BasicMaterial::new([0.2, 0.7, 1.0, 1.0])?,
+);
 
 let mut draws = DrawList::new(&camera);
 draws.push(&mesh);
@@ -129,28 +133,48 @@ assert_eq!(draws.len(), 2);
 `DrawList` preserves insertion order, which makes packet draw order explicit
 without adding sorting policy prematurely.
 
+## Headless frame example
+
+On a configured Windows device, this example performs one full public lifecycle:
+immutable mesh upload, non-blocking polling, ready snapshot publication, one
+closed draw, further polling, and `FrameImage` completion. It prints structured
+errors and requires a nonzero target extent with native validation required.
+
+```powershell
+cargo run -p fluxel-renderer --features gpu-upload --example 01_headless_frame -- dx12
+cargo run -p fluxel-renderer --features gpu-upload --example 01_headless_frame -- vulkan
+```
+
+It is neither a window/swapchain demo nor GPU conformance evidence: it does not
+use `test-support`, read pixels back, or compare a CPU oracle. Run every ignored
+hardware fixture through the workspace's single release gate instead:
+
+```powershell
+./scripts/conformance.ps1
+```
+
 ## Performance and compatibility
 
 With default features the crate has no dependencies, no `unsafe`, and no native
 API calls, and builds wherever Rust 1.87 supports the workspace. `gpu-upload`
 adds the safe `fluxel-rhi` boundary; native execution is currently implemented
-on Windows DX12/Vulkan. The U03 fixtures compare the Camera/material
+on Windows DX12/Vulkan. The `camera_material` fixtures compare the Camera/material
 uniform fixed offscreen draw byte-for-byte with CPU pixel oracles on both
 backends under Required native validation. The renderer crate itself contains
 no `unsafe`.
 
-The U04 fixtures compare this textured draw byte-for-byte with an
+The `texture_load` fixtures compare this textured draw byte-for-byte with an
 independent CPU oracle on DX12 and Vulkan under Required validation.
-The U05 fixtures separately prove explicit UV perspective interpolation
+The `uv_texture_load` fixtures separately prove explicit UV perspective interpolation
 against position-derived and linear CPU counter-oracles on both backends.
-The U06 fixtures additionally prove fixed linear filtering and independently
+The `linear_clamp_sampling` fixtures additionally prove fixed linear filtering and independently
 observable U/V clamp behavior on DX12 and Vulkan.
-The U07 fixtures distinguish decode-before-filter from encoded-space
+The `srgb_sampling` fixtures distinguish decode-before-filter from encoded-space
 filtering, nearest/repeat, and affine UV counter-oracles on both backends.
-The U08 fixtures distinguish perspective normal interpolation and
+The `normal_lambert` fixtures distinguish perspective normal interpolation and
 fragment renormalization from counter-oracles and exercise the exact-zero
 fallback on both backends.
-The U09 fixtures prove linear `UNORM8x4` transport, perspective color
+The `vertex_color` fixtures prove linear `UNORM8x4` transport, perspective color
 interpolation, tint application, three-stream binding, and full-readback parity
 against an independent CPU oracle on both backends.
 

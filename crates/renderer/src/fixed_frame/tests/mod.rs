@@ -3,20 +3,20 @@
 use super::renderer::{PairReservationError, reserve_pair, validate_clip};
 use super::*;
 
+#[cfg(windows)]
+mod camera_material;
 mod clip;
 #[cfg(windows)]
-mod legacy_u02;
+mod legacy_fixed_color;
 #[cfg(windows)]
-mod u03;
+mod linear_clamp_sampling;
 #[cfg(windows)]
-mod u04;
+mod normal_lambert;
 #[cfg(windows)]
-mod u05;
+mod srgb_sampling;
 #[cfg(windows)]
-mod u06;
+mod texture_load;
 #[cfg(windows)]
-mod u07;
+mod uv_texture_load;
 #[cfg(windows)]
-mod u08;
-#[cfg(windows)]
-mod u09;
+mod vertex_color;

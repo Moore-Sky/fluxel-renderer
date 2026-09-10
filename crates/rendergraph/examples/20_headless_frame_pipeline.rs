@@ -7,7 +7,6 @@
 mod common;
 
 use fluxel_rendergraph::{
-    pass::{BindingResource, ColorAttachmentDesc, LoadOp, StoreOp},
     test_rhi::{TestBindings, TestComputePipeline, TestRasterPipeline, TestRegistry, TestRhi},
     *,
 };

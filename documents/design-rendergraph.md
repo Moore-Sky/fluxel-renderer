@@ -19,6 +19,16 @@ pipeline construction, descriptor allocation, or presentation. Those are
 renderer and RHI concerns. The graph describes *what must be true*; an RHI
 backend is responsible for safely making it true on a device.
 
+## Public API boundary
+
+Consumers use the deliberately selected crate-root API, for example
+`fluxel_rendergraph::RenderGraph`, `TextureDesc`, and `FrameExecutor`.
+Implementation modules such as `pass`, `compile`, and `backend` are private:
+their layout is not a SemVer commitment, and their public types are re-exported
+from the crate root where they form part of the supported contract. The sole
+public module is `test_rhi`, a deterministic CPU-only test backend; it is not
+evidence of native GPU correctness.
+
 ```text
 Renderer: scene/frame policy, snapshots, opaque pipeline and binding recipes
                               |

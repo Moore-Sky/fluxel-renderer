@@ -1,4 +1,4 @@
-//! Normal-stream fixed-Lambert conformance fixtures and CPU oracles.
+//! Normal-Lambert conformance fixtures and CPU oracles.
 //!
 //! The first fixture shares U06's non-affine camera triangle, but its oracle has no
 //! renderer helpers in its path.
@@ -140,7 +140,7 @@ fn camera() -> Camera {
 
 #[cfg(windows)]
 fn material() -> BasicMaterial {
-    BasicMaterial::new([0.72, 0.45, 0.28, 0.63])
+    BasicMaterial::new([0.72, 0.45, 0.28, 0.63]).unwrap()
 }
 
 #[cfg(windows)]

@@ -3,7 +3,7 @@
 use super::*;
 
 /// Why a fixed frame could not be accepted for submission.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum DrawStartError {
     /// The selected device cannot filter the fixed RGBA8 sampler texture.
@@ -40,9 +40,11 @@ pub enum DrawStartError {
     /// The immutable uniform upload was rejected before work was accepted.
     UniformStart(BufferUploadError),
     /// Graph compilation rejected the fixed declaration.
-    Graph(String),
+    Graph(fluxel_rendergraph::CompileError),
     /// The device could not create the closed raster artifact.
-    Pipeline(String),
+    Pipeline(fluxel_rhi::experimental::fixed_artifacts::RasterCreateError),
+    /// The native object provider rejected the closed recipe.
+    Provider(fluxel_rhi::NativeExecutionError),
 }
 impl fmt::Display for DrawStartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -71,23 +73,122 @@ impl fmt::Display for DrawStartError {
             Self::UniformStart(error) => write!(f, "frame uniform upload did not start: {error}"),
             Self::Graph(error) => write!(f, "fixed frame graph rejected: {error}"),
             Self::Pipeline(error) => write!(f, "fixed frame pipeline rejected: {error}"),
+            Self::Provider(error) => write!(f, "fixed frame object provider rejected: {error}"),
         }
     }
 }
-impl std::error::Error for DrawStartError {}
+impl std::error::Error for DrawStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::UniformStart(error) => Some(error),
+            Self::Graph(error) => Some(error),
+            Self::Pipeline(error) => Some(error),
+            Self::Provider(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// A structured execution failure at raster start or completion observation.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum FixedFrameExecutionError {
+    /// Imported frame resources did not satisfy the compiled contract.
+    FrameBinding(FrameBindingError),
+    /// A retained callback or command validation failed.
+    Recording(fluxel_rendergraph::RecordingError),
+    /// Runtime capabilities differed from the compiled fingerprint.
+    CapabilityMismatch,
+    /// The frame instance did not belong to this compiled graph.
+    WrongCompiledGraph,
+    /// The plan requested an unsupported execution feature.
+    UnsupportedExecutionFeature(&'static str),
+    /// The native backend rejected the operation.
+    Backend(fluxel_rhi::NativeExecutionError),
+    /// A newer non-exhaustive execution error was not understood by this renderer.
+    Unknown,
+}
+
+impl fmt::Display for FixedFrameExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fixed frame execution failed: {self:?}")
+    }
+}
+impl std::error::Error for FixedFrameExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FrameBinding(error) => Some(error),
+            Self::Recording(error) => Some(error),
+            Self::Backend(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Why an accepted uniform upload could not be observed safely.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FixedFrameUniformObservationError {
+    /// Querying native completion failed.
+    Status(BufferUploadError),
+    /// Finalization observed a non-complete status after completion had been reported.
+    Finalize(CompletionStatus),
+    /// The backend returned a completion state outside the supported contract.
+    UnknownCompletionStatus,
+}
+impl fmt::Display for FixedFrameUniformObservationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fixed frame uniform observation failed: {self:?}")
+    }
+}
+impl std::error::Error for FixedFrameUniformObservationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Status(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Why an accepted raster result could not be observed safely.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum FixedFrameRasterObservationError {
+    /// Completion observation failed in the execution backend.
+    Execution(FixedFrameExecutionError),
+    /// The completed graph did not expose its required target export.
+    MissingTargetExport,
+    /// The backend returned a completion state outside the supported contract.
+    UnknownCompletionStatus,
+}
+impl fmt::Display for FixedFrameRasterObservationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fixed frame raster observation failed: {self:?}")
+    }
+}
+impl std::error::Error for FixedFrameRasterObservationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Execution(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// A terminal failure of the two-phase fixed frame operation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum FixedFrameFailure {
     /// The uniform upload reached a terminal GPU failure.
     UniformCompletion(CompletionFailure),
     /// Uniform completion could not be observed or finalized.
-    UniformObservation(String),
+    UniformObservation(FixedFrameUniformObservationError),
     /// Raster recording or submit was rejected before raster work was accepted.
-    RasterStart(String),
+    RasterStart(FixedFrameExecutionError),
     /// An accepted raster submission did not complete successfully.
     RasterCompletion(CompletionFailure),
+    /// An accepted raster submission could not be observed or exported safely.
+    RasterObservation(FixedFrameRasterObservationError),
 }
 impl fmt::Display for FixedFrameFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -98,7 +199,17 @@ impl fmt::Display for FixedFrameFailure {
             }
             Self::RasterStart(error) => write!(f, "raster did not start: {error}"),
             Self::RasterCompletion(error) => write!(f, "raster completion failed: {error:?}"),
+            Self::RasterObservation(error) => write!(f, "raster observation failed: {error}"),
         }
     }
 }
-impl std::error::Error for FixedFrameFailure {}
+impl std::error::Error for FixedFrameFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::UniformObservation(error) => Some(error),
+            Self::RasterStart(error) => Some(error),
+            Self::RasterObservation(error) => Some(error),
+            _ => None,
+        }
+    }
+}

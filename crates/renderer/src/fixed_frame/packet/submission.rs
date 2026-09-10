@@ -9,9 +9,15 @@
 use std::{collections::HashSet, sync::Arc};
 
 use fluxel_rendergraph::{CompletionStatus, ExecutionError, FrameInputs};
+use fluxel_rhi::experimental::fixed_artifacts::{
+    RasterBackend, RasterKernel, RasterObjectProvider,
+};
 use fluxel_rhi::{
-    BufferDescriptor, MemoryPolicy, NativeExecutionError, PendingBufferUpload, RasterBackend,
-    RasterKernel, RasterObjectProvider, UploadedBuffer,
+    BufferDescriptor, MemoryPolicy, NativeExecutionError, PendingBufferUpload, UploadedBuffer,
+};
+
+use crate::fixed_frame::{
+    FixedFrameExecutionError, FixedFrameRasterObservationError, FixedFrameUniformObservationError,
 };
 
 use super::*;
@@ -253,7 +259,7 @@ impl RenderPacketSubmission {
                 Err(incomplete) => {
                     self.finish_pre_raster(RenderPacketFailure::UniformObservation {
                         draw_index,
-                        cause: RenderPacketUniformObservationError::Finalize(incomplete.status()),
+                        cause: FixedFrameUniformObservationError::Finalize(incomplete.status()),
                     })
                 }
             },
@@ -262,11 +268,11 @@ impl RenderPacketSubmission {
             }
             Ok(_) => self.finish_pre_raster(RenderPacketFailure::UniformObservation {
                 draw_index,
-                cause: RenderPacketUniformObservationError::UnknownCompletionStatus,
+                cause: FixedFrameUniformObservationError::UnknownCompletionStatus,
             }),
             Err(cause) => self.finish_pre_raster(RenderPacketFailure::UniformObservation {
                 draw_index,
-                cause: RenderPacketUniformObservationError::Status(cause),
+                cause: FixedFrameUniformObservationError::Status(cause),
             }),
         }
     }
@@ -342,7 +348,7 @@ impl RenderPacketSubmission {
                 RenderPacketStatus::Busy
             }
             Err(error) => self.finish_accepted(RenderPacketFailure::RasterObservation {
-                cause: RenderPacketRasterObservationError::Execution(execution_error(error)),
+                cause: FixedFrameRasterObservationError::Execution(execution_error(error)),
             }),
             Ok(CompletionStatus::Pending) => {
                 self.phase = PacketPhase::RasterAccepted(frame);
@@ -354,7 +360,7 @@ impl RenderPacketSubmission {
                         .expect("accepted packet has a target export"),
                 ) else {
                     return self.finish_accepted(RenderPacketFailure::RasterObservation {
-                        cause: RenderPacketRasterObservationError::MissingTargetExport,
+                        cause: FixedFrameRasterObservationError::MissingTargetExport,
                     });
                 };
                 let image = super::super::FrameImage {
@@ -381,7 +387,7 @@ impl RenderPacketSubmission {
                 self.finish_accepted(RenderPacketFailure::RasterCompletion { cause })
             }
             Ok(_) => self.finish_accepted(RenderPacketFailure::RasterObservation {
-                cause: RenderPacketRasterObservationError::UnknownCompletionStatus,
+                cause: FixedFrameRasterObservationError::UnknownCompletionStatus,
             }),
         }
     }
@@ -461,17 +467,19 @@ fn poison_reservations(reservations: &mut Vec<SnapshotDrawReservation>) {
     }
 }
 
-fn execution_error(error: ExecutionError<NativeExecutionError>) -> RenderPacketExecutionError {
+pub(super) fn execution_error(
+    error: ExecutionError<NativeExecutionError>,
+) -> FixedFrameExecutionError {
     match error {
-        ExecutionError::FrameBinding(error) => RenderPacketExecutionError::FrameBinding(error),
-        ExecutionError::Recording(error) => RenderPacketExecutionError::Recording(error),
-        ExecutionError::CapabilityMismatch => RenderPacketExecutionError::CapabilityMismatch,
-        ExecutionError::WrongCompiledGraph => RenderPacketExecutionError::WrongCompiledGraph,
+        ExecutionError::FrameBinding(error) => FixedFrameExecutionError::FrameBinding(error),
+        ExecutionError::Recording(error) => FixedFrameExecutionError::Recording(error),
+        ExecutionError::CapabilityMismatch => FixedFrameExecutionError::CapabilityMismatch,
+        ExecutionError::WrongCompiledGraph => FixedFrameExecutionError::WrongCompiledGraph,
         ExecutionError::UnsupportedExecutionFeature(feature) => {
-            RenderPacketExecutionError::UnsupportedExecutionFeature(feature)
+            FixedFrameExecutionError::UnsupportedExecutionFeature(feature)
         }
-        ExecutionError::Backend(error) => RenderPacketExecutionError::Backend(error),
+        ExecutionError::Backend(error) => FixedFrameExecutionError::Backend(error),
         ExecutionError::ExecutorBusy => unreachable!("busy is handled before failure mapping"),
-        _ => RenderPacketExecutionError::Unknown,
+        _ => FixedFrameExecutionError::Unknown,
     }
 }

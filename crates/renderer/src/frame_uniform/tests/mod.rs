@@ -1,6 +1,7 @@
 //! Tests the fixed uniform ABI and fail-closed numeric validation.
 
 use super::*;
+use crate::BasicMaterialError;
 
 #[test]
 fn serializes_column_major_projection_times_view_and_color() {
@@ -18,7 +19,7 @@ fn serializes_column_major_projection_times_view_and_color() {
     ];
     let uniform = FrameUniform::new(
         &Camera::new(view, projection),
-        &BasicMaterial::new([0.0, 0.5, 1.0, 0.25]),
+        &BasicMaterial::new([0.0, 0.5, 1.0, 0.25]).unwrap(),
     )
     .unwrap();
     let words: Vec<_> = uniform
@@ -45,18 +46,12 @@ fn rejects_non_finite_out_of_range_and_overflowing_inputs() {
         Err(FrameUniformError::NonFiniteCamera)
     );
     assert_eq!(
-        FrameUniform::new(
-            &Camera::default(),
-            &BasicMaterial::new([0.0, 0.0, 0.0, f32::INFINITY])
-        ),
-        Err(FrameUniformError::NonFiniteColor)
+        BasicMaterial::new([0.0, 0.0, 0.0, f32::INFINITY]),
+        Err(BasicMaterialError::NonFinite { component: 3 })
     );
     assert_eq!(
-        FrameUniform::new(
-            &Camera::default(),
-            &BasicMaterial::new([1.1, 0.0, 0.0, 1.0])
-        ),
-        Err(FrameUniformError::ColorOutOfRange)
+        BasicMaterial::new([1.1, 0.0, 0.0, 1.0]),
+        Err(BasicMaterialError::OutOfRange { component: 0 })
     );
     assert_eq!(
         FrameUniform::new(
@@ -83,7 +78,7 @@ fn model_transform_precomposition_is_column_major_and_identity_is_bitwise_compat
             [7.0, 0.0, 0.0, 1.0],
         ],
     );
-    let material = BasicMaterial::new([0.25, 0.5, 0.75, 1.0]);
+    let material = BasicMaterial::new([0.25, 0.5, 0.75, 1.0]).unwrap();
     let identity = FrameUniform::new(&camera, &material).unwrap();
     let transformed_identity =
         FrameUniform::new_with_model_transform(&camera, &material, ModelTransform::IDENTITY)

@@ -3,9 +3,6 @@
 
 mod common;
 
-use fluxel_rendergraph::pass::{
-    BindingResource, ColorAttachmentDesc, DepthStencilAttachmentDesc, LoadOp, StoreOp,
-};
 use fluxel_rendergraph::*;
 
 struct OpaqueData {

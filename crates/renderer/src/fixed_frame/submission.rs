@@ -5,6 +5,8 @@
 //! The state machine hands completed readback images to callers and never exposes RHI
 //! completion or reservation internals.
 
+use fluxel_rhi::NativeExecutionError;
+
 /// A non-blocking two-phase fixed frame operation.
 pub struct FixedFrameSubmission {
     pub(super) phase: CameraPhase,
@@ -117,10 +119,9 @@ impl FixedFrameSubmission {
             Ok(CompletionStatus::Complete) => match upload.finalize() {
                 Ok(uniform) => self.submit_raster(uniform),
                 Err(incomplete) => {
-                    self.finish_pre_accept(FixedFrameFailure::UniformObservation(format!(
-                        "finalize observed {:?}",
-                        incomplete.status()
-                    )));
+                    self.finish_pre_accept(FixedFrameFailure::UniformObservation(
+                        FixedFrameUniformObservationError::Finalize(incomplete.status()),
+                    ));
                     FixedFrameStatus::Failed(self.failure.clone().unwrap())
                 }
             },
@@ -130,12 +131,14 @@ impl FixedFrameSubmission {
             }
             Ok(_) => {
                 self.finish_pre_accept(FixedFrameFailure::UniformObservation(
-                    "unknown completion state".into(),
+                    FixedFrameUniformObservationError::UnknownCompletionStatus,
                 ));
                 FixedFrameStatus::Failed(self.failure.clone().unwrap())
             }
             Err(error) => {
-                self.finish_pre_accept(FixedFrameFailure::UniformObservation(error.to_string()));
+                self.finish_pre_accept(FixedFrameFailure::UniformObservation(
+                    FixedFrameUniformObservationError::Status(error),
+                ));
                 FixedFrameStatus::Failed(self.failure.clone().unwrap())
             }
         }
@@ -208,7 +211,7 @@ impl FixedFrameSubmission {
                 FixedFrameStatus::Busy
             }
             Err(error) => {
-                self.finish_pre_accept(FixedFrameFailure::RasterStart(error.to_string()));
+                self.finish_pre_accept(FixedFrameFailure::RasterStart(execution_error(error)));
                 FixedFrameStatus::Failed(self.failure.clone().unwrap())
             }
         }
@@ -223,21 +226,22 @@ impl FixedFrameSubmission {
                 self.phase = CameraPhase::RasterAccepted(frame);
                 FixedFrameStatus::Busy
             }
-            Err(_) => self.finish_accepted(FixedFrameFailure::RasterCompletion(
-                CompletionFailure::DeviceLost,
+            Err(error) => self.finish_accepted(FixedFrameFailure::RasterObservation(
+                FixedFrameRasterObservationError::Execution(execution_error(error)),
             )),
             Ok(CompletionStatus::Pending) => {
                 self.phase = CameraPhase::RasterAccepted(frame);
                 FixedFrameStatus::Pending
             }
             Ok(CompletionStatus::Complete) => {
-                let exported = frame
-                    .exports
-                    .texture(
-                        self.target_export
-                            .expect("accepted frame has target export"),
-                    )
-                    .expect("fixed graph exports its target");
+                let Some(exported) = frame.exports.texture(
+                    self.target_export
+                        .expect("accepted frame has target export"),
+                ) else {
+                    return self.finish_accepted(FixedFrameFailure::RasterObservation(
+                        FixedFrameRasterObservationError::MissingTargetExport,
+                    ));
+                };
                 let image = FrameImage {
                     extent: [
                         exported.descriptor.extent.width,
@@ -272,8 +276,8 @@ impl FixedFrameSubmission {
             Ok(CompletionStatus::Failed(failure)) => {
                 self.finish_accepted(FixedFrameFailure::RasterCompletion(failure))
             }
-            Ok(_) => self.finish_accepted(FixedFrameFailure::RasterCompletion(
-                CompletionFailure::DeviceLost,
+            Ok(_) => self.finish_accepted(FixedFrameFailure::RasterObservation(
+                FixedFrameRasterObservationError::UnknownCompletionStatus,
             )),
         }
     }
@@ -324,6 +328,21 @@ impl Drop for FixedFrameSubmission {
                 reservation.release_before_submit();
             }
         }
+    }
+}
+
+fn execution_error(error: ExecutionError<NativeExecutionError>) -> FixedFrameExecutionError {
+    match error {
+        ExecutionError::FrameBinding(error) => FixedFrameExecutionError::FrameBinding(error),
+        ExecutionError::Recording(error) => FixedFrameExecutionError::Recording(error),
+        ExecutionError::CapabilityMismatch => FixedFrameExecutionError::CapabilityMismatch,
+        ExecutionError::WrongCompiledGraph => FixedFrameExecutionError::WrongCompiledGraph,
+        ExecutionError::UnsupportedExecutionFeature(feature) => {
+            FixedFrameExecutionError::UnsupportedExecutionFeature(feature)
+        }
+        ExecutionError::Backend(error) => FixedFrameExecutionError::Backend(error),
+        ExecutionError::ExecutorBusy => unreachable!("busy is handled before failure mapping"),
+        _ => FixedFrameExecutionError::Unknown,
     }
 }
 

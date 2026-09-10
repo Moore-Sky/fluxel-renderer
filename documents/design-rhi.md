@@ -29,8 +29,9 @@ frame scheduling remain above it. See [ADR-0001](adr/0001-assets-outside-renderg
 ## Public facade and module boundaries
 
 `src/lib.rs` is the small safe facade. It exports explicit device opening,
-driver facts, owned resources, fixed artifacts, execution backends, and
-structured errors. It never exports `wgpu-hal`, native pointers, queues,
+driver facts, owned resources, execution backends, and structured errors.
+Renderer-shaped closed raster artifacts are isolated under the explicitly
+provisional `experimental::fixed_artifacts` path. It never exports `wgpu-hal`, native pointers, queues,
 command allocators, image views, or host mapping.
 
 ```text
@@ -164,7 +165,7 @@ the affected generation when its terminal state is unknown. See
 ## Closed artifacts and bindings
 
 The native API supports evidence-backed *closed* compute and raster recipes.
-`ComputeKernel` and `RasterKernel`, identities, pipeline values, and binding
+`ComputeKernel` and the experimental fixed-artifact `RasterKernel`, identities, pipeline values, and binding
 constructors represent exactly the combinations implemented by this crate; they
 are not pipeline builders.
 

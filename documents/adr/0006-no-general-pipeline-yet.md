@@ -11,8 +11,10 @@ ownership, reflection, layout, and portability requirements.
 ## Decision
 
 Represent each proven native combination as a closed RHI artifact and binding
-recipe. Keep shaders, descriptors, samplers, and native objects opaque; add a
-new closed recipe only for a separately planned vertical slice.
+recipe. Renderer-shaped Raster artifacts are exposed only under
+`fluxel_rhi::experimental::fixed_artifacts`; keep shaders, descriptors,
+samplers, and native objects opaque. Add a new closed recipe only for a
+separately planned vertical slice.
 
 ## Alternatives
 
@@ -21,15 +23,17 @@ new closed recipe only for a separately planned vertical slice.
 
 ## Consequences
 
-Public surface area stays minimal and semver changes are explicit when an
-exhaustive closed enum grows. General shader/material/pipeline policy waits for
-real renderer requirements.
+The stable RHI surface does not imply that fixed renderer recipes are a lasting
+general contract. General shader/material/pipeline policy waits for real
+renderer requirements; experimental recipe changes may evolve with the current
+vertical slice.
 
 ## Evidence
 
 0.1.3 fixed compute and 0.1.4 fixed raster established closed artifacts.
-0.2.1–0.2.7 added discrete indexed, uniform, texture-load, UV, sampler, sRGB,
-and Lambert recipes without broadening them into a general API.
+The v0.7.0 workspace release contains discrete indexed, uniform, texture-load,
+UV, sampler, sRGB, Lambert, and vertex-color recipes without broadening them
+into a general API.
 
 See [RHI design](../design-rhi.md) and [Renderer design](../design-renderer.md)
 for the currently supported recipes.

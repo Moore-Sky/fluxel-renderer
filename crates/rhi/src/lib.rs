@@ -7,19 +7,63 @@
 //! presentation remain outside this milestone. Narrow immutable buffer and
 //! whole RGBA8 texture uploads retain staging and destination storage through
 //! completion.
+//!
+//! Fixed raster recipes are intentionally experimental:
+//!
+//! ```
+//! use fluxel_rhi::experimental::fixed_artifacts::RasterKernel;
+//!
+//! let _identity = RasterKernel::Triangle.portable_identity();
+//! ```
+//!
+//! They are not stable root-facade types:
+//!
+//! ```compile_fail
+//! use fluxel_rhi::RasterKernel;
+//! ```
 
 #![deny(missing_docs)]
 
 use core::fmt;
+#[allow(unused_imports, reason = "crate-private implementation prelude")]
+pub(crate) use std::collections::HashMap;
 use std::sync::Arc;
 
 mod execution;
+/// Explicitly unstable APIs for closed vertical slices.
+///
+/// These artifacts are intentionally isolated from the RHI root because they
+/// encode the renderer's current fixed recipes rather than a general pipeline
+/// contract. They may change or be removed in a future minor release.
+pub mod experimental;
 mod resource;
 
-pub use execution::*;
+pub use execution::{
+    ComputeBackend, ComputeObjectProvider, CopyBackend, CopyCommandBuffer, CopyEncoder,
+    NativeCompletion, NativeExecutionError, UnsupportedBindings, UnsupportedComputePipeline,
+    UnsupportedRasterPipeline, WaitError,
+};
+#[cfg(feature = "test-support")]
+pub use execution::{RasterTextureReadback, readback_exported_raster_texture_for_test};
 /// Opaque identity of one physical RenderGraph resource generation.
 pub use fluxel_rendergraph::PhysicalResourceIdentity;
-pub use resource::*;
+pub use resource::{
+    Buffer, BufferDescriptor, BufferLease, BufferUploadError, BufferUploadStage,
+    ComputeArtifactIdentity, ComputeBindings, ComputeBindingsLease, ComputeCreateError,
+    ComputeKernel, ComputePipeline, ComputePipelineLease, IncompleteBufferUpload,
+    IncompleteTextureUpload, InvalidBufferUploadReason, InvalidResourceReason,
+    InvalidTextureUploadReason, MemoryPolicy, PendingBufferUpload, PendingTextureUpload,
+    ResourceCreateError, ResourceKind, ResourceLease, Texture, TextureDescriptor, TextureLease,
+    TexturePackBindings, TexturePackBindingsLease, TextureUploadError, TextureUploadStage,
+    UploadedBuffer, UploadedTexture,
+};
+
+// Private implementation modules use the former short paths. These aliases
+// have crate visibility only, so they do not preserve the removed root API.
+#[allow(unused_imports, reason = "crate-private implementation prelude")]
+pub(crate) use execution::*;
+#[allow(unused_imports, reason = "crate-private implementation prelude")]
+pub(crate) use resource::*;
 
 /// A native graphics API supported by Fluxel's Windows RHI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

@@ -1,4 +1,4 @@
-//! U04 textured fixed-draw native conformance fixtures.
+//! Fixed `textureLoad` native conformance fixtures.
 
 use super::*;
 use crate::{
@@ -70,8 +70,11 @@ fn u04_textured_paired_same_compiled_graph() {
                 mesh,
                 texture,
                 Arc::clone(&graph),
-                FrameUniform::new(&fixture_camera, &BasicMaterial::new(fixture_base_color))
-                    .unwrap(),
+                FrameUniform::new(
+                    &fixture_camera,
+                    &BasicMaterial::new(fixture_base_color).unwrap(),
+                )
+                .unwrap(),
                 mesh.reserve_for_draw().unwrap(),
                 texture.reserve_for_draw().unwrap(),
             )
@@ -119,7 +122,8 @@ fn u04_texture_gate_rejected_accepted_unknown_and_drop_contract() {
     // texture reservations must be reusable.
     let mesh = ready_mesh(&device);
     let texture = ready_texture(&device);
-    let material = TexturedBasicMaterial::new(BasicMaterial::new([1.0; 4]), texture.clone());
+    let material =
+        TexturedBasicMaterial::new(BasicMaterial::new([1.0; 4]).unwrap(), texture.clone());
     let mut rejected = renderer
         .draw_textured(&mesh, &camera, &material, [8, 8])
         .unwrap();
@@ -138,8 +142,10 @@ fn u04_texture_gate_rejected_accepted_unknown_and_drop_contract() {
     // generation is poisoned just like the mesh generation.
     let unknown_mesh = ready_mesh(&device);
     let unknown_texture = ready_texture(&device);
-    let unknown_material =
-        TexturedBasicMaterial::new(BasicMaterial::new([1.0; 4]), unknown_texture.clone());
+    let unknown_material = TexturedBasicMaterial::new(
+        BasicMaterial::new([1.0; 4]).unwrap(),
+        unknown_texture.clone(),
+    );
     let mut unknown = renderer
         .draw_textured(&unknown_mesh, &camera, &unknown_material, [8, 8])
         .unwrap();
@@ -157,8 +163,10 @@ fn u04_texture_gate_rejected_accepted_unknown_and_drop_contract() {
     // from unknown completion, so it poisons the texture generation too.
     let dropped_mesh = ready_mesh(&device);
     let dropped_texture = ready_texture(&device);
-    let dropped_material =
-        TexturedBasicMaterial::new(BasicMaterial::new([1.0; 4]), dropped_texture.clone());
+    let dropped_material = TexturedBasicMaterial::new(
+        BasicMaterial::new([1.0; 4]).unwrap(),
+        dropped_texture.clone(),
+    );
     let mut accepted = renderer
         .draw_textured(&dropped_mesh, &camera, &dropped_material, [8, 8])
         .unwrap();
@@ -287,7 +295,7 @@ fn run(backend: Backend) {
     let device = open(backend);
     let snapshot = ready_mesh(&device);
     let texture = ready_texture(&device);
-    let material = TexturedBasicMaterial::new(BasicMaterial::new([1.0; 4]), texture);
+    let material = TexturedBasicMaterial::new(BasicMaterial::new([1.0; 4]).unwrap(), texture);
     fluxel_rhi::test_support::clear_validation_diagnostics(&device);
     let renderer = FixedFrameRenderer::new(device.clone());
     let mut submission = renderer

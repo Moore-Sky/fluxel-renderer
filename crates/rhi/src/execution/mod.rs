@@ -54,5 +54,9 @@ pub use provider::*;
 pub(in crate::execution) use raster::capabilities::raster_capabilities_from_limit_and_filterability;
 pub use raster::*;
 #[cfg(any(test, feature = "test-support"))]
+#[allow(
+    unused_imports,
+    reason = "no-backend unit-test builds retain the sibling-fixture API without consuming it"
+)]
 pub use test_support::*;
 pub use types::*;

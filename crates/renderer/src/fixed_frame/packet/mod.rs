@@ -6,10 +6,9 @@
 
 use core::fmt;
 
-use fluxel_rendergraph::{
-    CompletionFailure, CompletionStatus, DeviceIdentity, FrameBindingError, RecordingError,
-};
-use fluxel_rhi::{BufferUploadError, NativeExecutionError, RasterCreateError};
+use fluxel_rendergraph::{CompletionFailure, DeviceIdentity};
+use fluxel_rhi::experimental::fixed_artifacts::RasterCreateError;
+use fluxel_rhi::{BufferUploadError, NativeExecutionError};
 
 use crate::{Camera, IndexedMeshSnapshot, frame_uniform::FrameUniform};
 
@@ -161,38 +160,6 @@ pub enum RenderPacketReservationError {
     Poisoned,
 }
 
-/// A cloneable structured execution failure at raster start or observation.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum RenderPacketExecutionError {
-    /// Imported frame resources did not satisfy the compiled contract.
-    FrameBinding(FrameBindingError),
-    /// A retained callback or command validation failed.
-    Recording(RecordingError),
-    /// Runtime capabilities differed from the compiled fingerprint.
-    CapabilityMismatch,
-    /// The frame instance did not belong to this compiled graph.
-    WrongCompiledGraph,
-    /// The plan requested an unsupported execution feature.
-    UnsupportedExecutionFeature(&'static str),
-    /// The native backend rejected the operation.
-    Backend(NativeExecutionError),
-    /// A newer non-exhaustive execution error was not understood by this renderer.
-    Unknown,
-}
-
-/// A structured failure while observing one accepted uniform upload.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RenderPacketUniformObservationError {
-    /// Querying native completion failed.
-    Status(BufferUploadError),
-    /// Finalization observed a non-complete status after completion had been reported.
-    Finalize(CompletionStatus),
-    /// The backend returned a completion state outside the supported contract.
-    UnknownCompletionStatus,
-}
-
 /// A terminal failure of a packet submission.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -216,12 +183,12 @@ pub enum RenderPacketFailure {
         /// Insertion-order draw index.
         draw_index: usize,
         /// Structured observation failure.
-        cause: RenderPacketUniformObservationError,
+        cause: super::FixedFrameUniformObservationError,
     },
     /// Recording or raster submission was rejected before acceptance.
     RasterStart {
         /// Structured graph/backend cause.
-        cause: RenderPacketExecutionError,
+        cause: super::FixedFrameExecutionError,
     },
     /// An accepted raster submission reached terminal failure.
     RasterCompletion {
@@ -231,20 +198,8 @@ pub enum RenderPacketFailure {
     /// An accepted raster submission could not be observed or exported safely.
     RasterObservation {
         /// Structured observation failure.
-        cause: RenderPacketRasterObservationError,
+        cause: super::FixedFrameRasterObservationError,
     },
-}
-
-/// Why an accepted raster result could not be observed safely.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum RenderPacketRasterObservationError {
-    /// Completion observation failed in the execution backend.
-    Execution(RenderPacketExecutionError),
-    /// The completed graph did not expose its required target export.
-    MissingTargetExport,
-    /// The backend returned a completion state outside the supported contract.
-    UnknownCompletionStatus,
 }
 
 /// The current non-blocking state of a packet submission.
@@ -276,11 +231,31 @@ impl fmt::Display for RenderPacketStartError {
         write!(formatter, "packet submission did not start: {self:?}")
     }
 }
-impl std::error::Error for RenderPacketStartError {}
+impl std::error::Error for RenderPacketStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Graph(error) => Some(error),
+            Self::Pipeline(error) => Some(error),
+            Self::Provider(error) => Some(error),
+            Self::FirstUniformStart(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl fmt::Display for RenderPacketFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "packet submission failed: {self:?}")
     }
 }
-impl std::error::Error for RenderPacketFailure {}
+impl std::error::Error for RenderPacketFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::UniformStart { cause, .. } => Some(cause),
+            Self::UniformObservation { cause, .. } => Some(cause),
+            Self::RasterStart { cause } => Some(cause),
+            Self::RasterObservation { cause } => Some(cause),
+            _ => None,
+        }
+    }
+}

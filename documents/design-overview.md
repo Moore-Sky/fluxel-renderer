@@ -53,8 +53,9 @@ never become graph concepts.
 | `fluxel-rendergraph` | Logical resources and versions, declared accesses, validation, dependencies, culling, transitions, and immutable execution plans | Scenes, asset handles, shader/pipeline policy, allocation, native handles, queue submission, or readback implementation |
 | `fluxel-rhi` | Device-affine native resources, opaque artifacts/bindings, backend lowering, command recording, submission, completion, and native diagnostics | Scene selection, asset policy, general renderer lowering, or a public general graphics API |
 
-Assets are a sibling concern: an asset system owns durable identity, loading,
-caching, and hot reload; the renderer resolves an appropriate GPU-ready
+Assets are a sibling concern: `fluxel-assets` owns durable identity, caching,
+reuse, and CPU/GPU residency, while `fluxel-loader` owns file/URL/format
+loading into CPU resources. The renderer resolves an appropriate GPU-ready
 snapshot for a frame. RenderGraph receives only the resulting physical binding
 and its contract. The reason for this boundary is recorded in
 [ADR-0001](adr/0001-assets-outside-rendergraph.md). The native containment

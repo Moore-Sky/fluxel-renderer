@@ -11,7 +11,8 @@ use fluxel_rendergraph::{
     BoundBuffer, BufferBindingId, DeviceIdentity, FrameBindingError, FrameBindingErrorKind,
     FrameResourceProvider, ResourceAccessState, TextureBindingId,
 };
-use fluxel_rhi::{Buffer, RasterBackend, ResourceLease, UploadedBuffer};
+use fluxel_rhi::experimental::fixed_artifacts::RasterBackend;
+use fluxel_rhi::{Buffer, ResourceLease, UploadedBuffer};
 
 use super::{RenderPacket, graph::PacketGraph};
 

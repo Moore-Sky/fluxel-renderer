@@ -17,6 +17,30 @@ fn geometry_rejects_an_out_of_bounds_index() {
 }
 
 #[test]
+fn basic_material_rejects_each_invalid_component_and_keeps_unit_boundaries() {
+    for component in 0..4 {
+        let mut color = [0.0; 4];
+        color[component] = f32::NAN;
+        assert_eq!(
+            BasicMaterial::new(color),
+            Err(BasicMaterialError::NonFinite { component })
+        );
+
+        color[component] = -f32::MIN_POSITIVE;
+        assert_eq!(
+            BasicMaterial::new(color),
+            Err(BasicMaterialError::OutOfRange { component })
+        );
+        color[component] = 1.0 + f32::EPSILON;
+        assert_eq!(
+            BasicMaterial::new(color),
+            Err(BasicMaterialError::OutOfRange { component })
+        );
+    }
+    assert!(BasicMaterial::new([0.0, 1.0, 0.0, 1.0]).is_ok());
+}
+
+#[test]
 fn draw_list_preserves_submission_order() {
     let camera = Camera::default();
     let first = Mesh::new(

@@ -49,8 +49,8 @@ barriers, submission, or readback implementation.
 
 RHI owns the native boundary: allocation, resource leases, native recording,
 one-queue submission, completion observation, and all HAL/unsafe code.
-Renderer code sees only safe opaque RHI types and the fixed
-`RasterBackend`/`RasterKernel` contract.
+Renderer code sees only safe opaque RHI types and the explicitly provisional
+`experimental::fixed_artifacts::RasterBackend`/`RasterKernel` contract.
 
 Persistent asset identity, loading, cache eviction, and hot reload are outside
 the graph. An asset system may resolve a ready GPU generation before frame
@@ -150,7 +150,10 @@ prevents a draw from silently changing a texture's color-space meaning. Native
 buffers, textures, leases, imported graph handles, and RHI bindings remain
 crate-private.
 
-Start and terminal errors are structured enums. `DrawStartError` and upload
+Start and terminal errors are structured enums. `DrawStartError` retains graph,
+pipeline, provider, and upload error types rather than formatting them into
+strings; `FixedFrameFailure` similarly retains structured completion and
+execution causes. Upload
 start errors report rejection before work is accepted; `FixedFrameFailure` and
 upload failure enums retain completion, observation, and later-start causes
 rather than flattening them into strings.

@@ -30,8 +30,9 @@ pub use artifact::*;
 pub use bindings::*;
 pub use lease::*;
 pub use owned::*;
-pub use raster::*;
 pub use upload::*;
+
+pub use raster::*;
 
 #[cfg(test)]
 mod tests;

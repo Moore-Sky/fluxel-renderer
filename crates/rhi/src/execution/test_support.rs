@@ -70,6 +70,10 @@ pub(crate) fn readback_raster_exported_buffer_for_test(
 /// modify an RHI texture.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
+#[allow(
+    dead_code,
+    reason = "no-backend unit-test builds retain this sibling-fixture result type"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RasterTextureReadback {
     /// Tightly packed RGBA8 pixels in row-major order.
@@ -87,6 +91,10 @@ pub struct RasterTextureReadback {
 /// callers cannot use it to impose a guessed state on an ordinary texture.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
+#[allow(
+    dead_code,
+    reason = "no-backend unit-test builds retain this sibling-fixture entry point"
+)]
 pub fn readback_exported_raster_texture_for_test(
     device: &Device,
     exported: &fluxel_rendergraph::ExportedTexture<RasterBackend>,

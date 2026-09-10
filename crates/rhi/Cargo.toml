@@ -1,6 +1,6 @@
 [package]
 name = "fluxel-rhi"
-version = "0.6.1"
+version.workspace = true
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
@@ -9,7 +9,7 @@ repository = "https://github.com/fluxel-project/fluxel-renderer"
 readme = "README.md"
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.1.5" }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.7.0" }
 
 [features]
 default = ["dx12", "vulkan"]

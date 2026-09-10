@@ -139,12 +139,20 @@ pub(crate) fn readback_buffer_for_test(
     Err("native readback is unavailable without a Windows backend".into())
 }
 #[cfg(any(test, feature = "test-support"))]
+#[allow(
+    dead_code,
+    reason = "the no-backend test-support stub preserves the native helper shape"
+)]
 pub(crate) struct TextureReadback {
     pub(crate) tight: Vec<u8>,
     pub(crate) padded: Vec<u8>,
     pub(crate) bytes_per_row: u32,
 }
 #[cfg(any(test, feature = "test-support"))]
+#[allow(
+    dead_code,
+    reason = "the no-backend test-support stub preserves a fail-closed readback path"
+)]
 pub(crate) fn readback_texture_for_test(
     _: &Arc<OpenedDevice>,
     _: &OwnedTexture,

@@ -375,10 +375,10 @@ fn camera(case: CameraCase) -> Camera {
 fn material(case: CameraCase) -> BasicMaterial {
     match case {
         CameraCase::MatrixOrder => {
-            BasicMaterial::new([48.0 / 255.0, 176.0 / 255.0, 112.0 / 255.0, 1.0])
+            BasicMaterial::new([48.0 / 255.0, 176.0 / 255.0, 112.0 / 255.0, 1.0]).unwrap()
         }
         CameraCase::MaterialColor => {
-            BasicMaterial::new([17.0 / 255.0, 93.0 / 255.0, 201.0 / 255.0, 1.0])
+            BasicMaterial::new([17.0 / 255.0, 93.0 / 255.0, 201.0 / 255.0, 1.0]).unwrap()
         }
     }
 }

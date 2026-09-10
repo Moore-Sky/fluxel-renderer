@@ -82,9 +82,14 @@ pub(super) struct UvStartRequest {
 mod api;
 mod error;
 mod start;
+#[cfg(test)]
+mod tests;
 mod validation;
 
-pub use error::{DrawStartError, FixedFrameFailure};
+pub use error::{
+    DrawStartError, FixedFrameExecutionError, FixedFrameFailure, FixedFrameRasterObservationError,
+    FixedFrameUniformObservationError,
+};
 #[cfg(test)]
 pub(in crate::fixed_frame) use validation::PairReservationError;
 use validation::{
