@@ -21,7 +21,7 @@ pipeline/bind-group API, or present pixels.
 
 ```toml
 [dependencies.fluxel-renderer]
-git = "https://github.com/Moore-Sky/fluxel-renderer"
+git = "https://github.com/fluxel-project/fluxel-renderer"
 features = ["gpu-upload"]
 ```
 
@@ -158,7 +158,7 @@ The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend
 work.
 
-The [renderer design](https://github.com/Moore-Sky/fluxel-renderer/blob/main/documents/design-renderer.md)
+The [renderer design](https://github.com/fluxel-project/fluxel-renderer/blob/main/documents/design-renderer.md)
 explains the ownership split and the evidence gates for future GPU integration.
 
 ## License

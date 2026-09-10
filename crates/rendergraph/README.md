@@ -10,7 +10,7 @@ ad-hoc command recording order.
 The current release supplies the declaration/compiler contract and a
 single-queue execution SPI verified by the deterministic CPU-only `TestRhi`.
 The companion
-[`fluxel-rhi`](https://github.com/Moore-Sky/fluxel-renderer/tree/main/crates/rhi)
+[`fluxel-rhi`](https://github.com/fluxel-project/fluxel-renderer/tree/main/crates/rhi)
 crate implements fixed Raster, Compute, and Copy subsets on native DX12 and
 Vulkan through the same immutable plan. The native profile is limited to
 R01 clear/triangle, R02 indexed viewport/scissor, and X01's closed
@@ -21,7 +21,7 @@ or pipeline API remain outside it.
 
 ```toml
 [dependencies.fluxel-rendergraph]
-git = "https://github.com/Moore-Sky/fluxel-renderer"
+git = "https://github.com/fluxel-project/fluxel-renderer"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -202,7 +202,7 @@ cargo run --example 00_minimal_compile
 ```
 
 For architecture and rationale, read
-[`documents/design-rendergraph.md`](https://github.com/Moore-Sky/fluxel-renderer/blob/main/documents/design-rendergraph.md).
+[`documents/design-rendergraph.md`](https://github.com/fluxel-project/fluxel-renderer/blob/main/documents/design-rendergraph.md).
 
 ## License
 
