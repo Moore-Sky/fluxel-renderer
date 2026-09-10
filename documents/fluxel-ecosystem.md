@@ -1,148 +1,150 @@
-# Fluxel ecosystem map
+# Fluxel Ecosystem
 
-Fluxel is intended to grow as focused libraries rather than as one
-renderer-shaped engine. This document records the intended ownership map and
-development direction. It is not a release schedule, compatibility promise, or
-commitment to create every named library.
+Fluxel is intended to grow as focused libraries with explicit ownership
+boundaries, not as one renderer-shaped engine. This document is an ecosystem
+map and development direction, not a release schedule, compatibility promise,
+or commitment to create every named library.
 
-## Architecture
+## Layers
 
-The conceptual integration path is deliberately layered. Work moves toward
-native execution; runtime and ABI layers compose and expose that work without
-turning internal crates into FFI boundaries.
+### L0 — Foundation capabilities
 
-```text
-Platform + Host Capability API
-              |
-              v
-            Loader
-              |
-              v
-            Assets
-              |
-              v
-     Canvas / Renderer policy
-              |
-              v
-          RenderGraph
-              |
-              v
-              RHI
-              |
-              v
- Runtime composition and lifecycle
-              |
-              v
- Runtime ABI / JS-facing boundary
-              |
-              v
-native DLL / dylib / so, or WASM imports and exports
-```
+`fluxel-base` provides small, stateless, cross-platform utilities such as
+Base64, hashing such as MD5 where required, encoding, and byte/string helpers.
 
-This is an ownership and integration skeleton, not a literal Rust dependency
-chain. `fluxel-runtime` composes the selected services in-process, while
-`fluxel-runtime-abi` exposes a small stable external boundary to an embedder.
-Internal crates continue to use direct Rust APIs; they never communicate through
-a DLL, shared object, WASM boundary, or FFI solely because an external ABI
-exists.
+`fluxel-time` provides clocks, timers, timeouts, intervals, and frame timing.
 
-## Ownership
+`fluxel-fs` provides files, directories, paths, streams, and random-access
+read/write operations. `fluxel-storage` separately provides application data
+persistence such as key-value data, JSON, blobs, and local storage.
 
-### Graphics foundation
+`fluxel-net` provides HTTP, WebSocket, download, and upload capabilities.
+`fluxel-input` provides mouse, keyboard, touch, wheel, and gamepad input;
+input events belong to this library rather than to a separate events layer.
 
-The current workspace provides the graphics foundation.
+`fluxel-image` provides image decoding, encoding, and pixel data.
+`fluxel-audio` provides audio decoding, playback, volume, and output-device
+integration.
 
-- `fluxel-renderer` prepares frames, selects closed recipes, builds owned
-  render packets, and lowers them into RenderGraph declarations.
-- `fluxel-rendergraph` owns frame-local access declarations, validation,
-  dependencies, transitions, and immutable execution plans.
-- `fluxel-rhi` owns device-affine native resources, backend lowering,
-  recording, submission, completion, diagnostics, and native lifetime
-  containment.
+`fluxel-platform` provides application startup, windows, screens, DPI,
+resizing, the main loop, surfaces, and frame-rate control. Foreground and
+background lifecycle policy is not planned yet.
 
-Canvas-oriented drawing policy may share this foundation, but it must not force
-2D policy into the renderer. Renderer and Canvas consume ready resource
-snapshots; neither owns asset identity, host capabilities, runtime composition,
-or JavaScript APIs.
+### L1 — Resources
 
-### Resources and loading
+`fluxel-loader` obtains CPU resources from memory, files, URLs, and supported
+formats. It loads data such as textures, meshes, shaders, JSON, and eventually
+formats such as GLTF.
 
-`fluxel-assets` owns typed handles, generations, cross-frame lifetime,
-loading/ready/failed state, residency, cache/reuse, and safe release. It is the
-owner of a durable resource's identity, not of a particular frame's graph
-binding or native command.
+`fluxel-assets` owns resource identity, typed handles, generations,
+cross-frame references and lifetime, cache/reuse, CPU/GPU residency, and safe
+release.
 
-`fluxel-loader` orchestrates file or URL import into CPU meshes, textures,
-shaders, JSON, and formats such as GLTF. It supplies assets without making file
-formats, import policy, or decoding part of renderer code. Shader source
-processing, compilation, reflection, variants, and cache artifacts remain a
-separate shader-tooling concern whose outputs a renderer can consume.
+The distinction is intentional: the loader decides how resource data is
+obtained; assets decide how an obtained resource remains available and when it
+can be released.
 
-### Platform and host capabilities
+### L2 — GPU and rendering
 
-Platform owns application startup, windows, event-loop integration, timing and
-frame control, foreground/background state, and surface lifecycle. Narrow Rust
-capability implementations cover codec/encoding and hashing, filesystem,
-networking, image processing, audio processing, and platform integration.
+`fluxel-rhi` owns GPU hardware abstraction and backend implementations,
+including DX12, Vulkan, and future supported backends.
 
-`fluxel-host` presents one coherent Host Capability API over those services:
-handles, asynchronous results, files, network, images, audio, codecs, and
-device/platform information. It defines the capability contract but does not
-absorb each implementation. It is intentionally not called a HAL, because that
-would blur host capabilities with the GPU RHI.
+`fluxel-rendergraph` owns single-frame GPU passes, resource dependencies,
+synchronization, and portable execution plans.
 
-### Runtime, ABI, and JavaScript
+`fluxel-renderer` owns 3D render submission, render packets, ordering,
+grouping, batching, instancing, and lowering into the RenderGraph. It consumes
+prepared resources; it does not own durable asset identity or host policy.
 
-`fluxel-runtime` composes platform, host, assets, renderer, and execution
-services in-process. It does not reimplement their policies or require every
-internal crate to become externally callable.
+`fluxel-canvas` will own Canvas-style 2D drawing, including images, sprites,
+text, paths, transforms, clipping, blending, and offscreen work.
 
-`fluxel-runtime-abi` is a deliberately small, stable export facade. It owns
-external handles, lifecycle entry points, and cross-boundary result conventions,
-not loading, rendering, media, or business logic. A native embedder may package
-it as a DLL, dylib, or shared object; a web embedder may use the same boundary
-to define WASM imports and exports.
+`fluxel-shader` may later own shader compilation, reflection, variants, and
+caching once those concerns have real independent demand. Renderers consume
+its outputs rather than owning its toolchain policy.
 
-JavaScript VM and bridge work owns VM integration plus JS objects/functions,
-handles, promises, asynchronous conversion, and access to the stable
-host/runtime boundary. It does not target private renderer, asset, or capability
-implementation details.
+### L3 — Runtime
+
+`fluxel-runtime` composes foundation capabilities, assets, 2D and 3D
+rendering, and platform services into a running application runtime.
+
+`fluxel-runtime-abi` is the stable outer ABI and packaging boundary. It can
+package the complete runtime as a DLL, SO, dylib, or WASM module. Its
+exports represent the assembled runtime—2D, 3D, resources, networking, files,
+and audio—not merely a collection of miscellaneous native functions.
+
+Internal libraries continue to use direct Rust APIs. The ABI boundary exists
+for embedders and packaging, not as an internal replacement for Rust types.
+
+### L4 — JavaScript
+
+`fluxel-vm-js` abstracts JavaScript VM integration, including V8, QuickJS,
+JavaScriptCore, and web or Edge environments where appropriate.
+
+`fluxel-jsbridge` owns Rust/JavaScript objects, handles, functions, promises,
+asynchronous conversion, and data conversion.
+
+`fluxel-js` is the developer-facing JavaScript API. It may eventually take
+inspiration from mini-game or Three.js-style APIs, but internal runtime and
+renderer design must not be shaped by that public API.
+
+### L5 — Higher-level UI
+
+`fluxel-ui` is a future home for a mini-program or Vue-style declarative UI.
+It is a direction only; its design is intentionally not specified yet.
 
 ## Development stages
 
-### Near term — resource and frame foundation
+### Near term
 
-- [ ] Finish the renderer submission foundation.
-- [ ] Establish cross-frame asset identity, readiness, residency, reuse, and
-  safe release.
-- [ ] Add loader boundaries for CPU mesh and texture data.
-- [ ] Connect assets and renderer through ready GPU snapshots.
-- [ ] Extend toward multi-draw `RenderPacket` submission.
-- [ ] Establish platform basics and a minimal runtime composition.
+The immediate goal is to move the 3D renderer from single-frame experimental
+capability to a durable runtime foundation.
 
-The first meaningful end-to-end closure is a window that loads a Mesh and
-Texture, retains them through `Assets` across frames, lets the renderer submit
-continuous frames, and safely releases resources once they are no longer in
-use. This closure proves the resource and lifetime path before higher-level
-scene or application features are introduced.
+- [ ] Finish the current renderer submission foundation: `DrawList`,
+  `RenderPacket`, multiple draws, per-object transforms, and clear grouping or
+  batching boundaries.
+- [ ] Establish `fluxel-assets` with stable handles, generations,
+  cross-frame references, CPU/GPU residency, cache/reuse, and safe release.
+- [ ] Establish `fluxel-loader` for memory and file loading of meshes and
+  textures; add formats such as GLTF only after the basic boundary is proven.
+- [ ] Connect loader, assets, and renderer so resources load once, are reused
+  by multiple objects and frames, and release safely when no longer needed.
+- [ ] Establish minimal `fluxel-platform` support for a window, main loop,
+  clock/frame timing, surface, resizing, and frame-rate control.
+- [ ] Establish a minimal `fluxel-runtime` that runs a long-lived 3D
+  application.
 
-### Medium term — host and embedding services
+Completion means an application can start, load resources, render multiple
+objects across many frames, reuse resources, and manage their lifetime
+correctly.
 
-After that closure has real contracts, the intended work includes the unified
-Host Capability API and codec, filesystem, network, image, audio, and platform
-implementations; Canvas2D-oriented drawing; shader tooling; the runtime ABI;
-and JS VM/bridge integration. These remain separate concerns: shader tooling
-produces artifacts for renderers, and Canvas2D shares execution foundations
-without redefining 3D renderer policy.
+### Medium term
 
-### Long term — platforms and ecosystem
+The next goal is a practical lightweight game runtime rather than a renderer
+demo.
 
-Long-term direction is semantic consistency across Web, Windows, Android, and
-iOS; suitable VM choices such as V8, QuickJS, JavaScriptCore, or a web runtime;
-a JS SDK; and possible declarative UI and ecosystem layers. These are directions
-only, with no planned version, schedule, or compatibility commitment.
+- [ ] Add the required foundation systems: time, input, filesystem, storage,
+  networking, image, audio, and base utilities.
+- [ ] Add `fluxel-canvas` and establish the runtime ABI.
+- [ ] Package complete native and WASM runtimes.
+- [ ] Add JavaScript VM abstraction, the JS bridge, and a minimal JS API.
 
-Animation, skeletal systems, navigation, physics, ECS, editors, and full
-Three.js compatibility do not currently have planned libraries or versions.
-They require separate ownership decisions after the resource, runtime, and
-embedding foundations have proved useful.
+The intended result is a small application or game that can use input,
+networking, storage, audio, 2D, and 3D without requiring Unity or Godot.
+
+### Long term
+
+Long-term work is direction only: consistent runtime semantics across Windows,
+Web, Android, and iOS; stronger DX12, Vulkan, Metal, WebGPU, and WebGL2
+backends; suitable VM integrations; a fuller JavaScript SDK; declarative UI;
+and richer scene or game capabilities.
+
+Multi-queue scheduling, parallel command recording, resource aliasing, and
+other execution optimizations are introduced only when representative
+benchmarks and profiling demonstrate a concrete need.
+
+Possible directions include animation, skeletal animation, physics,
+navigation, Blender integration, a Three.js-compatible facade, and a
+Vue-compatible declarative UI. They may be reconsidered after the core runtime
+closure is proven, but have no current library, version, compatibility, or
+delivery commitment. ECS and editor work are likewise uncommitted.

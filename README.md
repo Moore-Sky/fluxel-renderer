@@ -1,7 +1,10 @@
 # Fluxel Renderer
 
 `fluxel-renderer` is a Rust workspace for Fluxel's typed render graph, native
-RHI boundary, and renderer layer.
+RHI boundary, and renderer layer. It is the ecosystem's GPU and renderer
+foundation; cross-frame assets, loading, platform services, runtime packaging,
+and JavaScript APIs belong to adjacent Fluxel libraries described in the
+[Fluxel ecosystem map](documents/fluxel-ecosystem.md).
 
 ## Workspace
 
