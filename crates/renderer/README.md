@@ -9,6 +9,8 @@ The same feature can consume a ready snapshot, a `Camera`, and a
 and return opaque offscreen image metadata. It can also upload one immutable
 tight linear `Rgba8Unorm` or encoded `Rgba8UnormSrgb` image and use its opaque
 snapshot in a closed textured draw.
+It can separately upload canonical unit normals and execute one closed,
+non-textured fixed-Lambert draw.
 
 It is intentionally not a complete GPU renderer: it does not lower draw lists,
 compile general material shaders, expose configurable samplers/PBR or a general
@@ -19,7 +21,7 @@ pipeline/bind-group API, or present pixels.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.6"
+tag = "v0.2.7"
 features = ["gpu-upload"]
 ```
 
@@ -58,6 +60,14 @@ the target stays linear `Rgba8Unorm`. These APIs expose no configurable sampler,
 color space, mip/LOD, or general binding contract. The textured paths accept
 only finite, positive-w triangles wholly inside the clip volume, and mesh/texture
 generations share one atomic draw reservation outcome.
+
+`NormalGeometry` couples indexed geometry to one canonical finite unit
+`f32x3` normal per position. `NormalIndexedMeshUpload` atomically publishes its
+position/index/normal generation, and `FixedFrameRenderer::draw_lambert` uses a
+fixed object-space `+Z` direction. The fragment shader perspective-interpolates
+and safely normalizes the normal, multiplies only linear RGB by Lambert, and
+preserves material alpha. No light, transform, normal-map, or PBR descriptor is
+exposed.
 
 ## Use today
 
@@ -103,6 +113,9 @@ The 0.2.5 U06 fixtures additionally prove fixed linear filtering and independent
 observable U/V clamp behavior on DX12 and Vulkan.
 The 0.2.6 U07 fixtures distinguish decode-before-filter from encoded-space
 filtering, nearest/repeat, and affine UV counter-oracles on both backends.
+The 0.2.7 U08 fixtures distinguish perspective normal interpolation and
+fragment renormalization from counter-oracles and exercise the exact-zero
+fallback on both backends.
 
 The internal `shader` module is an ownership boundary for material shader
 modules. Shader compilation and reflection are deliberately future backend

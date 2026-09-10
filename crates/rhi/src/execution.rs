@@ -16,9 +16,9 @@ use fluxel_rendergraph::{
 
 use crate::{
     Buffer, BufferDescriptor, ComputeBindings, ComputeCreateError, ComputePipeline, Device,
-    MemoryPolicy, RasterPipeline, RasterTextureBindings, RasterUniformBindings,
-    RasterUvLinearClampTextureBindings, RasterUvTextureBindings, ResourceCreateError,
-    ResourceLease, Texture, TextureDescriptor, TexturePackBindings,
+    MemoryPolicy, RasterNormalBindings, RasterPipeline, RasterTextureBindings,
+    RasterUniformBindings, RasterUvLinearClampTextureBindings, RasterUvTextureBindings,
+    ResourceCreateError, ResourceLease, Texture, TextureDescriptor, TexturePackBindings,
 };
 
 /// Failure while lowering or executing the current native fixed command slice.
@@ -53,39 +53,39 @@ pub enum NativeExecutionError {
     ComputeBindingMismatch,
     /// The active raster state does not satisfy a fixed draw recipe.
     RasterStateMismatch,
-    /// A UV-textured fixed recipe addressed a vertex slot outside its ABI.
+    /// A fixed multi-stream raster recipe addressed a vertex slot outside its ABI.
     RasterVertexSlotOutOfRange {
         /// The requested vertex-buffer slot.
         slot: u32,
     },
-    /// A vertex buffer does not match the role assigned to its UV ABI slot.
+    /// A vertex buffer does not match the role assigned to its fixed ABI slot.
     RasterVertexRoleMismatch {
         /// The requested vertex-buffer slot.
         slot: u32,
     },
-    /// A UV ABI vertex slot was already successfully bound in this epoch.
+    /// A fixed multi-stream ABI vertex slot was already successfully bound in this epoch.
     RasterVertexSlotAlreadyBound {
         /// The requested vertex-buffer slot.
         slot: u32,
     },
-    /// A required UV ABI vertex slot was not bound in this epoch.
+    /// A required fixed multi-stream ABI vertex slot was not bound in this epoch.
     RasterVertexSlotMissing {
         /// The required vertex-buffer slot.
         slot: u32,
     },
-    /// A UV ABI vertex buffer range is not the required full stream.
+    /// A fixed multi-stream ABI vertex buffer range is not the required full stream.
     RasterVertexRangeMismatch {
         /// The requested vertex-buffer slot.
         slot: u32,
     },
-    /// A UV ABI vertex buffer lacks vertex usage.
+    /// A fixed multi-stream ABI vertex buffer lacks vertex usage.
     RasterVertexUsageMismatch {
         /// The requested vertex-buffer slot.
         slot: u32,
     },
-    /// UV bindings were already successfully set in this pipeline epoch.
+    /// Fixed multi-stream bindings were already successfully set in this pipeline epoch.
     RasterBindingsAlreadySet,
-    /// A UV recipe object belongs to a previous pipeline epoch.
+    /// A fixed multi-stream recipe object belongs to a previous pipeline epoch.
     RasterEpochMismatch,
 }
 
@@ -124,31 +124,36 @@ impl fmt::Display for NativeExecutionError {
             }
             Self::RasterVertexSlotOutOfRange { slot } => write!(
                 formatter,
-                "UV raster vertex slot {slot} is outside the fixed ABI"
+                "fixed raster vertex slot {slot} is outside the closed ABI"
             ),
             Self::RasterVertexRoleMismatch { slot } => write!(
                 formatter,
-                "UV raster vertex slot {slot} has the wrong buffer role"
+                "fixed raster vertex slot {slot} has the wrong buffer role"
             ),
             Self::RasterVertexSlotAlreadyBound { slot } => {
-                write!(formatter, "UV raster vertex slot {slot} is already bound")
+                write!(
+                    formatter,
+                    "fixed raster vertex slot {slot} is already bound"
+                )
             }
             Self::RasterVertexSlotMissing { slot } => {
-                write!(formatter, "UV raster vertex slot {slot} is missing")
+                write!(formatter, "fixed raster vertex slot {slot} is missing")
             }
             Self::RasterVertexRangeMismatch { slot } => write!(
                 formatter,
-                "UV raster vertex slot {slot} has an invalid range"
+                "fixed raster vertex slot {slot} has an invalid range"
             ),
             Self::RasterVertexUsageMismatch { slot } => {
-                write!(formatter, "UV raster vertex slot {slot} lacks vertex usage")
+                write!(
+                    formatter,
+                    "fixed raster vertex slot {slot} lacks vertex usage"
+                )
             }
             Self::RasterBindingsAlreadySet => {
-                formatter.write_str("UV raster bindings are already set for this epoch")
+                formatter.write_str("fixed raster bindings are already set for this epoch")
             }
-            Self::RasterEpochMismatch => {
-                formatter.write_str("UV raster object does not belong to the active pipeline epoch")
-            }
+            Self::RasterEpochMismatch => formatter
+                .write_str("fixed raster object does not belong to the active pipeline epoch"),
         }
     }
 }
@@ -191,10 +196,15 @@ pub struct CopyEncoder {
     bound_raster_uniform: Option<RasterUniformBindings>,
     bound_raster_texture: Option<RasterTextureBindings>,
     bound_raster_uv_texture: Option<RasterUvBindings>,
+    bound_raster_normal: Option<RasterNormalBindings>,
     raster_uv_epoch: u64,
     raster_uv_binding_epoch: Option<u64>,
     raster_uv_vertex_slots: [Option<(Buffer, u64)>; 2],
     raster_uv_index_ready: bool,
+    raster_normal_epoch: u64,
+    raster_normal_binding_epoch: Option<u64>,
+    raster_normal_vertex_slots: [Option<(Buffer, u64)>; 2],
+    raster_normal_index_ready: bool,
     vertex_buffer: Option<(Buffer, u64)>,
     index_buffer: Option<(Buffer, u64, IndexFormat)>,
     raster_extent: Option<(u32, u32)>,
@@ -633,22 +643,22 @@ mod tests {
     }
     native_case!(
         negative_dx12_compute_fail_closed,
-        run_compute_negative_paths,
+        run_compute_negative_paths_exact,
         crate::Backend::Dx12
     );
     native_case!(
         negative_vulkan_compute_fail_closed,
-        run_compute_negative_paths,
+        run_compute_negative_paths_exact,
         crate::Backend::Vulkan
     );
     native_case!(
         negative_dx12_raster_fail_closed,
-        run_raster_negative_paths,
+        run_raster_negative_paths_exact,
         crate::Backend::Dx12
     );
     native_case!(
         negative_vulkan_raster_fail_closed,
-        run_raster_negative_paths,
+        run_raster_negative_paths_exact,
         crate::Backend::Vulkan
     );
     native_case!(
@@ -661,6 +671,17 @@ mod tests {
         run_submission_failure_paths,
         crate::Backend::Vulkan
     );
+
+    #[test]
+    fn negative_commit_helper_accepts_only_full_hex_sha_values() {
+        assert!(negative_commit_is_valid(&"0".repeat(40)));
+        assert!(negative_commit_is_valid(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!negative_commit_is_valid("working-tree"));
+        assert!(!negative_commit_is_valid(&"0".repeat(39)));
+        assert!(!negative_commit_is_valid(&"g".repeat(40)));
+    }
 
     fn run_submission_failure_paths(backend_kind: crate::Backend) {
         let device = Device::open(
@@ -711,6 +732,71 @@ mod tests {
         drop(backend);
         drop(completion);
         assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
+    }
+
+    /// Exact-SHA evidence is opt-in: an all-zero marker explicitly labels a
+    /// working-tree run, while any nonzero marker must prove it is the clean
+    /// checked-out HEAD before a negative hardware fixture opens a device.
+    fn negative_exact_commit() -> String {
+        let commit = std::env::var("FLUXEL_TEST_COMMIT").unwrap_or_else(|_| "0".repeat(40));
+        assert!(
+            negative_commit_is_valid(&commit),
+            "negative hardware evidence requires FLUXEL_TEST_COMMIT to be exactly 40 hexadecimal characters"
+        );
+        if commit.bytes().all(|byte| byte == b'0') {
+            return "working-tree".into();
+        }
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("negative exact-SHA evidence needs git rev-parse HEAD");
+        assert!(
+            head.status.success(),
+            "negative exact-SHA evidence git rev-parse HEAD failed"
+        );
+        assert_eq!(
+            String::from_utf8(head.stdout)
+                .expect("git rev-parse HEAD emitted non-UTF-8 output")
+                .trim(),
+            commit,
+            "negative exact-SHA evidence commit differs from HEAD"
+        );
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .output()
+            .expect("negative exact-SHA evidence needs git status");
+        assert!(
+            status.status.success(),
+            "negative exact-SHA evidence git status failed"
+        );
+        assert!(
+            status.stdout.is_empty(),
+            "negative exact-SHA evidence requires a clean worktree: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+        commit
+    }
+
+    fn negative_commit_is_valid(commit: &str) -> bool {
+        commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    fn run_compute_negative_paths_exact(backend_kind: crate::Backend) {
+        let commit = negative_exact_commit();
+        run_compute_negative_paths(backend_kind);
+        eprintln!(
+            "artifact case=negative-compute backend={backend_kind:?} commit={commit} exact_sha={} diagnostics=empty completion=no-submit",
+            commit != "working-tree"
+        );
+    }
+
+    fn run_raster_negative_paths_exact(backend_kind: crate::Backend) {
+        let commit = negative_exact_commit();
+        run_raster_negative_paths(backend_kind);
+        eprintln!(
+            "artifact case=negative-raster backend={backend_kind:?} commit={commit} exact_sha={} diagnostics=empty completion=no-submit",
+            commit != "working-tree"
+        );
     }
 
     fn run_raster_negative_paths(backend_kind: crate::Backend) {
@@ -1670,6 +1756,213 @@ mod tests {
         backend.draw_indexed(&mut encoder, 0..3, 0, 0..1).unwrap();
         backend
             .set_raster_pipeline(&mut encoder, &uv_pipeline)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(NativeExecutionError::RasterEpochMismatch)
+        );
+        drop(encoder);
+
+        // The normal-Lambert recipe has its own two-stream epoch family. All
+        // rejected calls below happen before draw/submit; the final legal
+        // recording proves failed setters did not manufacture readiness.
+        let normal_pipeline = device
+            .create_raster_pipeline(
+                crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert,
+            )
+            .unwrap();
+        let other_normal_pipeline = device
+            .create_raster_pipeline(
+                crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert,
+            )
+            .unwrap();
+        let normals = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 36 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let short_normals = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 24 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let non_vertex_normals = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 36 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::StorageRead]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let normal_index = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 12 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Index]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let foreign_normal = foreign_device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: 36 },
+                usage: BufferUsage::from_kinds([BufferUsageKind::Vertex]),
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let normal_bindings = RasterBindings::RasterNormal(
+            device
+                .create_raster_normal_bindings(&normal_pipeline, &uniform, &positions, &normals, 3)
+                .unwrap(),
+        );
+        let other_normal_bindings = RasterBindings::RasterNormal(
+            device
+                .create_raster_normal_bindings(
+                    &other_normal_pipeline,
+                    &uniform,
+                    &positions,
+                    &normals,
+                    3,
+                )
+                .unwrap(),
+        );
+        assert!(matches!(
+            device.create_raster_normal_bindings(
+                &normal_pipeline,
+                &uniform,
+                &positions,
+                &normals,
+                2,
+            ),
+            Err(crate::RasterCreateError::InvalidPositionStreamRange)
+        ));
+        assert!(matches!(
+            device.create_raster_normal_bindings(
+                &normal_pipeline,
+                &uniform,
+                &positions,
+                &short_normals,
+                3,
+            ),
+            Err(crate::RasterCreateError::InvalidNormalStreamRange)
+        ));
+        assert!(matches!(
+            device.create_raster_normal_bindings(
+                &camera_pipeline,
+                &uniform,
+                &positions,
+                &normals,
+                3,
+            ),
+            Err(crate::RasterCreateError::BindingRecipeMismatch)
+        ));
+        assert!(matches!(
+            device.create_raster_normal_bindings(
+                &normal_pipeline,
+                &uniform,
+                &positions,
+                &non_vertex_normals,
+                3,
+            ),
+            Err(crate::RasterCreateError::VertexUsageRequired)
+        ));
+        assert!(matches!(
+            device.create_raster_normal_bindings(
+                &normal_pipeline,
+                &uniform,
+                &positions,
+                &foreign_normal,
+                3,
+            ),
+            Err(crate::RasterCreateError::ForeignDevice)
+        ));
+        let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+        backend
+            .transition_texture(
+                &mut encoder,
+                &target,
+                TextureRange::Whole,
+                ResourceAccessState::Undefined,
+                ResourceAccessState::ColorAttachmentReadWrite,
+            )
+            .unwrap();
+        backend.begin_raster(&mut encoder, &descriptor).unwrap();
+        backend
+            .set_raster_pipeline(&mut encoder, &normal_pipeline)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(NativeExecutionError::RasterStateMismatch)
+        );
+        assert_eq!(
+            backend.set_bindings(&mut encoder, &uv_bindings),
+            Err(NativeExecutionError::RasterStateMismatch)
+        );
+        backend
+            .set_bindings(&mut encoder, &normal_bindings)
+            .unwrap();
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 1, &foreign_normal, 0),
+            Err(NativeExecutionError::ForeignResource)
+        );
+        assert_eq!(
+            backend.set_bindings(&mut encoder, &normal_bindings),
+            Err(NativeExecutionError::RasterBindingsAlreadySet)
+        );
+        assert_eq!(
+            backend.set_bindings(&mut encoder, &other_normal_bindings),
+            Err(NativeExecutionError::RasterStateMismatch)
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 2, &positions, 0),
+            Err(NativeExecutionError::RasterVertexSlotOutOfRange { slot: 2 })
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 0, &normals, 0),
+            Err(NativeExecutionError::RasterVertexRoleMismatch { slot: 0 })
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 1, &positions, 0),
+            Err(NativeExecutionError::RasterVertexRoleMismatch { slot: 1 })
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 1, &short_normals, 0),
+            Err(NativeExecutionError::RasterVertexRoleMismatch { slot: 1 })
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 1, &non_vertex_normals, 0),
+            Err(NativeExecutionError::RasterVertexRoleMismatch { slot: 1 })
+        );
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 0, &positions, 4),
+            Err(NativeExecutionError::RasterVertexRangeMismatch { slot: 0 })
+        );
+        backend
+            .set_vertex_buffer(&mut encoder, 0, &positions, 0)
+            .unwrap();
+        assert_eq!(
+            backend.set_vertex_buffer(&mut encoder, 0, &positions, 0),
+            Err(NativeExecutionError::RasterVertexSlotAlreadyBound { slot: 0 })
+        );
+        backend
+            .set_index_buffer(&mut encoder, &normal_index, 0, IndexFormat::Uint32)
+            .unwrap();
+        assert_eq!(
+            backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
+            Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 })
+        );
+        backend
+            .set_vertex_buffer(&mut encoder, 1, &normals, 0)
+            .unwrap();
+        backend.draw_indexed(&mut encoder, 0..3, 0, 0..1).unwrap();
+        // Switching away and back makes every old binding/vertex/index state
+        // stale; this is checked before a second native draw.
+        backend
+            .set_raster_pipeline(&mut encoder, &camera_pipeline)
+            .unwrap();
+        backend
+            .set_raster_pipeline(&mut encoder, &normal_pipeline)
             .unwrap();
         assert_eq!(
             backend.draw_indexed(&mut encoder, 0..3, 0, 0..1),
@@ -3587,6 +3880,8 @@ pub enum RasterBindings {
     /// The closed UV-textured sRGB base-color binding with RHI-owned linear
     /// clamp sampler.
     RasterUvLinearClampSrgbTexture(RasterUvLinearClampTextureBindings),
+    /// Closed position-and-normal fixed Lambert binding.
+    RasterNormal(RasterNormalBindings),
 }
 
 /// A serial DX12/Vulkan backend for the fixed Raster→Compute→Copy slice.
@@ -3641,6 +3936,16 @@ pub struct RasterObjectProvider {
             u32,
         ),
     >,
+    raster_normal_bindings: HashMap<
+        fluxel_rendergraph::BindingSetId,
+        (
+            fluxel_rendergraph::RasterPipelineId,
+            RasterPipeline,
+            Buffer,
+            Buffer,
+            u32,
+        ),
+    >,
 }
 
 impl RasterObjectProvider {
@@ -3656,6 +3961,7 @@ impl RasterObjectProvider {
             raster_uv_bindings: HashMap::new(),
             raster_uv_linear_clamp_bindings: HashMap::new(),
             raster_uv_linear_clamp_srgb_bindings: HashMap::new(),
+            raster_normal_bindings: HashMap::new(),
         }
     }
 
@@ -3863,6 +4169,48 @@ impl RasterObjectProvider {
         );
         Ok(())
     }
+
+    /// Registers the closed position-and-normal fixed Lambert recipe.
+    pub fn register_raster_normal_bindings(
+        &mut self,
+        id: fluxel_rendergraph::BindingSetId,
+        expected_pipeline: fluxel_rendergraph::RasterPipelineId,
+        positions: &Buffer,
+        normals: &Buffer,
+        vertex_count: u32,
+    ) -> Result<(), NativeExecutionError> {
+        let pipeline = self
+            .raster
+            .get(&expected_pipeline)
+            .ok_or(NativeExecutionError::RasterStateMismatch)?;
+        if pipeline.kernel()
+            != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            || vertex_count == 0
+        {
+            return Err(NativeExecutionError::RasterStateMismatch);
+        }
+        require_device(
+            positions.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        require_device(
+            normals.device_identity(),
+            self.device,
+            NativeExecutionError::ForeignResource,
+        )?;
+        self.raster_normal_bindings.insert(
+            id,
+            (
+                expected_pipeline,
+                pipeline.clone(),
+                positions.clone(),
+                normals.clone(),
+                vertex_count,
+            ),
+        );
+        Ok(())
+    }
 }
 
 impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectProvider {
@@ -3932,6 +4280,40 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
                 fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
                 "fixed bindings do not accept dynamic offsets",
             ));
+        }
+        if let Some((_, pipeline, positions, normals, vertex_count)) =
+            self.raster_normal_bindings.get(&id)
+        {
+            let [
+                fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                    physical: uniform,
+                    range: BufferRange::Whole,
+                    semantic:
+                        fluxel_rendergraph::BindingResourceSemantic::BufferRead(
+                            fluxel_rendergraph::BufferReadUse::Uniform,
+                        ),
+                },
+            ] = resources
+            else {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "normal-Lambert raster binding requires one whole Uniform buffer",
+                ));
+            };
+            let value = self
+                .owner
+                .create_raster_normal_bindings(pipeline, uniform, positions, normals, *vertex_count)
+                .map_err(|error| {
+                    provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                        error.to_string(),
+                    )
+                })?;
+            return Ok(fluxel_rendergraph::BoundBindings {
+                device: self.device,
+                lease: value.lease().into(),
+                physical: RasterBindings::RasterNormal(value),
+            });
         }
         if let Some((_, pipeline, positions, texture_coordinates, vertex_count)) =
             self.raster_uv_linear_clamp_srgb_bindings.get(&id)
@@ -4260,6 +4642,7 @@ impl fluxel_rendergraph::RenderObjectProvider<RasterBackend> for RasterObjectPro
             RasterBindings::RasterUvTexture(value) => value.lease().into(),
             RasterBindings::RasterUvLinearClampTexture(value) => value.lease().into(),
             RasterBindings::RasterUvLinearClampSrgbTexture(value) => value.lease().into(),
+            RasterBindings::RasterNormal(value) => value.lease().into(),
         };
         Ok(fluxel_rendergraph::BoundBindings {
             device: self.device,
@@ -4397,10 +4780,15 @@ impl ExecutionBackend for CopyBackend {
                 bound_raster_uniform: None,
                 bound_raster_texture: None,
                 bound_raster_uv_texture: None,
+                bound_raster_normal: None,
                 raster_uv_epoch: 0,
                 raster_uv_binding_epoch: None,
                 raster_uv_vertex_slots: [None, None],
                 raster_uv_index_ready: false,
+                raster_normal_epoch: 0,
+                raster_normal_binding_epoch: None,
+                raster_normal_vertex_slots: [None, None],
+                raster_normal_index_ready: false,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -4795,10 +5183,15 @@ impl ExecutionBackend for ComputeBackend {
                 bound_raster_uniform: None,
                 bound_raster_texture: None,
                 bound_raster_uv_texture: None,
+                bound_raster_normal: None,
                 raster_uv_epoch: 0,
                 raster_uv_binding_epoch: None,
                 raster_uv_vertex_slots: [None, None],
                 raster_uv_index_ready: false,
+                raster_normal_epoch: 0,
+                raster_normal_binding_epoch: None,
+                raster_normal_vertex_slots: [None, None],
+                raster_normal_index_ready: false,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -5043,6 +5436,10 @@ impl RasterBackend {
         )
     }
 
+    fn is_normal_kernel(kernel: crate::RasterKernel) -> bool {
+        kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+    }
+
     /// Creates the only backend profile that can record the fixed raster slice.
     pub fn new(device: Device) -> Self {
         Self {
@@ -5216,10 +5613,15 @@ impl ExecutionBackend for RasterBackend {
                 bound_raster_uniform: None,
                 bound_raster_texture: None,
                 bound_raster_uv_texture: None,
+                bound_raster_normal: None,
                 raster_uv_epoch: 0,
                 raster_uv_binding_epoch: None,
                 raster_uv_vertex_slots: [None, None],
                 raster_uv_index_ready: false,
+                raster_normal_epoch: 0,
+                raster_normal_binding_epoch: None,
+                raster_normal_vertex_slots: [None, None],
+                raster_normal_index_ready: false,
                 vertex_buffer: None,
                 index_buffer: None,
                 raster_extent: None,
@@ -5310,9 +5712,13 @@ impl ExecutionBackend for RasterBackend {
         encoder.vertex_buffer = None;
         encoder.index_buffer = None;
         encoder.bound_raster_uv_texture = None;
+        encoder.bound_raster_normal = None;
         encoder.raster_uv_binding_epoch = None;
         encoder.raster_uv_vertex_slots = [None, None];
         encoder.raster_uv_index_ready = false;
+        encoder.raster_normal_binding_epoch = None;
+        encoder.raster_normal_vertex_slots = [None, None];
+        encoder.raster_normal_index_ready = false;
         Ok(())
     }
     fn end_raster(&mut self, encoder: &mut CopyEncoder) -> Result<(), Self::Error> {
@@ -5326,9 +5732,13 @@ impl ExecutionBackend for RasterBackend {
         encoder.vertex_buffer = None;
         encoder.index_buffer = None;
         encoder.bound_raster_uv_texture = None;
+        encoder.bound_raster_normal = None;
         encoder.raster_uv_binding_epoch = None;
         encoder.raster_uv_vertex_slots = [None, None];
         encoder.raster_uv_index_ready = false;
+        encoder.raster_normal_binding_epoch = None;
+        encoder.raster_normal_vertex_slots = [None, None];
+        encoder.raster_normal_index_ready = false;
         Ok(())
     }
     fn begin_compute(&mut self, encoder: &mut CopyEncoder, label: &str) -> Result<(), Self::Error> {
@@ -5377,6 +5787,11 @@ impl ExecutionBackend for RasterBackend {
             .as_ref()
             .is_some_and(|active| Self::is_uv_kernel(active.kernel()))
             || Self::is_uv_kernel(pipeline.kernel());
+        let resets_normal_epoch = encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|active| Self::is_normal_kernel(active.kernel()))
+            || Self::is_normal_kernel(pipeline.kernel());
         encoder.active_raster = Some(pipeline.clone());
         encoder.bound_raster_uniform = None;
         encoder.bound_raster_texture = None;
@@ -5386,6 +5801,13 @@ impl ExecutionBackend for RasterBackend {
             encoder.raster_uv_binding_epoch = None;
             encoder.raster_uv_vertex_slots = [None, None];
             encoder.raster_uv_index_ready = false;
+        }
+        if resets_normal_epoch {
+            encoder.raster_normal_epoch = encoder.raster_normal_epoch.wrapping_add(1);
+            encoder.bound_raster_normal = None;
+            encoder.raster_normal_binding_epoch = None;
+            encoder.raster_normal_vertex_slots = [None, None];
+            encoder.raster_normal_index_ready = false;
         }
         encoder.leases.push(pipeline.lease().into());
         Ok(())
@@ -5488,6 +5910,22 @@ impl ExecutionBackend for RasterBackend {
                     crate::imp::set_raster_uniform_bindings(&mut encoder.native, value.native())
                         .map_err(NativeExecutionError::Recording)?;
                     encoder.bound_raster_uniform = Some(value.clone());
+                    encoder.leases.push(value.lease().into());
+                    return Ok(());
+                }
+                RasterBindings::RasterNormal(value)
+                    if pipeline.kernel()
+                        == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+                        && value.device_identity() == self.device.identity()
+                        && value.pipeline().same_object(pipeline) =>
+                {
+                    if encoder.raster_normal_binding_epoch == Some(encoder.raster_normal_epoch) {
+                        return Err(NativeExecutionError::RasterBindingsAlreadySet);
+                    }
+                    crate::imp::set_raster_uniform_bindings(&mut encoder.native, value.native())
+                        .map_err(NativeExecutionError::Recording)?;
+                    encoder.bound_raster_normal = Some(value.clone());
+                    encoder.raster_normal_binding_epoch = Some(encoder.raster_normal_epoch);
                     encoder.leases.push(value.lease().into());
                     return Ok(());
                 }
@@ -5711,9 +6149,63 @@ impl RasterBackend {
                 slot,
                 buffer.identity(),
                 Some(bindings.native()),
+                None,
             )
             .map_err(NativeExecutionError::Recording)?;
             encoder.raster_uv_vertex_slots[slot as usize] = Some((buffer.clone(), offset));
+            encoder.leases.push(buffer.lease().into());
+            return Ok(());
+        }
+        if encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|pipeline| Self::is_normal_kernel(pipeline.kernel()))
+        {
+            if slot > 1 {
+                return Err(NativeExecutionError::RasterVertexSlotOutOfRange { slot });
+            }
+            if encoder.raster_normal_binding_epoch != Some(encoder.raster_normal_epoch) {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            let bindings = encoder
+                .bound_raster_normal
+                .as_ref()
+                .ok_or(NativeExecutionError::RasterStateMismatch)?;
+            if encoder.raster_normal_vertex_slots[slot as usize].is_some() {
+                return Err(NativeExecutionError::RasterVertexSlotAlreadyBound { slot });
+            }
+            let expected_identity = if slot == 0 {
+                bindings.position_identity()
+            } else {
+                bindings.normal_identity()
+            };
+            if buffer.identity() != expected_identity {
+                return Err(NativeExecutionError::RasterVertexRoleMismatch { slot });
+            }
+            let required = u64::from(bindings.vertex_count()) * 12;
+            if offset != 0 || buffer.descriptor().buffer.size != required {
+                return Err(NativeExecutionError::RasterVertexRangeMismatch { slot });
+            }
+            if !buffer.allowed_usage().contains(BufferUsageKind::Vertex) {
+                return Err(NativeExecutionError::RasterVertexUsageMismatch { slot });
+            }
+            crate::imp::set_vertex_buffer(
+                &mut encoder.native,
+                buffer.native(),
+                offset,
+                required,
+                encoder
+                    .active_raster
+                    .as_ref()
+                    .expect("checked active normal pipeline")
+                    .kernel(),
+                slot,
+                buffer.identity(),
+                None,
+                Some(bindings.native()),
+            )
+            .map_err(NativeExecutionError::Recording)?;
+            encoder.raster_normal_vertex_slots[slot as usize] = Some((buffer.clone(), offset));
             encoder.leases.push(buffer.lease().into());
             return Ok(());
         }
@@ -5749,6 +6241,7 @@ impl RasterBackend {
             pipeline.kernel(),
             slot,
             buffer.identity(),
+            None,
             None,
         )
         .map_err(NativeExecutionError::Recording)?;
@@ -5795,6 +6288,35 @@ impl RasterBackend {
             encoder.leases.push(buffer.lease().into());
             return Ok(());
         }
+        if encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|pipeline| Self::is_normal_kernel(pipeline.kernel()))
+        {
+            if encoder.raster_normal_binding_epoch != Some(encoder.raster_normal_epoch)
+                || encoder.bound_raster_normal.is_none()
+            {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            if format != IndexFormat::Uint32
+                || offset != 0
+                || !buffer.allowed_usage().contains(BufferUsageKind::Index)
+            {
+                return Err(NativeExecutionError::RasterStateMismatch);
+            }
+            crate::imp::set_index_buffer(
+                &mut encoder.native,
+                buffer.native(),
+                offset,
+                buffer.descriptor().buffer.size,
+                format,
+            )
+            .map_err(NativeExecutionError::Recording)?;
+            encoder.index_buffer = Some((buffer.clone(), offset, format));
+            encoder.raster_normal_index_ready = true;
+            encoder.leases.push(buffer.lease().into());
+            return Ok(());
+        }
         if encoder.raster_extent.is_none()
             || !offset.is_multiple_of(match format {
                 IndexFormat::Uint16 => 2,
@@ -5810,6 +6332,9 @@ impl RasterBackend {
             Some(crate::RasterKernel::IndexedPositionFloat32x3)
             | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial)
             | Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture) => {
+                IndexFormat::Uint32
+            }
+            Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert) => {
                 IndexFormat::Uint32
             }
             _ => return Err(NativeExecutionError::RasterStateMismatch),
@@ -5944,6 +6469,10 @@ impl RasterBackend {
             .active_raster
             .as_ref()
             .is_some_and(|pipeline| Self::is_uv_kernel(pipeline.kernel()));
+        let normal_kernel = encoder
+            .active_raster
+            .as_ref()
+            .is_some_and(|pipeline| Self::is_normal_kernel(pipeline.kernel()));
         if indices.start >= indices.end
             || !raster_recipe_allows_first_index(
                 encoder.active_raster.as_ref().map(RasterPipeline::kernel),
@@ -5952,7 +6481,7 @@ impl RasterBackend {
             || base_vertex != 0
             || instances != (0..1)
             || encoder.raster_extent.is_none()
-            || (!uv_kernel && encoder.vertex_buffer.is_none())
+            || (!uv_kernel && !normal_kernel && encoder.vertex_buffer.is_none())
             || encoder.index_buffer.is_none()
         {
             return Err(NativeExecutionError::RasterStateMismatch);
@@ -5974,6 +6503,9 @@ impl RasterBackend {
             | Some(
                 crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
             ) => IndexFormat::Uint32,
+            Some(crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert) => {
+                IndexFormat::Uint32
+            }
             _ => return Err(NativeExecutionError::RasterStateMismatch),
         };
         let index_size = match expected_format {
@@ -6008,6 +6540,20 @@ impl RasterBackend {
                 return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 });
             }
             if !encoder.raster_uv_index_ready {
+                return Err(NativeExecutionError::RasterStateMismatch);
+            }
+        }
+        if kernel.is_some_and(Self::is_normal_kernel) {
+            if encoder.raster_normal_binding_epoch != Some(encoder.raster_normal_epoch) {
+                return Err(NativeExecutionError::RasterEpochMismatch);
+            }
+            if encoder.raster_normal_vertex_slots[0].is_none() {
+                return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 0 });
+            }
+            if encoder.raster_normal_vertex_slots[1].is_none() {
+                return Err(NativeExecutionError::RasterVertexSlotMissing { slot: 1 });
+            }
+            if !encoder.raster_normal_index_ready {
                 return Err(NativeExecutionError::RasterStateMismatch);
             }
         }

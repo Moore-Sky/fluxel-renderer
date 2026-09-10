@@ -1,6 +1,6 @@
 # Fluxel Renderer
 
-`fluxel-renderer` is a `0.2.6` workspace milestone for Fluxel's typed render graph,
+`fluxel-renderer` is a `0.2.7` workspace milestone for Fluxel's typed render graph,
 native RHI boundary, and renderer layer. It starts an independent release line
 from a pre-migration source snapshot and does not inherit prior version numbers
 or Git history.
@@ -13,13 +13,15 @@ The workspace is organised around three crates:
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | Headless DX12/Vulkan ownership plus fixed Raster, Compute, and Copy RenderGraph execution. |
-| `fluxel-renderer` | Scene/domain data, immutable mesh/texture GPU snapshots, and fixed unlit headless indexed draws. |
+| `fluxel-renderer` | Scene/domain data, immutable mesh/texture GPU snapshots, and fixed unlit or Lambert headless indexed draws. |
 
 The renderer still does not lower a `DrawList` or general material pipeline.
 Its optional `gpu-upload` slice publishes a mesh generation after both native
 uploads complete and can submit one closed `f32x3/u32` indexed draw to an
 offscreen image, optionally modulated by one immutable RGBA8 base-color texture
 through closed integer-load, fixed linear-clamp, or fixed sRGB-decode recipes.
+It also has one separate non-textured position/normal recipe with fixed
+object-space `+Z` Lambert lighting.
 The default build remains the portable headless domain model.
 
 Package READMEs are the detailed user documentation published with each crate;
@@ -99,6 +101,13 @@ fixed draw. Native sampling decodes each texel to linear before the existing
 linear-clamp filter; the target remains linear `Rgba8Unorm`. UNORM and sRGB
 filterability are independent adapter facts. This does not make color space
 configurable or add lighting/PBR.
+
+The `0.2.7` slice adds a separate immutable position/index/normal generation and
+one closed non-textured Lambert draw. Normals are canonicalized to finite unit
+`f32x3`, interpolated perspective-correctly, safely normalized per fragment,
+and lit by a fixed object-space `+Z` direction; RGB is modulated while alpha is
+preserved. It does not add configurable lights, transforms, textured lighting,
+normal maps, specular terms, or a general PBR API.
 
 | Component | Next milestones |
 | --- | --- |

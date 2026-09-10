@@ -1,6 +1,6 @@
 # Fluxel RHI Design
 
-**Status: 0.5.0 RHI with 0.2.6 fixed sRGB-decode renderer support**
+**Status: 0.6.0 RHI with 0.2.7 fixed normal-Lambert renderer support**
 
 This document records the architecture and reasons behind `fluxel-rhi`. It is
 not a promise of a complete RHI. In 0.1.4 the crate opens one headless DX12 or
@@ -63,6 +63,17 @@ kernel. `Rgba8UnormSrgb` upload preserves encoded bytes, its native sampled view
 performs RGB decode before the fixed linear-clamp operation, and the render
 target remains linear `Rgba8Unorm`. The adapter's sRGB `SAMPLED_LINEAR` fact is
 queried, stored, fingerprinted, and validated independently from UNORM.
+
+0.6.0 adds a separate non-textured normal-Lambert kernel without changing the
+unlit or UV families. Position and canonical unit normal occupy distinct tight
+`f32x3` slots and physical roles. The object-space normal is perspective-
+interpolated, normalized only for an exactly positive squared length, and
+dotted with fixed object-space `+Z`; Lambert affects linear RGB while alpha
+passes through. The portable identity records the normal layout,
+interpolation, exact-positive normalization, light space/direction, and
+lighting model. Opaque bindings and the native boundary both reject swapped,
+partial, stale, wrong-usage, or foreign streams and retain all leases through
+completion.
 
 The workspace temporarily vendors `wgpu-hal` 30.0.1 with upstream
 gfx-rs/wgpu#10221 backported. The published 30.0.1 DX12 lowering maps an absent

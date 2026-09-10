@@ -1,6 +1,6 @@
 # Fluxel Renderer design
 
-**Status: 0.2.6 fixed headless sRGB decode draw**
+**Status: 0.2.7 fixed headless normal-Lambert draw**
 
 `fluxel-renderer` is the application-facing layer that will translate scene
 inputs into render-graph declarations and renderer/RHI-owned objects. The
@@ -167,7 +167,16 @@ texel before filtering; alpha stays linear and the target remains linear
 `Rgba8Unorm`. UNORM and sRGB filterability are queried and fingerprinted as
 independent adapter facts. The renderer never guesses one from the other.
 
-This is evidence for one fixed textured snapshot-to-plan-to-native path, not a
+0.2.7 keeps all textured paths unchanged and adds a separate non-textured
+`NormalGeometry` generation. Its immutable position/index/normal streams are
+published atomically. `draw_lambert` uses the existing linear `BasicMaterial`
+and 80-byte camera/material uniform, perspective-interpolates canonical unit
+object-space normals, safely normalizes only an exactly nonzero interpolation,
+and applies a fixed object-space `+Z` Lambert factor to RGB while preserving
+alpha. This proves the normal stream and lighting formula without introducing
+texture sampling, public light state, model/normal transforms, or PBR policy.
+
+These slices are evidence for fixed snapshot-to-plan-to-native paths, not a
 claim that model transforms, `DrawList` lowering, configurable samplers or color spaces, further UV attributes,
 mips/LOD, lighting/PBR, depth, blending, batching, general bindings, Surface, or
 Present are implemented.

@@ -2246,9 +2246,747 @@ mod u06 {
         })
     }
 }
+#[cfg(test)]
+mod u08 {
+    //! The first fixed-light fixture intentionally shares U06's non-affine
+    //! camera triangle, but its oracle has no renderer helpers in its path.
+    use super::*;
+    use crate::{
+        BasicMaterial, Camera, Geometry, NormalGeometry, NormalIndexedMeshSnapshot,
+        NormalIndexedMeshUpload, NormalIndexedMeshUploadStatus,
+    };
+    use fluxel_rhi::{
+        Backend, DeviceOptions, Validation, readback_exported_raster_texture_for_test,
+    };
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[cfg(windows)]
+    #[test]
+    fn u08_cpu_oracle_freezes_perspective_and_lambert_counters() {
+        for sample in [witness([0, 4]), witness([1, 4])] {
+            assert!(sample.edge_margin > 0.01);
+            assert!(sample.quantization_margin > 0.01);
+            assert!(distance(sample.expected, sample.affine) > 2);
+            assert!(distance(sample.expected, sample.unnormalized) > 2);
+            assert!(distance(sample.expected, sample.wrong_light) > 2);
+            assert!(distance(sample.expected, sample.normal_slot) > 2);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Windows DX12 device with required validation"]
+    fn u08_normal_lambert_dx12() {
+        run(Backend::Dx12);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Windows Vulkan device with required validation"]
+    fn u08_normal_lambert_vulkan() {
+        run(Backend::Vulkan);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires DX12 and Vulkan devices with required validation"]
+    fn u08_normal_lambert_paired_same_compiled_graph() {
+        let _guard = native_fixture_guard();
+        let dx = open(Backend::Dx12);
+        let vk = open(Backend::Vulkan);
+        let capabilities = actual_raster_capabilities(&dx);
+        assert_eq!(capabilities, actual_raster_capabilities(&vk));
+        let dx_mesh = mesh(&dx);
+        let vk_mesh = mesh(&vk);
+        let graph =
+            Arc::new(build_normal_lambert_camera_graph(&dx_mesh, [8, 8], &capabilities).unwrap());
+        let mut first: Option<Vec<u8>> = None;
+        for (backend, device, mesh) in [
+            (Backend::Dx12, &dx, &dx_mesh),
+            (Backend::Vulkan, &vk, &vk_mesh),
+        ] {
+            fluxel_rhi::test_support::clear_validation_diagnostics(device);
+            let renderer = FixedFrameRenderer::new(device.clone());
+            let mut submission = renderer
+                .start_normal_lambert(
+                    mesh,
+                    Arc::clone(&graph),
+                    FrameUniform::new(&camera(), &material()).unwrap(),
+                    mesh.reserve_for_draw().unwrap(),
+                )
+                .unwrap();
+            let actual = complete(device, &mut submission);
+            assert_oracle(backend, &actual.tight);
+            if let Some(reference) = &first {
+                assert_eq!(
+                    actual.tight,
+                    *reference,
+                    "U08 paired first difference {:?}",
+                    first_difference(&actual.tight, reference)
+                );
+            } else {
+                first = Some(actual.tight.clone());
+            }
+            assert_validation(device);
+            artifact(
+                "paired-same-compiled-graph",
+                backend,
+                device,
+                &graph,
+                &submission,
+                &actual,
+            );
+            run_plus_z_regression(backend, device, Some(Arc::clone(&graph)));
+        }
+    }
+
+    #[cfg(windows)]
+    fn open(backend: Backend) -> Device {
+        Device::open(
+            backend,
+            DeviceOptions {
+                validation: Validation::Required,
+                ..DeviceOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn geometry() -> NormalGeometry {
+        // Exactly U06's primary geometry: w is (0.95, 1.05, 1.0), which
+        // makes perspective and screen-linear normal interpolation distinct.
+        let positions =
+            Geometry::from_positions(vec![[-0.9, -0.9, -0.5], [0.8, -0.9, 0.5], [-0.9, 0.8, 0.0]])
+                .with_indices(vec![0, 1, 2])
+                .unwrap();
+        NormalGeometry::new(
+            positions,
+            vec![[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]],
+        )
+        .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn camera() -> Camera {
+        Camera::new(
+            [
+                [1., 0., 0., 0.],
+                [0., 1., 0., 0.],
+                [0., 0., 1., 0.],
+                [0., 0., 0., 1.],
+            ],
+            [
+                [1., 0., 0., 0.],
+                [0., 1., 0., 0.],
+                [0., 0., 0.05, 0.1],
+                [0., 0., 0.5, 1.],
+            ],
+        )
+    }
+
+    #[cfg(windows)]
+    fn material() -> BasicMaterial {
+        BasicMaterial::new([0.72, 0.45, 0.28, 0.63])
+    }
+
+    #[cfg(windows)]
+    fn mesh(device: &Device) -> NormalIndexedMeshSnapshot {
+        let mut upload = NormalIndexedMeshUpload::begin(device, &geometry()).unwrap();
+        wait(|| match upload.poll() {
+            NormalIndexedMeshUploadStatus::Ready => Some(upload.ready_snapshot().unwrap()),
+            NormalIndexedMeshUploadStatus::Pending => None,
+            NormalIndexedMeshUploadStatus::Failed(e) => panic!("U08 normal upload {e:?}"),
+        })
+    }
+
+    #[cfg(windows)]
+    fn plus_z_geometry() -> NormalGeometry {
+        let positions =
+            Geometry::from_positions(vec![[-0.9, -0.9, -0.5], [0.8, -0.9, 0.5], [-0.9, 0.8, 0.0]])
+                .with_indices(vec![0, 1, 2])
+                .unwrap();
+        NormalGeometry::new(positions, vec![[0.0, 0.0, 1.0]; 3]).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn plus_z_mesh(device: &Device) -> NormalIndexedMeshSnapshot {
+        let mut upload = NormalIndexedMeshUpload::begin(device, &plus_z_geometry()).unwrap();
+        wait(|| match upload.poll() {
+            NormalIndexedMeshUploadStatus::Ready => Some(upload.ready_snapshot().unwrap()),
+            NormalIndexedMeshUploadStatus::Pending => None,
+            NormalIndexedMeshUploadStatus::Failed(e) => panic!("U08 +Z normal upload {e:?}"),
+        })
+    }
+
+    #[cfg(windows)]
+    fn assert_plus_z_unlit(backend: Backend, actual: &[u8]) {
+        let expected = plus_z_unlit_expected();
+        for pixel in [[0, 4], [1, 4]] {
+            let got = rgba(actual, pixel);
+            assert!(
+                got.into_iter()
+                    .zip(expected)
+                    .all(|(a, e)| a.abs_diff(e) <= 1),
+                "U08 {backend:?} +Z must reduce to unlit material at {pixel:?}: actual={got:?}; expected={expected:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    fn plus_z_unlit_expected() -> [u8; 4] {
+        material().base_color().map(quantize)
+    }
+
+    #[cfg(windows)]
+    fn run_plus_z_regression(
+        backend: Backend,
+        device: &Device,
+        paired_graph: Option<Arc<CameraGraph>>,
+    ) {
+        let mesh = plus_z_mesh(device);
+        let renderer = FixedFrameRenderer::new(device.clone());
+        let mut submission = if let Some(graph) = paired_graph {
+            renderer
+                .start_normal_lambert(
+                    &mesh,
+                    graph,
+                    FrameUniform::new(&camera(), &material()).unwrap(),
+                    mesh.reserve_for_draw().unwrap(),
+                )
+                .unwrap()
+        } else {
+            renderer
+                .draw_lambert(&mesh, &camera(), &material(), [8, 8])
+                .unwrap()
+        };
+        let actual = complete(device, &mut submission);
+        assert_plus_z_unlit(backend, &actual.tight);
+        assert_validation(device);
+        let graph = submission.graph.as_ref().unwrap();
+        let exports = &submission.completed.as_ref().unwrap().exports;
+        let states = [
+            exports
+                .buffer(graph.position_export)
+                .unwrap()
+                .outgoing_state,
+            exports.buffer(graph.index_export).unwrap().outgoing_state,
+            exports
+                .buffer(graph.normal_export.unwrap())
+                .unwrap()
+                .outgoing_state,
+        ];
+        let target_state = exports
+            .texture(submission.target_export.unwrap())
+            .unwrap()
+            .outgoing_state;
+        assert_eq!(states, [ResourceAccessState::CopyDestination; 3]);
+        assert_eq!(target_state, ResourceAccessState::CopySource);
+        println!(
+            "artifact schema=fluxel-u08-plus-z-v2; case=U08-plus-z-unlit-regression; commit={}; backend={backend:?}; capabilities={:?}; normal_bits={:?}; normal_le_bytes={:?}; identity={:?}; plan={:?}; expected={:?}; actual_witnesses={:?}; full_readback={:?}; position_index_normal_outgoing={states:?}; target_outgoing={target_state:?}; completion=Complete; diagnostics={:?}",
+            exact_commit(),
+            actual_raster_capabilities(device),
+            canonical_normal_bits(plus_z_geometry().normals()),
+            canonical_normal_le_bytes(plus_z_geometry().normals()),
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert.portable_identity(),
+            graph.compiled.execution_plan(),
+            plus_z_unlit_expected(),
+            [rgba(&actual.tight, [0, 4]), rgba(&actual.tight, [1, 4])],
+            actual.tight,
+            fluxel_rhi::test_support::validation_diagnostics(device),
+        );
+    }
+
+    #[cfg(windows)]
+    fn canonical_normal_bits(normals: &[[f32; 3]]) -> Vec<u32> {
+        normals
+            .iter()
+            .flat_map(|normal| normal.iter().map(|component| component.to_bits()))
+            .collect()
+    }
+
+    #[cfg(windows)]
+    fn canonical_normal_le_bytes(normals: &[[f32; 3]]) -> Vec<u8> {
+        normals
+            .iter()
+            .flat_map(|normal| {
+                normal
+                    .iter()
+                    .flat_map(|component| component.to_bits().to_le_bytes())
+            })
+            .collect()
+    }
+
+    #[cfg(windows)]
+    fn wait<T>(mut poll: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(value) = poll() {
+                return value;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(windows)]
+    fn run(backend: Backend) {
+        let _guard = native_fixture_guard();
+        let device = open(backend);
+        let mesh = mesh(&device);
+        fluxel_rhi::test_support::clear_validation_diagnostics(&device);
+        let mut submission = FixedFrameRenderer::new(device.clone())
+            .draw_lambert(&mesh, &camera(), &material(), [8, 8])
+            .unwrap();
+        let actual = complete(&device, &mut submission);
+        assert_oracle(backend, &actual.tight);
+        assert_validation(&device);
+        artifact(
+            "independent-public-path",
+            backend,
+            &device,
+            submission.graph.as_ref().unwrap(),
+            &submission,
+            &actual,
+        );
+        run_zero_fallback(backend, &device);
+        run_plus_z_regression(backend, &device, None);
+    }
+
+    #[cfg(windows)]
+    fn complete(
+        device: &Device,
+        submission: &mut FixedFrameSubmission,
+    ) -> fluxel_rhi::RasterTextureReadback {
+        wait(|| match submission.poll() {
+            FixedFrameStatus::Complete(_) => Some(()),
+            FixedFrameStatus::Pending | FixedFrameStatus::Busy => None,
+            FixedFrameStatus::Failed(e) => panic!("U08 completion {e:?}"),
+        });
+        readback_exported_raster_texture_for_test(
+            device,
+            submission
+                .completed
+                .as_ref()
+                .unwrap()
+                .exports
+                .texture(submission.target_export.unwrap())
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn zero_geometry() -> NormalGeometry {
+        // Pixel [3,3]'s center is the exact screen-space centroid. All w are
+        // one, so the three perspective weights are identical. The symmetric
+        // pair shares identical-magnitude y bits; the fixed operation order
+        // yields a bitwise zero interpolated vector before the shader branch.
+        let positions = Geometry::from_positions(vec![
+            [-0.625, 0.375, 0.0],
+            [0.375, 0.375, 0.0],
+            [-0.125, -0.375, 0.0],
+        ])
+        .with_indices(vec![0, 1, 2])
+        .unwrap();
+        let y = 0.866_025_4;
+        NormalGeometry::new(
+            positions,
+            vec![[1.0, 0.0, 0.0], [-0.5, y, 0.0], [-0.5, -y, 0.0]],
+        )
+        .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn zero_mesh(device: &Device) -> NormalIndexedMeshSnapshot {
+        let mut upload = NormalIndexedMeshUpload::begin(device, &zero_geometry()).unwrap();
+        wait(|| match upload.poll() {
+            NormalIndexedMeshUploadStatus::Ready => Some(upload.ready_snapshot().unwrap()),
+            NormalIndexedMeshUploadStatus::Pending => None,
+            NormalIndexedMeshUploadStatus::Failed(e) => panic!("U08 zero normal upload {e:?}"),
+        })
+    }
+
+    #[cfg(windows)]
+    fn zero_interpolated_normal() -> ([f32; 3], [f32; 3]) {
+        let weights = [1.0_f32 / 3.0; 3];
+        let normals = zero_geometry().normals().to_vec();
+        let mut interpolated = [0.0; 3];
+        for (axis, output) in interpolated.iter_mut().enumerate() {
+            for vertex in 0..3 {
+                *output += weights[vertex] * normals[vertex][axis];
+            }
+        }
+        (weights, interpolated)
+    }
+
+    #[cfg(windows)]
+    fn run_zero_fallback(backend: Backend, device: &Device) {
+        let mesh = zero_mesh(device);
+        let mut submission = FixedFrameRenderer::new(device.clone())
+            .draw_lambert(&mesh, &camera(), &material(), [8, 8])
+            .unwrap();
+        let actual = complete(device, &mut submission);
+        let got = rgba(&actual.tight, [3, 3]);
+        assert!(
+            got[..3].iter().all(|channel| *channel <= 1),
+            "U08 {backend:?} zero fallback actual={got:?}"
+        );
+        assert!(
+            got[3].abs_diff(quantize(material().base_color()[3])) <= 1,
+            "U08 {backend:?} zero fallback alpha={got:?}"
+        );
+        assert_validation(device);
+        let graph = submission.graph.as_ref().unwrap();
+        let exports = &submission.completed.as_ref().unwrap().exports;
+        let states = [
+            exports
+                .buffer(graph.position_export)
+                .unwrap()
+                .outgoing_state,
+            exports.buffer(graph.index_export).unwrap().outgoing_state,
+            exports
+                .buffer(graph.normal_export.unwrap())
+                .unwrap()
+                .outgoing_state,
+        ];
+        let target_state = exports
+            .texture(submission.target_export.unwrap())
+            .unwrap()
+            .outgoing_state;
+        assert_eq!(states, [ResourceAccessState::CopyDestination; 3]);
+        assert_eq!(target_state, ResourceAccessState::CopySource);
+        let (weights, interpolated) = zero_interpolated_normal();
+        assert!(interpolated.iter().all(|value| value.to_bits() == 0));
+        let identity =
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert.portable_identity();
+        println!(
+            "artifact schema=fluxel-u08-zero-v3; case=U08-zero-interpolation; commit={}; backend={backend:?}; capabilities={:?}; geometry={:?}; camera={:?}; normal_bits={:?}; normal_le_bytes={:?}; weights={weights:?}; interpolated_bits={:?}; identity={identity:?}; plan={:?}; pixel=[3,3]; expected=[0,0,0,{}]; actual={got:?}; full_readback={:?}; position_index_normal_outgoing={states:?}; target_outgoing={target_state:?}; completion=Complete; diagnostics={:?}",
+            exact_commit(),
+            actual_raster_capabilities(device),
+            zero_geometry().geometry(),
+            camera(),
+            canonical_normal_bits(zero_geometry().normals()),
+            canonical_normal_le_bytes(zero_geometry().normals()),
+            interpolated.map(f32::to_bits),
+            graph.compiled.execution_plan(),
+            quantize(material().base_color()[3]),
+            actual.tight,
+            fluxel_rhi::test_support::validation_diagnostics(device)
+        );
+    }
+
+    #[cfg(windows)]
+    #[allow(
+        dead_code,
+        reason = "the complete CPU reconstruction is retained through Witness Debug in U08 artifacts"
+    )]
+    #[derive(Debug)]
+    struct Witness {
+        pixel: [u32; 2],
+        screen_vertices: [(f32, f32); 3],
+        clip_w: [f32; 3],
+        raw_barycentric: [f32; 3],
+        barycentric: [f32; 3],
+        perspective_weights: [f32; 3],
+        interpolated_normal: [f32; 3],
+        interpolated_len2: f32,
+        lambert_e: f32,
+        affine_interpolated_normal: [f32; 3],
+        position_slot_interpolated_normal: [f32; 3],
+        affine_lambert: f32,
+        unnormalized_lambert: f32,
+        wrong_light_lambert: f32,
+        normal_slot_lambert: f32,
+        expected: [u8; 4],
+        affine: [u8; 4],
+        unnormalized: [u8; 4],
+        wrong_light: [u8; 4],
+        normal_slot: [u8; 4],
+        edge_margin: f32,
+        quantization_margin: f32,
+    }
+
+    #[cfg(windows)]
+    fn witness(pixel: [u32; 2]) -> Witness {
+        let geometry = geometry();
+        let positions = geometry.geometry().positions();
+        let normals = geometry.normals();
+        let vertex = |p: [f32; 3]| {
+            let w = 1.0 + p[2] * 0.1;
+            (w, ((p[0] / w + 1.) * 4., (1. - p[1] / w) * 4.))
+        };
+        let vertices = [
+            vertex(positions[0]),
+            vertex(positions[1]),
+            vertex(positions[2]),
+        ];
+        let edge = |a: (f32, f32), b: (f32, f32), p: (f32, f32)| {
+            (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
+        };
+        let p = (pixel[0] as f32 + 0.5, pixel[1] as f32 + 0.5);
+        let area = edge(vertices[0].1, vertices[1].1, vertices[2].1);
+        let raw = [
+            edge(vertices[1].1, vertices[2].1, p),
+            edge(vertices[2].1, vertices[0].1, p),
+            edge(vertices[0].1, vertices[1].1, p),
+        ];
+        assert!(
+            raw.iter().all(|v| *v > 0.),
+            "U08 witness must be strictly interior"
+        );
+        let bary = raw.map(|v| v / area);
+        let denominator: f32 = (0..3).map(|i| bary[i] / vertices[i].0).sum();
+        let perspective_weights = [0, 1, 2].map(|i| bary[i] / vertices[i].0 / denominator);
+        let interpolate_perspective = |values: &[[f32; 3]]| {
+            [0, 1, 2].map(|axis| {
+                (0..3)
+                    .map(|i| bary[i] * values[i][axis] / vertices[i].0)
+                    .sum::<f32>()
+                    / denominator
+            })
+        };
+        let perspective = interpolate_perspective(normals);
+        // Counter only: this is the value the fragment would see if a native
+        // implementation accidentally consumed position slot 0 as normal
+        // slot 1. It is not a valid alternate renderer contract.
+        let position_as_normal = interpolate_perspective(positions);
+        let affine = [0, 1, 2].map(|a| (0..3).map(|i| bary[i] * normals[i][a]).sum::<f32>());
+        let lambert = |n: [f32; 3], normalize: bool, light: f32| {
+            let len2 = n.into_iter().map(|v| v * v).sum::<f32>();
+            if len2 > 0. {
+                (if normalize { n[2] / len2.sqrt() } else { n[2] }) * light
+            } else {
+                0.
+            }
+            .max(0.)
+        };
+        let shade = |value| {
+            material().base_color().map(|c| {
+                quantize(
+                    c * if c == material().base_color()[3] {
+                        1.
+                    } else {
+                        value
+                    },
+                )
+            })
+        };
+        let expected_lambert = lambert(perspective, true, 1.);
+        let interpolated_len2 = perspective.into_iter().map(|value| value * value).sum();
+        let expected_linear = material().base_color().map(|c| {
+            c * if c == material().base_color()[3] {
+                1.
+            } else {
+                expected_lambert
+            }
+        });
+        let expected = shade(expected_lambert);
+        let affine_lambert = lambert(affine, true, 1.);
+        let unnormalized_lambert = lambert(perspective, false, 1.);
+        let wrong_light_lambert = lambert(perspective, true, -1.);
+        let normal_slot_lambert = lambert(position_as_normal, true, 1.);
+        Witness {
+            pixel,
+            screen_vertices: vertices.map(|vertex| vertex.1),
+            clip_w: vertices.map(|vertex| vertex.0),
+            raw_barycentric: raw,
+            barycentric: bary,
+            perspective_weights,
+            interpolated_normal: perspective,
+            interpolated_len2,
+            lambert_e: expected_lambert,
+            affine_interpolated_normal: affine,
+            position_slot_interpolated_normal: position_as_normal,
+            affine_lambert,
+            unnormalized_lambert,
+            wrong_light_lambert,
+            normal_slot_lambert,
+            expected,
+            affine: shade(affine_lambert),
+            unnormalized: shade(unnormalized_lambert),
+            wrong_light: shade(wrong_light_lambert),
+            normal_slot: shade(normal_slot_lambert),
+            edge_margin: bary.into_iter().map(f32::abs).fold(f32::INFINITY, f32::min),
+            quantization_margin: expected_linear
+                .into_iter()
+                .map(|v| {
+                    let scaled = v.clamp(0., 1.) * 255.;
+                    (scaled - (scaled.floor() + 0.5)).abs()
+                })
+                .fold(f32::INFINITY, f32::min),
+        }
+    }
+
+    #[cfg(windows)]
+    fn quantize(value: f32) -> u8 {
+        (value.clamp(0., 1.) * 255. + 0.5).floor() as u8
+    }
+
+    #[cfg(windows)]
+    fn assert_oracle(backend: Backend, actual: &[u8]) {
+        let witnesses = [witness([0, 4]), witness([1, 4])];
+        for w in &witnesses {
+            assert!(w.edge_margin > 0.01);
+            assert!(w.quantization_margin > 0.01);
+            let got: [u8; 4] = actual[(w.pixel[1] as usize * 8 + w.pixel[0] as usize) * 4..][..4]
+                .try_into()
+                .unwrap();
+            assert!(
+                got.into_iter()
+                    .zip(w.expected)
+                    .all(|(a, e)| a.abs_diff(e) <= 1),
+                "U08 {backend:?} witness={w:?} actual={got:?}"
+            );
+            for counter in [w.affine, w.unnormalized, w.wrong_light, w.normal_slot] {
+                assert!(
+                    distance(w.expected, counter) > 2,
+                    "U08 insufficient counter distinction witness={w:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn u08_cpu_zero_fallback_is_bitwise_zero() {
+        let (weights, interpolated) = zero_interpolated_normal();
+        assert_eq!(weights, [1.0_f32 / 3.0; 3]);
+        assert_eq!(interpolated.map(f32::to_bits), [0; 3]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn u08_cpu_plus_z_degenerates_to_unlit_material() {
+        assert_eq!(plus_z_unlit_expected(), [184, 115, 71, 161]);
+    }
+
+    #[cfg(windows)]
+    fn distance(a: [u8; 4], b: [u8; 4]) -> u8 {
+        a.into_iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(y))
+            .max()
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn assert_validation(device: &Device) {
+        let unexpected: Vec<_> = fluxel_rhi::test_support::validation_diagnostics(device)
+            .into_iter()
+            .filter(|d| {
+                !(d.contains("severity=D3D12_MESSAGE_SEVERITY(2)")
+                    && d.contains("category=D3D12_MESSAGE_CATEGORY(9)")
+                    && d.contains("id=D3D12_MESSAGE_ID(820)")
+                    && d.contains(
+                        "The application did not pass any clear value to resource creation",
+                    ))
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "U08 validation diagnostics {unexpected:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    fn artifact(
+        mode: &str,
+        backend: Backend,
+        device: &Device,
+        graph: &CameraGraph,
+        submission: &FixedFrameSubmission,
+        actual: &fluxel_rhi::RasterTextureReadback,
+    ) {
+        let exports = &submission.completed.as_ref().unwrap().exports;
+        let states = [
+            exports
+                .buffer(graph.position_export)
+                .unwrap()
+                .outgoing_state,
+            exports.buffer(graph.index_export).unwrap().outgoing_state,
+            exports
+                .buffer(graph.normal_export.unwrap())
+                .unwrap()
+                .outgoing_state,
+        ];
+        assert_eq!(states, [ResourceAccessState::CopyDestination; 3]);
+        let target_state = exports
+            .texture(submission.target_export.unwrap())
+            .unwrap()
+            .outgoing_state;
+        assert_eq!(target_state, ResourceAccessState::CopySource);
+        println!(
+            "artifact schema=fluxel-u08-v3; case=U08; mode={mode}; commit={}; backend={backend:?}; hardware={:?}; driver={}; capabilities={:?}; normal_bits={:?}; normal_le_bytes={:?}; material={:?}; identity={:?}; plan={:?}; expected={:?}; actual={:?}; delta={:?}; full_readback={:?}; position_index_normal_outgoing={states:?}; target_outgoing={target_state:?}; completion=Complete; diagnostics={:?}",
+            exact_commit(),
+            device.hardware(),
+            device.hardware().driver,
+            actual_raster_capabilities(device),
+            canonical_normal_bits(geometry().normals()),
+            canonical_normal_le_bytes(geometry().normals()),
+            material(),
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert.portable_identity(),
+            graph.compiled.execution_plan(),
+            [witness([0, 4]), witness([1, 4])],
+            [rgba(&actual.tight, [0, 4]), rgba(&actual.tight, [1, 4])],
+            [
+                delta(rgba(&actual.tight, [0, 4]), witness([0, 4]).expected),
+                delta(rgba(&actual.tight, [1, 4]), witness([1, 4]).expected)
+            ],
+            actual.tight,
+            fluxel_rhi::test_support::validation_diagnostics(device)
+        );
+    }
+
+    #[cfg(windows)]
+    fn rgba(bytes: &[u8], p: [u32; 2]) -> [u8; 4] {
+        bytes[(p[1] as usize * 8 + p[0] as usize) * 4..][..4]
+            .try_into()
+            .unwrap()
+    }
+    #[cfg(windows)]
+    fn delta(a: [u8; 4], b: [u8; 4]) -> [u8; 4] {
+        [
+            a[0].abs_diff(b[0]),
+            a[1].abs_diff(b[1]),
+            a[2].abs_diff(b[2]),
+            a[3].abs_diff(b[3]),
+        ]
+    }
+    #[cfg(windows)]
+    fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
+        a.iter().zip(b).position(|(x, y)| x != y)
+    }
+    #[cfg(windows)]
+    fn exact_commit() -> String {
+        let commit = std::env::var("FLUXEL_TEST_COMMIT").expect("U08 exact SHA required");
+        assert!(commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if commit.bytes().all(|byte| byte == b'0') {
+            return "working-tree".into();
+        }
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        assert_eq!(String::from_utf8(head.stdout).unwrap().trim(), commit);
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success() && status.stdout.is_empty(),
+            "U08 exact-SHA requires clean worktree"
+        );
+        commit
+    }
+}
 use crate::upload::{
-    BaseColorTextureSnapshot, IndexedMeshSnapshot, SnapshotDrawReservation, SnapshotUseError,
-    TexturedBasicMaterial, TexturedIndexedMeshSnapshot,
+    BaseColorTextureSnapshot, IndexedMeshSnapshot, NormalIndexedMeshSnapshot,
+    SnapshotDrawReservation, SnapshotUseError, TexturedBasicMaterial, TexturedIndexedMeshSnapshot,
 };
 
 fn position_binding() -> BufferBindingId {
@@ -2300,6 +3038,15 @@ fn uv_linear_clamp_srgb_pipeline() -> RasterPipelineId {
 fn uv_linear_clamp_srgb_bindings() -> BindingSetId {
     BindingSetId::new(0x0260_0001)
 }
+fn normal_binding() -> BufferBindingId {
+    BufferBindingId::new(0x0270_0004)
+}
+fn normal_lambert_pipeline() -> RasterPipelineId {
+    RasterPipelineId::new(0x0270_0001)
+}
+fn normal_lambert_bindings() -> BindingSetId {
+    BindingSetId::new(0x0270_0001)
+}
 
 /// Coordinates the fixed headless `f32x3/u32` indexed draw slice.
 ///
@@ -2315,6 +3062,7 @@ pub struct FixedFrameRenderer {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DrawFlavor {
     Legacy,
+    NormalLambert,
     TextureLoad,
     UvTextureLoad,
     UvLinearClamp,
@@ -2429,6 +3177,57 @@ impl FixedFrameRenderer {
                 .map_err(|error| DrawStartError::Graph(error.to_string()))?,
         );
         self.start_camera(snapshot, graph, uniform)
+    }
+
+    /// Starts the closed object-space `+Z` Lambert draw over explicit unit
+    /// normals. The normal snapshot uses one generation gate for all three
+    /// streams, so an accepted draw conservatively owns position, index, and
+    /// normal lifetime together.
+    pub fn draw_lambert(
+        &self,
+        snapshot: &NormalIndexedMeshSnapshot,
+        camera: &crate::Camera,
+        material: &crate::BasicMaterial,
+        extent: [u32; 2],
+    ) -> Result<FixedFrameSubmission, DrawStartError> {
+        if extent[0] == 0 || extent[1] == 0 {
+            return Err(DrawStartError::InvalidExtent);
+        }
+        if snapshot.positions().buffer().device_identity() != self.device.identity()
+            || snapshot.indices().buffer().device_identity() != self.device.identity()
+            || snapshot.normals().buffer().device_identity() != self.device.identity()
+        {
+            return Err(DrawStartError::ForeignSnapshotDevice);
+        }
+        if snapshot.index_count() == 0 || !snapshot.index_count().is_multiple_of(3) {
+            return Err(DrawStartError::InvalidIndexCount);
+        }
+        debug_assert_eq!(
+            snapshot.normal_metadata().len(),
+            snapshot.position_count() as usize,
+            "NormalIndexedMeshSnapshot publication keeps both vertex streams aligned"
+        );
+        let uniform = FrameUniform::new(camera, material)
+            .map_err(|_| DrawStartError::InvalidCameraMaterial)?;
+        validate_clip(
+            snapshot.position_metadata(),
+            snapshot.index_metadata(),
+            uniform.view_projection(),
+        )?;
+        let graph = Arc::new(
+            build_normal_lambert_camera_graph(snapshot, extent, &self.capabilities)
+                .map_err(|error| DrawStartError::Graph(error.to_string()))?,
+        );
+        let reservation = snapshot.reserve_for_draw().map_err(map_snapshot_use)?;
+        self.start_with_resources(StartResources {
+            snapshot: FrameMeshSnapshot::Normal(snapshot.clone()),
+            texture: None,
+            graph,
+            uniform,
+            reservation,
+            texture_reservation: None,
+            flavor: DrawFlavor::NormalLambert,
+        })
     }
 
     /// Starts one fixed indexed draw with one immutable RGBA8 texture accessed by fixed integer `textureLoad`.
@@ -2723,6 +3522,25 @@ impl FixedFrameRenderer {
         })
     }
 
+    #[cfg(test)]
+    fn start_normal_lambert(
+        &self,
+        snapshot: &NormalIndexedMeshSnapshot,
+        graph: Arc<CameraGraph>,
+        uniform: FrameUniform,
+        reservation: SnapshotDrawReservation,
+    ) -> Result<FixedFrameSubmission, DrawStartError> {
+        self.start_with_resources(StartResources {
+            snapshot: FrameMeshSnapshot::Normal(snapshot.clone()),
+            texture: None,
+            graph,
+            uniform,
+            reservation,
+            texture_reservation: None,
+            flavor: DrawFlavor::NormalLambert,
+        })
+    }
+
     fn start_textured(
         &self,
         snapshot: &IndexedMeshSnapshot,
@@ -2810,6 +3628,8 @@ impl FixedFrameRenderer {
             RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
         } else if flavor == DrawFlavor::UvLinearClampSrgb {
             RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+        } else if flavor == DrawFlavor::NormalLambert {
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
         } else if snapshot.texture_coordinates().is_some() {
             RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
         } else if texture.is_some() {
@@ -2829,7 +3649,15 @@ impl FixedFrameRenderer {
             release(reservation, texture_reservation);
             return Err(DrawStartError::Pipeline(error.to_string()));
         }
-        let binding_result = if let Some(texture_coordinates) = snapshot.texture_coordinates() {
+        let binding_result = if let Some(normals) = snapshot.normals() {
+            objects.register_raster_normal_bindings(
+                graph.bindings,
+                graph.pipeline,
+                snapshot.positions().buffer(),
+                normals.buffer(),
+                snapshot.position_count(),
+            )
+        } else if let Some(texture_coordinates) = snapshot.texture_coordinates() {
             if flavor == DrawFlavor::UvLinearClamp {
                 objects.register_raster_uv_linear_clamp_textured_bindings(
                     graph.bindings,
@@ -3248,6 +4076,7 @@ pub struct FixedFrameSubmission {
 #[derive(Clone)]
 enum FrameMeshSnapshot {
     Indexed(IndexedMeshSnapshot),
+    Normal(NormalIndexedMeshSnapshot),
     TexturedUv(TexturedIndexedMeshSnapshot),
 }
 
@@ -3255,6 +4084,7 @@ impl FrameMeshSnapshot {
     fn positions(&self) -> &UploadedBuffer {
         match self {
             Self::Indexed(snapshot) => snapshot.positions(),
+            Self::Normal(snapshot) => snapshot.positions(),
             Self::TexturedUv(snapshot) => snapshot.positions(),
         }
     }
@@ -3262,20 +4092,29 @@ impl FrameMeshSnapshot {
     fn indices(&self) -> &UploadedBuffer {
         match self {
             Self::Indexed(snapshot) => snapshot.indices(),
+            Self::Normal(snapshot) => snapshot.indices(),
             Self::TexturedUv(snapshot) => snapshot.indices(),
         }
     }
 
     fn texture_coordinates(&self) -> Option<&UploadedBuffer> {
         match self {
-            Self::Indexed(_) => None,
+            Self::Indexed(_) | Self::Normal(_) => None,
             Self::TexturedUv(snapshot) => Some(snapshot.texture_coordinates()),
+        }
+    }
+
+    fn normals(&self) -> Option<&UploadedBuffer> {
+        match self {
+            Self::Normal(snapshot) => Some(snapshot.normals()),
+            Self::Indexed(_) | Self::TexturedUv(_) => None,
         }
     }
 
     fn position_count(&self) -> u32 {
         match self {
             Self::Indexed(snapshot) => snapshot.position_count(),
+            Self::Normal(snapshot) => snapshot.position_count(),
             Self::TexturedUv(snapshot) => snapshot.position_count(),
         }
     }
@@ -3350,6 +4189,10 @@ impl FixedFrameSubmission {
                 .snapshot
                 .texture_coordinates()
                 .map(|coordinates| coordinates.buffer().clone()),
+            normals: self
+                .snapshot
+                .normals()
+                .map(|normals| normals.buffer().clone()),
             uniform: uniform.buffer().clone(),
             texture: self
                 .texture_snapshot
@@ -3361,6 +4204,7 @@ impl FixedFrameSubmission {
                 .snapshot
                 .texture_coordinates()
                 .map(UploadedBuffer::outgoing_state),
+            normal_state: self.snapshot.normals().map(UploadedBuffer::outgoing_state),
             texture_state: self
                 .texture_snapshot
                 .as_ref()
@@ -3373,6 +4217,9 @@ impl FixedFrameSubmission {
             .bind_buffer(graph.uniform_slot, uniform_binding());
         if let Some(slot) = graph.texture_coordinate_slot {
             inputs.bind_buffer(slot, texture_coordinate_binding());
+        }
+        if let Some(slot) = graph.normal_slot {
+            inputs.bind_buffer(slot, normal_binding());
         }
         if let Some(slot) = graph.texture_slot {
             inputs.bind_texture(slot, texture_binding());
@@ -3628,6 +4475,7 @@ struct CameraGraph {
     index_slot: fluxel_rendergraph::ImportBufferSlot,
     uniform_slot: fluxel_rendergraph::ImportBufferSlot,
     texture_coordinate_slot: Option<fluxel_rendergraph::ImportBufferSlot>,
+    normal_slot: Option<fluxel_rendergraph::ImportBufferSlot>,
     texture_slot: Option<fluxel_rendergraph::ImportTextureSlot>,
     #[allow(
         dead_code,
@@ -3649,6 +4497,8 @@ struct CameraGraph {
     index_export: fluxel_rendergraph::ExportBufferSlot,
     #[allow(dead_code, reason = "U05 checks restored UV buffer state")]
     texture_coordinate_export: Option<fluxel_rendergraph::ExportBufferSlot>,
+    #[allow(dead_code, reason = "U08 checks restored normal buffer state")]
+    normal_export: Option<fluxel_rendergraph::ExportBufferSlot>,
 }
 
 struct CameraResources {
@@ -3657,10 +4507,12 @@ struct CameraResources {
     indices: Buffer,
     uniform: Buffer,
     texture_coordinates: Option<Buffer>,
+    normals: Option<Buffer>,
     texture: Option<Texture>,
     position_state: ResourceAccessState,
     index_state: ResourceAccessState,
     texture_coordinate_state: Option<ResourceAccessState>,
+    normal_state: Option<ResourceAccessState>,
     texture_state: Option<ResourceAccessState>,
 }
 impl FrameResourceProvider<RasterBackend> for CameraResources {
@@ -3709,6 +4561,13 @@ impl FrameResourceProvider<RasterBackend> for CameraResources {
                     "camera frame has no texture-coordinate import",
                 )
             })?
+        } else if id == normal_binding() {
+            self.normals.as_ref().ok_or_else(|| {
+                missing_binding(
+                    FrameBindingErrorKind::MissingBuffer,
+                    "camera frame has no normal import",
+                )
+            })?
         } else {
             return Err(missing_binding(
                 FrameBindingErrorKind::MissingBuffer,
@@ -3722,6 +4581,9 @@ impl FrameResourceProvider<RasterBackend> for CameraResources {
         } else if id == texture_coordinate_binding() {
             self.texture_coordinate_state
                 .expect("texture-coordinate state accompanies its buffer")
+        } else if id == normal_binding() {
+            self.normal_state
+                .expect("normal state accompanies its buffer")
         } else {
             ResourceAccessState::CopyDestination
         };
@@ -3866,6 +4728,7 @@ fn build_camera_graph(
         index_slot: indices.slot,
         uniform_slot: uniform.slot,
         texture_coordinate_slot: None,
+        normal_slot: None,
         texture_slot: None,
         texture_export: None,
         pipeline: camera_pipeline(),
@@ -3874,6 +4737,175 @@ fn build_camera_graph(
         position_export,
         index_export,
         texture_coordinate_export: None,
+        normal_export: None,
+    })
+}
+
+/// Declares the closed three-stream normal/Lambert graph. Normal is a second
+/// vertex read, not a uniform or a texture attribute: this keeps the portable
+/// RenderGraph plan aligned with the native slot-0/slot-1 ABI.
+fn build_normal_lambert_camera_graph(
+    snapshot: &NormalIndexedMeshSnapshot,
+    extent: [u32; 2],
+    capabilities: &DeviceCapabilities,
+) -> Result<CameraGraph, fluxel_rendergraph::CompileError> {
+    let mut graph = RenderGraph::new();
+    let import = |graph: &mut RenderGraph, name: &str, buffer: &UploadedBuffer| {
+        graph.import_buffer_slot(
+            name,
+            ImportBufferContract {
+                descriptor: buffer.buffer().descriptor().buffer,
+                initial_state: buffer.outgoing_state(),
+                ownership: ExternalOwnership::Caller,
+                initial_contents: InitialContents::Defined,
+            },
+        )
+    };
+    let positions = import(
+        &mut graph,
+        "normal-lambert-frame-positions",
+        snapshot.positions(),
+    );
+    let indices = import(
+        &mut graph,
+        "normal-lambert-frame-indices",
+        snapshot.indices(),
+    );
+    let normals = import(
+        &mut graph,
+        "normal-lambert-frame-normals",
+        snapshot.normals(),
+    );
+    let uniform = graph.import_buffer_slot(
+        "normal-lambert-frame-uniform",
+        ImportBufferContract {
+            descriptor: fluxel_rendergraph::BufferDesc {
+                size: FRAME_UNIFORM_BYTES as u64,
+            },
+            initial_state: ResourceAccessState::CopyDestination,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let target = graph.create_texture(
+        "normal-lambert-frame-target",
+        TextureDesc {
+            dimension: TextureDimension::D2,
+            extent: Extent3d {
+                width: extent[0],
+                height: extent[1],
+                depth: 1,
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            sample_count: 1,
+            format: TextureFormat::Rgba8Unorm,
+        },
+    );
+    let count = snapshot.index_count();
+    let pass = graph.add_raster_pass(
+        "normal-lambert-camera-material-indexed",
+        |pass| {
+            let output = pass.color_attachment(
+                target,
+                ColorAttachmentDesc {
+                    index: 0,
+                    range: TextureRange::Whole,
+                    operations: AttachmentOps {
+                        load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+                        store: StoreOp::Store,
+                        write_coverage: WriteCoverage::Full,
+                    },
+                },
+            );
+            let position_read = pass.read_buffer(
+                &positions.version,
+                fluxel_rendergraph::BufferReadUse::Vertex,
+                BufferRange::Whole,
+            );
+            let index_read = pass.read_buffer(
+                &indices.version,
+                fluxel_rendergraph::BufferReadUse::Index,
+                BufferRange::Whole,
+            );
+            let normal_read = pass.read_buffer(
+                &normals.version,
+                fluxel_rendergraph::BufferReadUse::Vertex,
+                BufferRange::Whole,
+            );
+            let uniform_read = pass.read_buffer(
+                &uniform.version,
+                fluxel_rendergraph::BufferReadUse::Uniform,
+                BufferRange::Whole,
+            );
+            (
+                output,
+                (position_read, index_read, normal_read, uniform_read),
+            )
+        },
+        move |commands, resolver, data, _| {
+            commands.set_pipeline(normal_lambert_pipeline())?;
+            let bindings = resolver.resolve_bindings(
+                normal_lambert_bindings(),
+                &[BindingResource::BufferRead(&data.3)],
+                &[],
+            )?;
+            commands.set_bindings(&bindings)?;
+            commands.set_vertex_buffer(0, &data.0)?;
+            commands.set_vertex_buffer(1, &data.2)?;
+            commands.set_index_buffer(&data.1, IndexFormat::Uint32)?;
+            commands.set_viewport(Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent[0] as f32,
+                height: extent[1] as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            })?;
+            commands.draw_indexed(0..count, 0, 0..1)
+        },
+    );
+    let position_export = graph.export_buffer(
+        positions.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let index_export = graph.export_buffer(
+        indices.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let normal_export = graph.export_buffer(
+        normals.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let target_export = graph.export_texture(
+        pass.output,
+        ExportTextureContract {
+            final_state: ResourceAccessState::CopySource,
+        },
+    );
+    let compiled = graph.compile(capabilities)?.graph;
+    Ok(CameraGraph {
+        compiled,
+        position_slot: positions.slot,
+        index_slot: indices.slot,
+        uniform_slot: uniform.slot,
+        texture_coordinate_slot: None,
+        normal_slot: Some(normals.slot),
+        texture_slot: None,
+        texture_export: None,
+        pipeline: normal_lambert_pipeline(),
+        bindings: normal_lambert_bindings(),
+        target_export,
+        position_export,
+        index_export,
+        texture_coordinate_export: None,
+        normal_export: Some(normal_export),
     })
 }
 
@@ -4030,6 +5062,7 @@ fn build_textured_camera_graph(
         index_slot: indices.slot,
         uniform_slot: uniform.slot,
         texture_coordinate_slot: None,
+        normal_slot: None,
         texture_slot: Some(sampled.slot),
         texture_export: Some(texture_export),
         pipeline: textured_pipeline(),
@@ -4038,6 +5071,7 @@ fn build_textured_camera_graph(
         position_export,
         index_export,
         texture_coordinate_export: None,
+        normal_export: None,
     })
 }
 
@@ -4229,6 +5263,7 @@ fn build_uv_textured_camera_graph<T: FrameTexture>(
         index_slot: indices.slot,
         uniform_slot: uniform.slot,
         texture_coordinate_slot: Some(texture_coordinates.slot),
+        normal_slot: None,
         texture_slot: Some(sampled.slot),
         texture_export: Some(texture_export),
         pipeline,
@@ -4237,6 +5272,7 @@ fn build_uv_textured_camera_graph<T: FrameTexture>(
         position_export,
         index_export,
         texture_coordinate_export: Some(texture_coordinate_export),
+        normal_export: None,
     })
 }
 

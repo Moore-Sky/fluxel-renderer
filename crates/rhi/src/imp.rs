@@ -288,6 +288,15 @@ enum NativeRasterPipelineInner {
 pub(super) struct NativeRasterUniformBindings {
     native: Option<NativeRasterUniformBindingsInner>,
     pipeline: NativeRasterPipeline,
+    // Only the normal-Lambert closed artifact populates this. Rechecking the
+    // opaque generations and exact whole-stream ranges at the unsafe vertex
+    // edge prevents a safe caller from exchanging position and normal roles.
+    expected_normal_vertex_streams: Option<(
+        fluxel_rendergraph::PhysicalResourceIdentity,
+        u64,
+        fluxel_rendergraph::PhysicalResourceIdentity,
+        u64,
+    )>,
 }
 
 /// Private holder for the closed textured raster bind group and texture view.
@@ -1310,6 +1319,11 @@ pub(super) fn create_raster_pipeline(
         offset: 0,
         shader_location: 1,
     }];
+    let normal_f32x3_attributes = [wgt::VertexAttribute {
+        format: wgt::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 1,
+    }];
     let buffers = match kernel {
         crate::RasterKernel::Triangle => vec![],
         crate::RasterKernel::IndexedPositionColor => vec![Some(wgpu_hal::VertexBufferLayout {
@@ -1349,6 +1363,20 @@ pub(super) fn create_raster_pipeline(
                     array_stride: 8,
                     step_mode: wgt::VertexStepMode::Vertex,
                     attributes: &texture_coordinate_f32x2_attributes,
+                }),
+            ]
+        }
+        crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert => {
+            vec![
+                Some(wgpu_hal::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgt::VertexStepMode::Vertex,
+                    attributes: &position_f32x3_attributes,
+                }),
+                Some(wgpu_hal::VertexBufferLayout {
+                    array_stride: 12,
+                    step_mode: wgt::VertexStepMode::Vertex,
+                    attributes: &normal_f32x3_attributes,
                 }),
             ]
         }
@@ -1472,6 +1500,7 @@ pub(super) fn create_raster_pipeline(
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
             ) {
                 match unsafe {
                     // SAFETY: the static one-entry descriptor is valid and
@@ -1634,6 +1663,7 @@ pub(super) fn create_raster_pipeline(
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                     | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+                    | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
             ) {
                 match unsafe {
                     // SAFETY: static binding-zero uniform layout is valid and borrowed only for this call.
@@ -1811,6 +1841,7 @@ pub(super) fn create_raster_uniform_bindings(
             Ok(NativeRasterUniformBindings {
                 native: Some(NativeRasterUniformBindingsInner::Dx12(group)),
                 pipeline: pipeline.clone(),
+                expected_normal_vertex_streams: None,
             })
         }
         #[cfg(feature = "vulkan")]
@@ -1839,6 +1870,7 @@ pub(super) fn create_raster_uniform_bindings(
             Ok(NativeRasterUniformBindings {
                 native: Some(NativeRasterUniformBindingsInner::Vulkan(group)),
                 pipeline: pipeline.clone(),
+                expected_normal_vertex_streams: None,
             })
         }
         _ => Err("raster uniform binding does not match the camera/material pipeline".into()),
@@ -1888,6 +1920,35 @@ pub(super) fn set_raster_uniform_bindings(
         _ => return Err("raster uniform bindings belong to another native backend".into()),
     }
     Ok(())
+}
+
+/// Creates the uniform group for the normal-Lambert artifact and records the
+/// two independently validated vertex stream facts for the later unsafe bind.
+pub(super) fn create_raster_normal_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeRasterPipeline,
+    uniform: &OwnedBuffer,
+    position_identity: fluxel_rendergraph::PhysicalResourceIdentity,
+    position_size: u64,
+    normal_identity: fluxel_rendergraph::PhysicalResourceIdentity,
+    normal_size: u64,
+) -> Result<NativeRasterUniformBindings, String> {
+    if pipeline.0.kernel != crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+        || position_size == 0
+        || normal_size == 0
+        || position_size != normal_size
+        || !position_size.is_multiple_of(12)
+    {
+        return Err("invalid normal-Lambert binding recipe".into());
+    }
+    let mut bindings = create_raster_uniform_bindings(owner, pipeline, uniform)?;
+    bindings.expected_normal_vertex_streams = Some((
+        position_identity,
+        position_size,
+        normal_identity,
+        normal_size,
+    ));
+    Ok(bindings)
 }
 
 /// Creates the fixed two-entry textured raster bind group after both safe and
@@ -3018,6 +3079,7 @@ pub(super) fn set_vertex_buffer(
     slot: u32,
     actual_identity: fluxel_rendergraph::PhysicalResourceIdentity,
     uv_bindings: Option<&NativeRasterTextureBindings>,
+    normal_bindings: Option<&NativeRasterUniformBindings>,
 ) -> Result<(), String> {
     if matches!(
         kernel,
@@ -3056,6 +3118,37 @@ pub(super) fn set_vertex_buffer(
             return Err("explicit-UV vertex stream range mismatch".into());
         }
     }
+    if kernel == crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert {
+        if encoder.active_render_view.is_none() {
+            return Err("normal-Lambert vertex binding requires an active raster pass".into());
+        }
+        let bindings = normal_bindings
+            .ok_or_else(|| "normal-Lambert vertex binding requires normal bindings".to_owned())?;
+        if !Arc::ptr_eq(&encoder.owner, &bindings.pipeline.0.owner)
+            || encoder.active_raster_pipeline != Some(Arc::as_ptr(&bindings.pipeline.0) as usize)
+            || slot > 1
+            || !buffer.allowed_usage.contains(BufferUsageKind::Vertex)
+        {
+            return Err(
+                "normal-Lambert vertex binding has an invalid pipeline, slot, or usage".into(),
+            );
+        }
+        let expected = bindings
+            .expected_normal_vertex_streams
+            .ok_or_else(|| "normal-Lambert native binding lacks stream identities".to_owned())?;
+        let (expected_identity, expected_size) = if slot == 0 {
+            (expected.0, expected.1)
+        } else {
+            (expected.2, expected.3)
+        };
+        if actual_identity != expected_identity
+            || offset != 0
+            || size != expected_size
+            || buffer.size != expected_size
+        {
+            return Err("normal-Lambert vertex role or range mismatch".into());
+        }
+    }
     if !Arc::ptr_eq(&encoder.owner, &buffer.owner)
         || !offset.is_multiple_of(4)
         || (matches!(
@@ -3063,12 +3156,14 @@ pub(super) fn set_vertex_buffer(
             crate::RasterKernel::IndexedPositionFloat32x3
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterial
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTexture
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
         ) && offset != 0)
         || (matches!(
             kernel,
             crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                 | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+                | crate::RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
         ) && (slot > 1 || offset != 0 || size < if slot == 0 { 12 } else { 8 }))
         || offset.checked_add(size).is_none_or(|end| end > buffer.size)
         || size

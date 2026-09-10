@@ -395,6 +395,8 @@ pub enum RasterCreateError {
     UniformUsageRequired,
     /// The position stream is not the exact closed f32x3 vertex range.
     InvalidPositionStreamRange,
+    /// The normal stream is not the exact closed f32x3 vertex range.
+    InvalidNormalStreamRange,
     /// The texture-coordinate stream is not the exact closed f32x2 vertex range.
     InvalidTextureCoordinateStreamRange,
     /// A closed vertex stream was created without vertex usage.
@@ -427,6 +429,9 @@ impl fmt::Display for RasterCreateError {
             }
             Self::InvalidPositionStreamRange => {
                 f.write_str("invalid fixed raster position stream range")
+            }
+            Self::InvalidNormalStreamRange => {
+                f.write_str("invalid fixed raster normal stream range")
             }
             Self::InvalidTextureCoordinateStreamRange => {
                 f.write_str("invalid fixed raster texture-coordinate stream range")
@@ -691,6 +696,9 @@ pub enum RasterKernel {
     /// linear-clamp sampling at explicit mip level zero, and an sRGB
     /// base-color texture decoded by the native sampling operation.
     IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb,
+    /// An indexed camera/material mesh with separate f32x3 position and
+    /// unit-normal streams plus fixed object-space `+Z` Lambert lighting.
+    IndexedPositionFloat32x3CameraMaterialNormalLambert,
 }
 
 /// The non-configurable vertex layout selected by a fixed raster artifact.
@@ -706,6 +714,45 @@ pub enum RasterVertexLayout {
     /// Slot zero is tightly packed f32x3 position and slot one is tightly
     /// packed f32x2 texture coordinates.
     PositionFloat32x3AndTextureCoordinateFloat32x2,
+    /// Slot zero is tightly packed f32x3 position and slot one is tightly
+    /// packed f32x3 unit normal.
+    PositionFloat32x3AndNormalFloat32x3,
+}
+
+/// Interpolation rule for the fixed normal stream.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterNormalInterpolation {
+    /// Perspective-correct interpolation evaluated at fragment center.
+    PerspectiveCenter,
+}
+
+/// Normalization rule for the interpolated normal.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterNormalNormalization {
+    /// Normalize only when length squared is strictly positive; otherwise the
+    /// Lambert contribution is exactly zero.
+    ExactPositiveUnitAfterInterpolationZeroLambert,
+}
+
+/// Coordinate space used by the fixed lighting recipe.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterLightingSpace {
+    /// Positions and normals are consumed in object space.
+    Object,
+}
+
+/// The non-configurable light direction used by the fixed recipe.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterFixedLightDirection {
+    /// Unit positive Z direction.
+    PositiveZ,
+}
+
+/// Color operation performed by the fixed lighting recipe.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RasterLightingModel {
+    /// RGB is modulated by Lambert while material alpha is preserved.
+    LambertRgbAlphaPassthrough,
 }
 
 /// Shader-stage visibility recorded by a closed raster binding identity.
@@ -819,6 +866,28 @@ pub struct RasterArtifactIdentity {
     pub sampler_address_mode_w: Option<RasterSamplerAddressMode>,
     /// Explicit mip level sampled by the fixed linear-clamp recipe.
     pub sampler_explicit_mip_level: Option<u32>,
+    /// Version of the fixed normal/lighting ABI; zero means no lighting recipe.
+    pub lighting_recipe_version: u32,
+    /// Interpolation selected for the normal stream.
+    pub normal_interpolation: Option<RasterNormalInterpolation>,
+    /// Safe normalization and zero-vector fallback selected by the shader.
+    pub normal_normalization: Option<RasterNormalNormalization>,
+    /// Space in which the normal and fixed light are compared.
+    pub lighting_space: Option<RasterLightingSpace>,
+    /// Direction of the fixed light.
+    pub fixed_light_direction: Option<RasterFixedLightDirection>,
+    /// Fixed RGB/alpha lighting operation.
+    pub lighting_model: Option<RasterLightingModel>,
+    /// Position stream slot for the normal-Lambert recipe.
+    pub position_vertex_slot: Option<u32>,
+    /// Position shader location for the normal-Lambert recipe.
+    pub position_shader_location: Option<u32>,
+    /// Normal stream slot for the normal-Lambert recipe.
+    pub normal_vertex_slot: Option<u32>,
+    /// Normal stream byte stride for the normal-Lambert recipe.
+    pub normal_vertex_stride: Option<u32>,
+    /// Normal shader location for the normal-Lambert recipe.
+    pub normal_shader_location: Option<u32>,
     /// Version of the fixed vertex/index/target recipe.
     pub recipe_version: u32,
 }
@@ -899,6 +968,22 @@ impl fmt::Debug for RasterArtifactIdentity {
                     &self.sampler_explicit_mip_level,
                 );
         }
+        // Lighting is additive identity data. Keeping it conditional preserves
+        // the exact Debug representation recorded by pre-0.2.7 artifacts.
+        if self.lighting_recipe_version != 0 {
+            identity
+                .field("lighting_recipe_version", &self.lighting_recipe_version)
+                .field("normal_interpolation", &self.normal_interpolation)
+                .field("normal_normalization", &self.normal_normalization)
+                .field("lighting_space", &self.lighting_space)
+                .field("fixed_light_direction", &self.fixed_light_direction)
+                .field("lighting_model", &self.lighting_model)
+                .field("position_vertex_slot", &self.position_vertex_slot)
+                .field("position_shader_location", &self.position_shader_location)
+                .field("normal_vertex_slot", &self.normal_vertex_slot)
+                .field("normal_vertex_stride", &self.normal_vertex_stride)
+                .field("normal_shader_location", &self.normal_shader_location);
+        }
         identity
             .field("recipe_version", &self.recipe_version)
             .finish()
@@ -923,6 +1008,9 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
                 "camera_material_texture_uv_linear_clamp_srgb_vertex"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => {
+                "camera_material_normal_lambert_vertex"
+            }
         }
     }
 
@@ -937,6 +1025,7 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
                 "linear_clamp_srgb_texture_color_fragment"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => "normal_lambert_fragment",
             _ => "color_fragment",
         }
     }
@@ -957,6 +1046,7 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTextureUv => 12,
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp => 12,
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => 12,
+            Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => 12,
         }
     }
 
@@ -975,6 +1065,7 @@ impl RasterKernel {
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
                 Some(IndexFormat::Uint32)
             }
+            Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => Some(IndexFormat::Uint32),
         }
     }
 
@@ -996,6 +1087,9 @@ impl RasterKernel {
             }
             Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb => {
                 RasterVertexLayout::PositionFloat32x3AndTextureCoordinateFloat32x2
+            }
+            Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => {
+                RasterVertexLayout::PositionFloat32x3AndNormalFloat32x3
             }
         }
     }
@@ -1256,6 +1350,94 @@ impl RasterKernel {
             } else {
                 None
             },
+            lighting_recipe_version: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                1
+            } else {
+                0
+            },
+            normal_interpolation: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(RasterNormalInterpolation::PerspectiveCenter)
+            } else {
+                None
+            },
+            normal_normalization: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(RasterNormalNormalization::ExactPositiveUnitAfterInterpolationZeroLambert)
+            } else {
+                None
+            },
+            lighting_space: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(RasterLightingSpace::Object)
+            } else {
+                None
+            },
+            fixed_light_direction: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(RasterFixedLightDirection::PositiveZ)
+            } else {
+                None
+            },
+            lighting_model: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(RasterLightingModel::LambertRgbAlphaPassthrough)
+            } else {
+                None
+            },
+            position_vertex_slot: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(0)
+            } else {
+                None
+            },
+            position_shader_location: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(0)
+            } else {
+                None
+            },
+            normal_vertex_slot: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(1)
+            } else {
+                None
+            },
+            normal_vertex_stride: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(12)
+            } else {
+                None
+            },
+            normal_shader_location: if matches!(
+                self,
+                Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
+            ) {
+                Some(1)
+            } else {
+                None
+            },
             recipe_version: 1,
         }
     }
@@ -1360,6 +1542,14 @@ impl RasterKernel {
          @vertex fn camera_material_texture_uv_linear_clamp_srgb_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.uv); }\n\
          @fragment fn linear_clamp_srgb_texture_color_fragment(input: VertexOutput) -> @location(0) vec4<f32> { return frame.base_color * textureSampleLevel(tex, linear_clamp_sampler, input.uv, 0.0); }"
             }
+            Self::IndexedPositionFloat32x3CameraMaterialNormalLambert => {
+                "struct FrameUniforms { view_projection: mat4x4<f32>, base_color: vec4<f32>, };\n\
+         @group(0) @binding(0) var<uniform> frame: FrameUniforms;\n\
+         struct VertexInput { @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, };\n\
+         struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) @interpolate(perspective, center) normal: vec3<f32>, };\n\
+         @vertex fn camera_material_normal_lambert_vertex(input: VertexInput) -> VertexOutput { return VertexOutput(frame.view_projection * vec4(input.position, 1.0), input.normal); }\n\
+         @fragment fn normal_lambert_fragment(input: VertexOutput) -> @location(0) vec4<f32> { let len2 = dot(input.normal, input.normal); if (len2 > 0.0) { let lambert = max(dot(input.normal * inverseSqrt(len2), vec3<f32>(0.0, 0.0, 1.0)), 0.0); return vec4<f32>(frame.base_color.rgb * lambert, frame.base_color.a); } return vec4<f32>(vec3<f32>(0.0), frame.base_color.a); }"
+            }
         }
     }
 
@@ -1371,6 +1561,7 @@ impl RasterKernel {
                 | Self::IndexedPositionFloat32x3CameraMaterialTextureUv
                 | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClamp
                 | Self::IndexedPositionFloat32x3CameraMaterialTextureUvLinearClampSrgb
+                | Self::IndexedPositionFloat32x3CameraMaterialNormalLambert
         )
     }
 }
@@ -1486,6 +1677,39 @@ struct RasterUvLinearClampTextureBindingsShared {
     device: fluxel_rendergraph::DeviceIdentity,
 }
 
+struct RasterNormalBindingsShared {
+    _native: crate::imp::NativeRasterUniformBindings,
+    pipeline: RasterPipeline,
+    _uniform: BufferLease,
+    _positions: BufferLease,
+    _normals: BufferLease,
+    position_identity: PhysicalResourceIdentity,
+    normal_identity: PhysicalResourceIdentity,
+    vertex_count: u32,
+    device: fluxel_rendergraph::DeviceIdentity,
+}
+
+/// Closed camera/material plus position-and-normal binding for the fixed
+/// object-space Lambert artifact. Both vertex stream identities are retained
+/// so recording cannot exchange their roles.
+#[derive(Clone)]
+pub struct RasterNormalBindings(Arc<RasterNormalBindingsShared>);
+
+/// Strong lease retaining the normal-Lambert binding and every referenced
+/// resource through terminal completion.
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "retained through ResourceLease for terminal native completion"
+)]
+pub struct RasterNormalBindingsLease(Arc<RasterNormalBindingsShared>);
+
+impl fmt::Debug for RasterNormalBindingsLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RasterNormalBindingsLease(..)")
+    }
+}
+
 /// Closed explicit-UV binding with an internally owned filtering linear-clamp
 /// sampler. The sampler is not a graph resource or a configurable public API.
 #[derive(Clone)]
@@ -1547,6 +1771,8 @@ pub enum ResourceLease {
     RasterUvTextureBindings(RasterUvTextureBindingsLease),
     /// Retains the closed explicit-UV linear-clamp sampler binding.
     RasterUvLinearClampTextureBindings(RasterUvLinearClampTextureBindingsLease),
+    /// Retains the closed normal-Lambert binding and both vertex streams.
+    RasterNormalBindings(RasterNormalBindingsLease),
     /// Retains the closed sampled-texture-to-storage-buffer binding object.
     TexturePackBindings(TexturePackBindingsLease),
 }
@@ -1696,6 +1922,12 @@ impl From<RasterUvTextureBindingsLease> for ResourceLease {
 impl From<RasterUvLinearClampTextureBindingsLease> for ResourceLease {
     fn from(value: RasterUvLinearClampTextureBindingsLease) -> Self {
         Self::RasterUvLinearClampTextureBindings(value)
+    }
+}
+
+impl From<RasterNormalBindingsLease> for ResourceLease {
+    fn from(value: RasterNormalBindingsLease) -> Self {
+        Self::RasterNormalBindings(value)
     }
 }
 
@@ -2128,6 +2360,36 @@ impl RasterUvLinearClampTextureBindings {
     }
 }
 
+impl RasterNormalBindings {
+    /// Returns the only normal-Lambert pipeline accepted by this binding.
+    pub fn pipeline(&self) -> &RasterPipeline {
+        &self.0.pipeline
+    }
+    /// Returns the physical generation required at vertex slot zero.
+    pub fn position_identity(&self) -> PhysicalResourceIdentity {
+        self.0.position_identity
+    }
+    /// Returns the physical generation required at vertex slot one.
+    pub fn normal_identity(&self) -> PhysicalResourceIdentity {
+        self.0.normal_identity
+    }
+    /// Returns the exact number of vertices represented by both streams.
+    pub fn vertex_count(&self) -> u32 {
+        self.0.vertex_count
+    }
+    /// Returns the owning device identity.
+    pub fn device_identity(&self) -> fluxel_rendergraph::DeviceIdentity {
+        self.0.device
+    }
+    /// Acquires a terminal-lifetime lease for the complete binding.
+    pub fn lease(&self) -> RasterNormalBindingsLease {
+        RasterNormalBindingsLease(Arc::clone(&self.0))
+    }
+    pub(crate) fn native(&self) -> &crate::imp::NativeRasterUniformBindings {
+        &self.0._native
+    }
+}
+
 impl TexturePackBindings {
     /// Returns the `TexturePackRgba8` pipeline selected during creation.
     pub fn pipeline(&self) -> &ComputePipeline {
@@ -2502,6 +2764,72 @@ impl Device {
         )))
     }
 
+    /// Creates the closed normal-Lambert binding. It fixes both vertex stream
+    /// roles and exact whole-stream ranges before the native recording edge.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the closed ABI independently receives uniform, position, normal, and count"
+    )]
+    pub fn create_raster_normal_bindings(
+        &self,
+        pipeline: &RasterPipeline,
+        uniform: &Buffer,
+        positions: &Buffer,
+        normals: &Buffer,
+        vertex_count: u32,
+    ) -> Result<RasterNormalBindings, RasterCreateError> {
+        if pipeline.kernel() != RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert {
+            return Err(RasterCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity
+            || uniform.device_identity() != self.identity
+            || positions.device_identity() != self.identity
+            || normals.device_identity() != self.identity
+        {
+            return Err(RasterCreateError::ForeignDevice);
+        }
+        validate_raster_uniform_contract(
+            pipeline.kernel(),
+            uniform.descriptor().buffer.size,
+            uniform.allowed_usage(),
+        )?;
+        let stream_size = u64::from(vertex_count)
+            .checked_mul(12)
+            .ok_or(RasterCreateError::VertexStreamCountMismatch)?;
+        if vertex_count == 0 || positions.descriptor().buffer.size != stream_size {
+            return Err(RasterCreateError::InvalidPositionStreamRange);
+        }
+        if normals.descriptor().buffer.size != stream_size {
+            return Err(RasterCreateError::InvalidNormalStreamRange);
+        }
+        if !positions.allowed_usage().contains(BufferUsageKind::Vertex)
+            || !normals.allowed_usage().contains(BufferUsageKind::Vertex)
+        {
+            return Err(RasterCreateError::VertexUsageRequired);
+        }
+        let native = crate::imp::create_raster_normal_bindings(
+            &self.inner,
+            pipeline.native(),
+            uniform.native(),
+            positions.identity(),
+            stream_size,
+            normals.identity(),
+            stream_size,
+        )
+        .map_err(RasterCreateError::NativeFailure)?;
+        Ok(RasterNormalBindings(Arc::new(RasterNormalBindingsShared {
+            _native: native,
+            pipeline: pipeline.clone(),
+            _uniform: uniform.lease(),
+            _positions: positions.lease(),
+            _normals: normals.lease(),
+            position_identity: positions.identity(),
+            normal_identity: normals.identity(),
+            vertex_count,
+            device: self.identity,
+        })))
+    }
+
     /// Creates the only uniform-plus-whole-texture binding accepted by the textured raster artifact.
     pub fn create_raster_texture_bindings(
         &self,
@@ -2842,7 +3170,11 @@ fn validate_raster_uniform_contract(
     size: u64,
     usage: BufferUsage,
 ) -> Result<(), RasterCreateError> {
-    if kernel != RasterKernel::IndexedPositionFloat32x3CameraMaterial {
+    if !matches!(
+        kernel,
+        RasterKernel::IndexedPositionFloat32x3CameraMaterial
+            | RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert
+    ) {
         return Err(RasterCreateError::BindingRecipeMismatch);
     }
     if size != 80 {
@@ -3645,6 +3977,60 @@ mod tests {
             ),
             Err(RasterCreateError::UniformUsageRequired)
         );
+        assert_eq!(
+            validate_raster_uniform_contract(
+                RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert,
+                80,
+                uniform,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn normal_lambert_identity_is_closed_and_additive() {
+        let legacy = format!(
+            "{:?}",
+            RasterKernel::IndexedPositionFloat32x3.portable_identity()
+        );
+        assert!(!legacy.contains("lighting_recipe_version"));
+        let identity =
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert.portable_identity();
+        assert_eq!(
+            identity.vertex_layout,
+            RasterVertexLayout::PositionFloat32x3AndNormalFloat32x3
+        );
+        assert_eq!(identity.binding_count, 1);
+        assert_eq!(identity.uniform_binding_size, 80);
+        assert_eq!(identity.lighting_recipe_version, 1);
+        assert_eq!(
+            identity.normal_interpolation,
+            Some(RasterNormalInterpolation::PerspectiveCenter)
+        );
+        assert_eq!(
+            identity.normal_normalization,
+            Some(RasterNormalNormalization::ExactPositiveUnitAfterInterpolationZeroLambert)
+        );
+        assert_eq!(identity.lighting_space, Some(RasterLightingSpace::Object));
+        assert_eq!(
+            identity.fixed_light_direction,
+            Some(RasterFixedLightDirection::PositiveZ)
+        );
+        assert_eq!(
+            identity.lighting_model,
+            Some(RasterLightingModel::LambertRgbAlphaPassthrough)
+        );
+        assert_eq!(identity.position_vertex_slot, Some(0));
+        assert_eq!(identity.position_shader_location, Some(0));
+        assert_eq!(identity.normal_vertex_slot, Some(1));
+        assert_eq!(identity.normal_vertex_stride, Some(12));
+        assert_eq!(identity.normal_shader_location, Some(1));
+        assert!(format!("{identity:?}").contains("lighting_recipe_version"));
+        let source =
+            RasterKernel::IndexedPositionFloat32x3CameraMaterialNormalLambert.wgsl_source();
+        assert!(source.contains("len2 > 0.0"));
+        assert!(source.contains("inverseSqrt(len2)"));
+        assert!(source.contains("frame.base_color.a"));
     }
 
     #[test]

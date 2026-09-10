@@ -829,6 +829,21 @@ mod imp {
     ) -> Result<NativeRasterUniformBindings, String> {
         Err("native raster is only supported on Windows".into())
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the closed native normal recipe passes all independently validated role facts"
+    )]
+    pub(super) fn create_raster_normal_bindings(
+        _: &Arc<OpenedDevice>,
+        _: &NativeRasterPipeline,
+        _: &OwnedBuffer,
+        _: fluxel_rendergraph::PhysicalResourceIdentity,
+        _: u64,
+        _: fluxel_rendergraph::PhysicalResourceIdentity,
+        _: u64,
+    ) -> Result<NativeRasterUniformBindings, String> {
+        Err("native raster is only supported on Windows".into())
+    }
     pub(super) fn create_raster_texture_bindings(
         _: &Arc<OpenedDevice>,
         _: &NativeRasterPipeline,
@@ -990,6 +1005,7 @@ mod imp {
         _: u32,
         _: fluxel_rendergraph::PhysicalResourceIdentity,
         _: Option<&NativeRasterTextureBindings>,
+        _: Option<&NativeRasterUniformBindings>,
     ) -> Result<(), String> {
         Err("native raster is only supported on Windows".into())
     }

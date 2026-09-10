@@ -33,7 +33,7 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.6"
+tag = "v0.2.7"
 ```
 
 The crate is not published on crates.io yet, so the tagged Git dependency is
@@ -45,7 +45,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.6"
+tag = "v0.2.7"
 default-features = false
 features = ["dx12"]
 ```
@@ -140,6 +140,14 @@ artifact. Encoded upload bytes are preserved, the sampled native view performs
 per-texel sRGB decode before filtering, alpha remains linear, and the color
 target remains `Rgba8Unorm`. sRGB linear-filter support is queried as its own
 raw adapter fact and is never inferred from the UNORM format.
+
+The 0.6.0 RHI API adds a separate non-textured normal-Lambert artifact. Slot 0
+is tight position `f32x3`, slot 1 is tight canonical unit normal `f32x3`, and
+the existing 80-byte camera/material uniform remains the only binding. The
+shader perspective-interpolates the object-space normal, normalizes it only
+when its exact squared length is positive, applies fixed `+Z` Lambert to RGB,
+and preserves alpha. Strong portable identity and safe/native role validation
+keep this recipe distinct from every UV layout.
 
 For reproducible DX12 validation the workspace carries the upstream
 gfx-rs/wgpu#10221 fix on its vendored `wgpu-hal` 30.0.1 source. See
