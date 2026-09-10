@@ -4,7 +4,7 @@
 RHI boundary, and renderer layer. It is the ecosystem's GPU and renderer
 foundation; cross-frame assets, loading, platform services, runtime packaging,
 and JavaScript APIs belong to adjacent Fluxel libraries described in the
-[Fluxel ecosystem map](documents/fluxel-ecosystem.md).
+[Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/profile/README.md).
 
 ## Workspace
 
@@ -40,7 +40,7 @@ this file is only the workspace entry point.
 - [RHI design](documents/design-rhi.md)
 - [Renderer design](documents/design-renderer.md)
 - [Architecture decisions](documents/adr/README.md)
-- [Fluxel ecosystem map](documents/fluxel-ecosystem.md)
+- [Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/profile/README.md)
 - [RenderGraph guide](crates/rendergraph/README.md)
 - [RHI guide](crates/rhi/README.md)
 
@@ -63,7 +63,7 @@ real-GPU conformance remains an explicit local release gate.
 This roadmap covers this workspace only. Near-term work is deliberately more
 specific than distant direction; no item is a version or schedule commitment.
 For ownership outside the renderer workspace, see the
-[Fluxel ecosystem map](documents/fluxel-ecosystem.md).
+[Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/profile/README.md).
 
 ### Current — Renderer submission model
 
