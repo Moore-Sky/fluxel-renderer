@@ -1,3 +1,5 @@
+//! Integration tests for range-aware hazards and same-state memory dependencies.
+
 use fluxel_rendergraph::*;
 
 fn capabilities() -> DeviceCapabilities {

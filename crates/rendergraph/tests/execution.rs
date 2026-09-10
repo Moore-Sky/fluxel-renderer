@@ -1,3 +1,5 @@
+//! Integration tests for serial plan execution, exports, and lease retirement.
+
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},

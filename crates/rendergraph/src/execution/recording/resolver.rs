@@ -1,4 +1,8 @@
-//! Binding-resource declaration checks.
+//! Resolves declared graph resources into one pass-local binding ticket namespace.
+//!
+//! Access-mode filtering here is intentionally coarse: it proves only read versus
+//! write capability. Exact recipe semantics and pipeline compatibility remain the
+//! `RenderObjectProvider::bindings` responsibility.
 
 use crate::internal::AccessDecl;
 
@@ -160,6 +164,8 @@ where
             ));
         }
         let mut bindings = self.session.bindings.borrow_mut();
+        // Tickets are meaningful only with this session nonce. The stored binding
+        // and its lease outlive callback scope and move into submission retirement.
         let ticket = bindings.len() as u64;
         bindings.push(binding);
         Ok((ticket, self.session.session))

@@ -11,7 +11,7 @@ It is deliberately a narrow native boundary, not a general graphics API.
 adds only closed `ComputeKernel` artifacts and their single RW storage-buffer
 binding recipe. `RasterBackend` adds only the fixed R01/R02 raster artifacts,
 the closed U02 renderer snapshot recipe, its closed U03 Camera/material-uniform
-variant, the closed 0.2.3 uniform-plus-texture raster variant, and the closed X01 texture-pack
+variant, the closed uniform-plus-texture raster variant, and the closed X01 texture-pack
 compute recipe needed for one
 Raster→Compute→Copy chain. It does **not** expose general mapping/readback,
 acquire or present a surface, a general shader/pipeline API, renderer lowering,
@@ -33,19 +33,15 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.7"
 ```
 
-The crate is not published on crates.io yet, so the tagged Git dependency is
-the current installation path. `v0.1.0` begins this workspace's independent
-release sequence from a pre-migration source snapshot. The default feature set
-enables both Windows backends.
+The crate is not published on crates.io yet, so the Git dependency is the
+current installation path. The default feature set enables both Windows backends.
 To select one explicitly:
 
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.7"
 default-features = false
 features = ["dx12"]
 ```
@@ -114,20 +110,20 @@ static group-0/binding-0 uniform: column-major `projection * view` and linear
 RGBA base color, visible to both vertex and fragment stages. Its opaque binding
 is device- and pipeline-affine, retains matching pipeline and buffer leases
 through completion, and accepts no dynamic offset or configurable binding
-layout. The 0.2.3 variant adds a fragment-visible whole `texture_2d<f32>` at
+layout. The textured variant adds a fragment-visible whole `texture_2d<f32>` at
 binding 1 and a fixed mip-zero integer `textureLoad` mapping; its portable
 identity explicitly records binding numbers, visibility, dimension, format,
 sample type, mip and mapping version. It does not add a sampler. Neither recipe
 makes those choices configurable.
 
-The 0.3.0 RHI API adds one further closed raster artifact for renderer 0.2.4:
+The explicit-UV raster artifact uses two vertex streams:
 slot 0 is tightly packed `f32x3` position at shader location 0 and slot 1 is
 tightly packed `f32x2` texture coordinate at location 1. Its binding retains
 the expected physical identities for both streams, and safe/native recording
 rejects swapped, missing, repeated, partial, or foreign roles before submission.
 It preserves the same no-sampler mip-zero `textureLoad` fragment recipe.
 
-The 0.4.0 RHI API adds a separate explicit-UV linear-clamp artifact. Its
+The explicit-UV linear-clamp artifact has a
 binding layout fixes a filterable `Rgba8Unorm` texture and a private filtering
 sampler, while its shader uses explicit level zero. The opaque binding owns the
 sampler through terminal completion; it is neither a public descriptor nor a
@@ -135,13 +131,13 @@ RenderGraph resource. Adapter `SAMPLED_LINEAR` support is reported as a raw
 fact, propagated into the graph fingerprint, and rechecked before native
 creation.
 
-The 0.5.0 RHI API adds a type-distinct `Rgba8UnormSrgb` variant of that closed
+The type-distinct `Rgba8UnormSrgb` artifact preserves that closed
 artifact. Encoded upload bytes are preserved, the sampled native view performs
 per-texel sRGB decode before filtering, alpha remains linear, and the color
 target remains `Rgba8Unorm`. sRGB linear-filter support is queried as its own
 raw adapter fact and is never inferred from the UNORM format.
 
-The 0.6.0 RHI API adds a separate non-textured normal-Lambert artifact. Slot 0
+The non-textured normal-Lambert artifact uses slot 0
 is tight position `f32x3`, slot 1 is tight canonical unit normal `f32x3`, and
 the existing 80-byte camera/material uniform remains the only binding. The
 shader perspective-interpolates the object-space normal, normalizes it only
@@ -212,7 +208,7 @@ configuration.
 The conformance fixtures collect DX12 information-queue and Vulkan validation
 diagnostics programmatically while checking command states and synchronization.
 C01/C02/C03 cover Copy and K01/K02 cover fixed Compute. R01, R02, and X01 are
-the fixed Raster→Compute→Copy release fixtures. On the recorded 0.1.4 AMD
+the fixed Raster→Compute→Copy release fixtures. On the recorded AMD
 Radeon 780M hardware, each passes its exact CPU oracle on DX12 and Vulkan with
 collected Required-validation diagnostics empty.
 
@@ -237,7 +233,7 @@ The current scope ends after fixed Raster, Compute, and Copy transition/order
 lowering, command recording, one submission, completion, lease retirement, and
 crate-private exact test readback. A readback consumes the export's reported
 outgoing state as its real incoming state; it cannot silently repair a
-graph-state bug. The 0.1.4 lifetime/error/unsafe freeze requires all pipeline,
+graph-state bug. The lifetime/error/unsafe contract requires all pipeline,
 binding, attachment, encoder, command-buffer, and resource leases to survive
 until terminal completion; rejected and accepted-unknown submission paths stay
 distinct.

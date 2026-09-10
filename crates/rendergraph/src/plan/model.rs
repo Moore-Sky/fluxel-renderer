@@ -1,3 +1,5 @@
+//! Defines the immutable execution-plan data model exposed to portable backends.
+
 use core::fmt;
 
 use crate::{

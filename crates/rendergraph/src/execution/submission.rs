@@ -71,6 +71,9 @@ impl<B: ExecutionBackend> Drop for FrameSubmission<B> {
         let Some(completion) = self.completion.take() else {
             return;
         };
+        // Dropping the public handle cannot release resources still referenced
+        // by accepted GPU work. Transfer completion plus leases into the shared
+        // inbox; the executor will retire them only after a terminal query.
         let leases = self.leases.take().unwrap_or_default();
         lock_inbox(&self.retirement_inbox).push(PendingRetirement { completion, leases });
     }
@@ -96,6 +99,8 @@ pub(crate) fn try_lock_backend<B>(backend: &Arc<Mutex<B>>) -> Result<MutexGuard<
 fn lock_inbox<B: ExecutionBackend>(
     inbox: &RetirementInbox<B>,
 ) -> MutexGuard<'_, Vec<PendingRetirement<B>>> {
+    // A producer panic cannot invalidate already-owned completion/lease pairs.
+    // Recover the inner queue so they remain conservatively retained.
     inbox
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

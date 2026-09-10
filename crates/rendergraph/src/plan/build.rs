@@ -1,3 +1,9 @@
+//! Lowers retained declarations into the backend-neutral immutable execution plan.
+//!
+//! Queue selection uses the same capability predicate already validated by compilation,
+//! while resource requirements include both pass accesses and import/export boundary
+//! states so physical objects authorize the entire frame contract.
+
 use std::collections::HashMap;
 
 use crate::{
@@ -151,6 +157,8 @@ fn resource_requirements<F>(
             ResourceOrigin::BufferImport(_, contract) => Some(contract.initial_state),
             ResourceOrigin::Transient | ResourceOrigin::Surface(_, _) => None,
         };
+        // The imported incoming state is an actual operation requirement, not
+        // metadata: the bound physical object must have been created for it.
         if let Some(state) = initial_state {
             add_usage(
                 usages.get_mut(&resource.id).expect("resource usage exists"),

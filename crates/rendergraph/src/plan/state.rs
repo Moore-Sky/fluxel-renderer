@@ -1,3 +1,10 @@
+//! Derives range-partitioned resource state and visibility transitions.
+//!
+//! Buffer partitions are fixed from every declared access and exported boundary before
+//! lowering starts, so later transitions cannot skip a range boundary. Equal native
+//! states still require a transition when either access writes: that transition carries
+//! memory ordering/visibility semantics rather than a state-layout change.
+
 use std::collections::{BTreeSet, HashMap};
 
 use crate::{
@@ -124,6 +131,8 @@ impl TextureState {
         for (mip, layer, aspect) in texture_keys(self.descriptor, range) {
             let previous = self.states[&(mip, layer, aspect)];
             let before = previous.state;
+            // Same-state write hazards still need a memory dependency; a state
+            // equality check alone is not a sufficient ordering proof.
             if before != after || previous.last_access_wrote || mode != AccessMode::Read {
                 transitions.push(PlannedTransition {
                     resource,

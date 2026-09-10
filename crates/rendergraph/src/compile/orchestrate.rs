@@ -1,3 +1,9 @@
+//! Orchestrates validation, dependency discovery, liveness, and immutable plan lowering.
+//!
+//! Reference validation must precede graph traversal. RAW producer edges plus explicit
+//! order/root edges define the reverse liveness closure; only after that closure is
+//! stable may WAR edges be added, otherwise a dead reader could become observable.
+
 use super::*;
 
 pub(crate) fn compile_graph<F>(

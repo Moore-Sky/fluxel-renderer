@@ -22,7 +22,9 @@ use crate::{
     pass::PassKind,
     plan::{ExecutionPlan, build_execution_plan},
     resource::InitialContents,
-    rhi::{DeviceCapabilities, ResourceAccessState, TextureDimension, TextureFormat},
+    rhi::{
+        DeviceCapabilities, ExternalOwnership, ResourceAccessState, TextureDimension, TextureFormat,
+    },
 };
 
 mod dependency;

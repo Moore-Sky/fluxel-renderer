@@ -1,3 +1,5 @@
+//! Integration tests for dependency inference, culling, ordering, and plan stability.
+
 use fluxel_rendergraph::*;
 use std::sync::{
     Arc,

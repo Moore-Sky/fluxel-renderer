@@ -54,14 +54,4 @@ const BASIC_VERTEX_SOURCE: &str = "// BasicMaterial vertex shader is not impleme
 const BASIC_FRAGMENT_SOURCE: &str = "// BasicMaterial fragment shader is not implemented yet.";
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn basic_material_keeps_stage_specific_source_boundaries() {
-        let modules = basic_material_modules();
-        assert_eq!(modules[0].stage(), ShaderStage::Vertex);
-        assert_eq!(modules[1].stage(), ShaderStage::Fragment);
-        assert!(modules.iter().all(|module| !module.source().is_empty()));
-    }
-}
+mod tests;

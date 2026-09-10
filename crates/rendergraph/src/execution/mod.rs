@@ -1,10 +1,17 @@
-//! Reusable per-frame graph instances and single-queue execution.
+//! Instantiates immutable graphs and executes them as serial single-queue frame transactions.
+//!
+//! This layer owns frame inputs, resource resolution, portable transition lowering, callback
+//! recording, and lease retirement; native objects and backend-specific synchronization remain
+//! behind [`ExecutionBackend`](crate::backend::ExecutionBackend). One execution is bound to the
+//! compiled graph identity and one backend lock spans resolution through submission, preventing
+//! re-entrant callbacks and partial submissions. Recording and submission collaborate here by
+//! retaining every resolved lease until the backend reports GPU completion.
 
 mod recording;
 mod run;
 mod submission;
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, rc::Rc};
 
 use crate::{
     CompiledGraph,
@@ -17,10 +24,24 @@ pub use run::{ExecutedFrame, ExportedBuffer, ExportedTexture, FrameExecutor, Fra
 pub use submission::FrameSubmission;
 
 /// Owner-thread recording mode for thread-bound backends and frame data.
+///
+/// The `Rc` marker makes [`FrameExecution`] instantiated in this mode `!Send`
+/// even when its frame data is `Send`. This keeps a frame tied to the thread
+/// that owns an immediate-context backend; use [`SendMode`] for work that may
+/// cross threads.
+///
+/// ```compile_fail
+/// use fluxel_rendergraph::{FrameExecution, Local};
+///
+/// fn requires_send<T: Send>() {}
+/// requires_send::<FrameExecution<(), Local>>();
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Local;
+pub struct Local(PhantomData<Rc<()>>);
 
 /// Cross-thread recording mode for frame data shared by independent jobs.
+///
+/// `FrameExecution<F, SendMode>` is `Send` when `F` is `Send`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SendMode;
 
@@ -79,6 +100,9 @@ impl<F> FrameInputs<F> {
 /// One independent, not-yet-submitted instantiation of a compiled plan.
 ///
 /// CPU completion is distinct from the GPU completion returned after submit.
+/// Its mode parameter carries the thread-affinity contract selected by the
+/// constructor: [`Local`] is owner-thread-only and [`SendMode`] may move when
+/// its frame data may move.
 pub struct FrameExecution<F, M> {
     pub(crate) graph_identity: u64,
     pub(crate) inputs: FrameInputs<F>,
@@ -117,3 +141,6 @@ impl<F, M> FrameExecution<F, M> {
         &self.inputs.frame_data
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,199 +1,321 @@
 # Fluxel Renderer design
 
-**Status: 0.2.7 fixed headless normal-Lambert draw**
+## Purpose
 
-`fluxel-renderer` is the application-facing layer that will translate scene
-inputs into render-graph declarations and renderer/RHI-owned objects. The
-0.1 established that ownership boundary with `Camera`, `Geometry`, `Mesh`,
-`BasicMaterial`, and `DrawList`. The opt-in 0.2.0 slice adds immutable
-indexed-geometry upload and readiness publication. The 0.2.1 slice consumes one
-ready snapshot in a closed headless indexed draw; it still does not lower a
-`DrawList` or expose a general renderer pipeline.
+`fluxel-renderer` is the application-facing, headless renderer layer in the
+Fluxel workspace. It owns renderer policy: it accepts typed scene-domain data,
+coordinates immutable GPU snapshots, selects one proven raster contract, and
+declares the corresponding frame graph. It never exposes native handles to its
+callers.
 
-## Responsibility split
+The crate provides portable domain objects (`Camera`, `Geometry`, `Mesh`,
+`BasicMaterial`, and insertion-ordered `DrawList`); opt-in non-blocking uploads
+that publish immutable mesh and texture snapshots after GPU completion; and six
+closed indexed-draw contracts which yield opaque offscreen `FrameImage`
+metadata after completion. The default crate has no graphics-backend dependency;
+GPU coordination and fixed drawing require the `gpu-upload` feature.
+
+This document is a description of the current system, not a release history.
+The reasons for durable architectural choices are in the
+[ADRs](adr/README.md).
+
+## Layer boundaries
 
 ```text
-application / scene
-        |
-        v
-fluxel-renderer       Camera, mesh/material inputs, draw-list policy
-        |
-        +--> fluxel-rendergraph   per-frame access and execution planning
-        |
-        +--> fluxel-rhi           immutable upload + native resources/commands
-
-fluxel-assets         persistent identity, loading, cache, lifetime
+application
+    | Camera, Geometry, Mesh, BasicMaterial, upload inputs
+    v
+fluxel-renderer
+    | snapshot lifetime, fixed draw policy, graph declaration
+    v
+fluxel-rendergraph
+    | validate declarations, derive dependencies/transitions, immutable plan
+    v
+fluxel-rhi
+    | resources, native recording/submission/completion, DX12/Vulkan
+    v
+native GPU API
 ```
 
-The renderer owns scene-to-frame policy: which objects are visible, how they
-are ordered, which material/pipeline recipe they need, and which graph passes
-are declared. RenderGraph owns the dependency facts after declaration. RHI owns
-native objects and unsafe API calls. Assets remains a sibling project because
-persistent identity and loading policy must not become frame-graph state.
+The renderer chooses *what* one fixed frame means: it creates
+renderer-owned declarations, imports ready snapshots, binds a closed RHI
+artifact, and translates completion into renderer-visible status.
 
-## Why the first model is headless
+RenderGraph owns portable resource-access semantics. It validates declarations,
+derives dependencies and state transitions, culls unused work, and creates an
+immutable `ExecutionPlan`. It does not own assets, materials, native objects,
+barriers, submission, or readback implementation.
 
-Native Copy, Compute, and Raster conformance was established by the 0.1.x fixed
-execution slices before renderer draw work began. A windowed façade before
-Surface/Present would still hide unimplemented behavior or force scene policy
-into the RHI, so the current renderer remains headless.
+RHI owns the native boundary: allocation, resource leases, native recording,
+one-queue submission, completion observation, and all HAL/unsafe code.
+Renderer code sees only safe opaque RHI types and the fixed
+`RasterBackend`/`RasterKernel` contract.
 
-`Geometry` owns CPU vertex positions and optional validated indices.
-`Mesh` pairs geometry with a material. `DrawList` borrows meshes and a
-camera for one preparation scope and preserves insertion order. Borrowing makes
-the initial lifetime rule explicit and avoids inventing an asset handle system
-that belongs to `fluxel-assets`.
+Persistent asset identity, loading, cache eviction, and hot reload are outside
+the graph. An asset system may resolve a ready GPU generation before frame
+construction, but it is not a graph node or graph resource owner. See
+[ADR-0001](adr/0001-assets-outside-rendergraph.md).
 
-The initial types keep fields private and expose constructors plus accessors.
-That leaves room to add attributes, transforms, material parameters, and
-renderer-owned identifiers without committing callers to exhaustive struct
-literals.
+## Non-goals and current limits
 
-## Shader boundary
+The current renderer intentionally has no:
 
-`shader` is private to the renderer. In 0.1.0 it only establishes
-stage-specific module selection for `BasicMaterial`; shader compilation,
-reflection, variants, pipeline layouts, and caching are intentionally absent.
+- `DrawList` lowering, frame packets, stable asset/resource handles, or cache;
+- arbitrary shaders, reflection, pipeline layouts, bindings, vertex layouts,
+  samplers, views, or material parameters;
+- per-draw transforms, lights, depth, blending, culling, batching, instancing,
+  PBR, animation, or scene-file loading;
+- Surface acquisition, presentation, resize, or lost-surface recovery; or
+- multi-queue scheduling, parallel recording, aliasing, or performance policy.
 
-Keeping this module private prevents compiler-specific source and reflection
-types from becoming public renderer API before the DX12/Vulkan pipeline
-requirements are known. The first real shader API must be driven by the
-Compute/Raster readback slices and expose only facts the renderer needs.
+The fixed API is a correctness vertical slice, not an early general pipeline
+API. See [ADR-0006](adr/0006-no-general-pipeline-yet.md) and
+[ADR-0007](adr/0007-closed-fixed-renderer-recipes.md).
 
-## Future asset and frame coordination
+## Module map
 
-0.2.0 makes the first part concrete. `IndexedMeshUpload` owns two non-blocking
-RHI operations for tightly packed position `f32x3` and index `u32` buffers. A
-snapshot generation becomes Ready only when both completions succeed. If the
-first submission was accepted and the second cannot start, the failed owning
-operation still retains and retires the first; a partial generation is never
-published. The cloneable snapshot exposes generation and element counts to the
-application, while buffers, leases, and their reported `CopyDestination` state
-remain private for the next lowering slice.
+```text
+crates/renderer/src/
+  lib.rs                 public domain model and feature-gated facade
+  shader/                private stage-selection boundary
+  frame_uniform.rs       fixed camera/material uniform ABI
+  upload/
+    indexed.rs           position/index snapshot upload and publication
+    textured.rs          position/index/UV snapshot upload and publication
+    normal.rs            position/index/normal snapshot upload and publication
+    texture/             separate linear-UNORM and sRGB texture domains
+    shared.rs            generation allocation and snapshot-use gate
+  fixed_frame/
+    recipe.rs            six closed renderer-to-RHI raster mappings
+    renderer.rs          draw-start validation and executor setup
+    graph.rs             graph declarations and resource-provider bindings
+    submission.rs        two-phase submission/completion lifecycle
+    ids.rs               private fixed pipeline and binding identifiers
+    fixtures/            hardware CPU-oracle conformance fixtures
+```
 
-Four ownership classes stay distinct:
+Each module has one responsibility. The `mod.rs` files are facades that retain
+public paths rather than accumulating implementation logic. `shader` is a
+private boundary, not a public shader system: it keeps stage selection out of
+the public domain API until a supported renderer shader contract exists.
 
-- asset-owned persistent resources carry source identity, cache state, and hot
-  reload generations;
-- renderer-owned persistent resources carry pipeline/material recipes and
-  renderer caches;
-- graph transients belong to one compiled frame plan;
-- surface-owned images belong to acquisition and presentation.
+## Domain model and public API boundary
 
-The renderer resolves a GPU-ready immutable asset snapshot once while building
-a frame. Every pass in that frame uses the same physical generation, and the
-snapshot's lease survives until the corresponding GPU completion. Hot reload
-or eviction publishes a new generation first; the old generation retires only
-after its last lease and GPU use complete. If an asset is not ready, renderer
-policy chooses an older generation, fallback, or skip instead of blocking the
-frame-building thread.
+`Camera` stores column-major view and projection matrices. `BasicMaterial`
+stores a linear RGBA base color. `Geometry` owns CPU `f32x3` positions and may
+own validated `u32` indices; `Mesh` pairs one geometry with one basic material.
+Fields are private, so constructors and accessors, not struct literals, define
+the supported contract.
 
-A resource used in the same frame as its upload must eventually enter through
-an explicit graph Copy pass or an external GPU dependency. CPU waiting between
-passes is not an ownership mechanism.
+`DrawList<'a>` borrows a camera and meshes for one preparation scope and
+preserves insertion order. It is currently typed submission input only: it does
+not create a graph, allocate GPU memory, sort, cull, or draw. This avoids
+presenting a borrowed transition model as a stable handle-based renderer ABI.
 
-The frame coordinator also owns persistent state reconciliation. It queries the
-known incoming state when binding an import and commits the exported state only
-after accepted submission. A failed submit must not publish a guessed state.
-Concurrent frames need queue ordering or an explicit GPU dependency; one global
-`last_state` value cannot safely represent overlapping use.
+With `gpu-upload`, the crate also exposes opaque-ready resource families:
 
-## Fixed headless frame
+| Input domain | Upload operation | Ready snapshot | Fixed stream ABI |
+| --- | --- | --- | --- |
+| indexed geometry | `IndexedMeshUpload` | `IndexedMeshSnapshot` | position `f32x3`, index `u32` |
+| indexed geometry plus UV | `TexturedIndexedMeshUpload` | `TexturedIndexedMeshSnapshot` | position `f32x3`, index `u32`, UV `f32x2` |
+| indexed geometry plus normals | `NormalIndexedMeshUpload` | `NormalIndexedMeshSnapshot` | position `f32x3`, index `u32`, normal `f32x3` |
+| linear RGBA8 image | `BaseColorTextureUpload` | `BaseColorTextureSnapshot` | `Rgba8Unorm` |
+| sRGB RGBA8 image | `SrgbBaseColorTextureUpload` | `SrgbBaseColorTextureSnapshot` | `Rgba8UnormSrgb` |
 
-0.2.3 keeps one renderer-owned coordinator rather than general draw-list
-lowering. `FixedFrameRenderer::draw` accepts a ready `IndexedMeshSnapshot`, a
-`Camera`, a `BasicMaterial`, and an extent. It serializes the camera and
-material at start into one immutable 80-byte uniform: column-major
-`projection * view` in bytes 0..64 and linear RGBA base color in bytes 64..80.
-Inputs and their matrix product must be finite; every color component is in
-`[0, 1]`. The operation owns a non-blocking uniform upload first, then submits
-the Raster work only after that upload completes—there is no host wait between
-the two phases.
+`TexturedBasicMaterial` accepts only a linear texture snapshot, while
+`SrgbTexturedBasicMaterial` accepts only an sRGB snapshot. That type split
+prevents a draw from silently changing a texture's color-space meaning. Native
+buffers, textures, leases, imported graph handles, and RHI bindings remain
+crate-private.
 
-The Raster graph imports tightly packed `f32x3` positions and `u32` indices
-using each upload's reported `CopyDestination` state, and declares one
-offscreen `Rgba8Unorm` pass. Its closed RHI recipe has exactly one static
-group-0/binding-0, 80-byte uniform visible to vertex and fragment stages.
-Callers cannot choose arbitrary shaders, layouts, bindings, or pipeline state.
+Start and terminal errors are structured enums. `DrawStartError` and upload
+start errors report rejection before work is accepted; `FixedFrameFailure` and
+upload failure enums retain completion, observation, and later-start causes
+rather than flattening them into strings.
 
-The graph exports both immutable buffers back in `CopyDestination` after the
-draw and exports the target in `CopySource`. Clones of one snapshot generation
-share a single-in-flight reservation. Uniform-phase failure or Drop and a
-pre-Raster-submit rejection release that reservation. Proven Raster completion
-permits reuse; only an accepted Raster failure or Drop poisons the generation
-because the snapshot's native state is then not known.
-Polling never waits for the host or uses queue-idle as an ownership mechanism.
-Only opaque image extent/format/ownership becomes public after completion.
+## Immutable uploads and snapshot ownership
 
-The textured variant adds a separately uploaded immutable `Rgba8Unorm` image.
-Only proven upload completion publishes an opaque snapshot. Its graph import
-uses the reported `CopyDestination` state, declares a whole Sampled read, and
-exports the texture back to `CopyDestination`. The shader derives planar UV
-from model-space position, uses perspective-center interpolation, and performs
-a fixed clamped mip-zero integer `textureLoad`. There is no sampler contract.
-The renderer fail-closes non-finite, non-positive-w, or clipped textured input.
-Mesh and texture reservations roll back together before acceptance and are
-released or poisoned together after it.
+An upload begins native immutable uploads without a host wait. `poll()` observes
+each accepted upload non-blockingly and returns `Pending`, `Ready`, or
+structured `Failed`. A ready snapshot is cloneable and contains an opaque
+generation, immutable RHI result(s), CPU metadata used by fixed validation, and
+a shared use gate.
 
-0.2.4 keeps that path intact and adds a separate `TexturedGeometry` /
-`TexturedIndexedMeshSnapshot` generation containing positions, indices, and one
-finite `f32x2` UV per vertex. All three uploads must complete before publication.
-`draw_textured_uv` binds positions and UVs in two closed vertex slots and uses
-perspective-center interpolation before the same clamped integer mip-zero
-`textureLoad`. The typed snapshot and RHI binding retain physical stream roles,
-so equally sized generic buffers cannot be silently swapped. This still adds no
-sampler, filtering, mip selection, sRGB, normals, lighting, or PBR contract.
+Publication is atomic at the renderer level:
 
-0.2.5 keeps both integer `textureLoad` paths intact and adds a separate
-`draw_textured_uv_linear_clamp` policy. The renderer compiles each graph against
-the actual capability snapshot of the same `RasterBackend` moved into its
-executor. The new path preflights real `Rgba8Unorm` linear-filter support and
-uses a private linear-min/mag, nearest-mip, clamp-to-edge sampler with explicit
-level zero. The sampler remains an RHI-owned binding detail; the graph still
-declares only the texture's Sampled access.
+- indexed mesh: both position and index uploads complete;
+- textured mesh: position, index, and UV uploads complete;
+- normal mesh: position, index, and normal uploads complete; and
+- texture: its upload completes.
 
-Required-validation fixtures reject every collected native diagnostic except
-the exact DX12 performance-information message #820 for a missing optimized
-clear value (severity 2, category 9, matching message text). That message does
-not report an invalid command or state. The exception is deliberately matched
-on severity, category, id, and text; any other DX12 or Vulkan diagnostic still
-fails the fixture.
+If a later upload cannot start after an earlier one is accepted, the operation
+fails but continues retaining and observing accepted siblings. A partial
+generation is never published and accepted RHI work is never dropped early.
+Role-specific stream slots remain typed because position, index, UV, and normal
+failures have distinct meanings.
 
-0.2.6 keeps every linear-UNORM path unchanged and adds a type-separated
-`Rgba8UnormSrgb` base-color generation. Upload copies the encoded RGBA8 bytes
-unchanged. The new closed draw uses the same explicit-UV, explicit-level-zero,
-private linear-clamp sampler policy, but the native sRGB view decodes each RGB
-texel before filtering; alpha stays linear and the target remains linear
-`Rgba8Unorm`. UNORM and sRGB filterability are queried and fingerprinted as
-independent adapter facts. The renderer never guesses one from the other.
+Every snapshot generation has one `SnapshotUseGate`, shared by clones:
 
-0.2.7 keeps all textured paths unchanged and adds a separate non-textured
-`NormalGeometry` generation. Its immutable position/index/normal streams are
-published atomically. `draw_lambert` uses the existing linear `BasicMaterial`
-and 80-byte camera/material uniform, perspective-interpolates canonical unit
-object-space normals, safely normalizes only an exactly nonzero interpolation,
-and applies a fixed object-space `+Z` Lambert factor to RGB while preserving
-alpha. This proves the normal stream and lighting formula without introducing
-texture sampling, public light state, model/normal transforms, or PBR policy.
+```text
+Ready --reserve--> InFlight --proven complete--> Ready
+                         \--uncertain/drop-----> Poisoned
+```
 
-These slices are evidence for fixed snapshot-to-plan-to-native paths, not a
-claim that model transforms, `DrawList` lowering, configurable samplers or color spaces, further UV attributes,
-mips/LOD, lighting/PBR, depth, blending, batching, general bindings, Surface, or
-Present are implemented.
+Only one fixed draw can use a generation at once. A graph/native rejection
+before acceptance releases its reservation; proven completion also releases it.
+An accepted submission whose final outgoing state cannot be proven, or an
+accepted submission dropped before proof, permanently poisons that generation.
+This fail-closed rule prevents later work from assuming a native resource state
+which may be unknown; see [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
 
-## Evolution gates
+The generation counter is process-local opaque identity, not an asset handle or
+persistence protocol. This crate does not implement hot reload, eviction, or
+cross-frame asset selection.
 
-The next renderer changes follow evidence from the native vertical slices:
+## Fixed raster contracts
 
-1. native resource creation establishes upload and allocation facts;
-2. Copy/readback establishes geometry upload and completion ownership;
-3. Compute/readback establishes shader compilation/reflection requirements;
-4. Raster/readback establishes material, pipeline, vertex-layout, and draw
-   lowering;
-5. Surface/Present adds a visible frame boundary only after headless
-   conformance is stable.
+`FixedFrameRenderer` owns a clone of a safe `Device`, a capability snapshot,
+and a `FrameExecutor<RasterBackend>`. It compiles graphs against capabilities
+from that same executor/device. A draw start checks extent, device identity,
+index count, finite camera/material data, and its recipe preconditions before
+work is accepted.
 
-Sampler/UV/PBR, GLTF, batching, culling, animation, and platform runtime
-unification remain later renderer features. Multi-queue scheduling, recording
-caches, and transient aliasing require profiling evidence and are not implied
-by this architecture.
+Private `RasterRecipe` is the sole mapping point for six audited contracts. It
+has private fields and exactly six associated constants. A recipe atomically
+selects the RHI `RasterKernel`, fixed pipeline/binding IDs, vertex ABI, texture
+interpretation, graph shape, snapshot domain, reservation topology, and export
+topology. Callers cannot manufacture a new combination by mixing optional
+resources, shaders, layouts, or bindings.
+
+| Public start method | Vertex input | Texture operation | Shading result |
+| --- | --- | --- | --- |
+| `draw` | position, index | none | uniform base color |
+| `draw_textured` | position, index | position-derived clamped mip-zero integer `textureLoad` | texture × base color |
+| `draw_textured_uv` | position, index, UV | explicit-UV clamped mip-zero integer `textureLoad` | texture × base color |
+| `draw_textured_uv_linear_clamp` | position, index, UV | linear UNORM, linear min/mag, nearest mip, clamp-to-edge, level zero | texture × base color |
+| `draw_textured_uv_linear_clamp_srgb` | position, index, UV | sRGB view with the same fixed sampler policy | decoded/filter result × base color |
+| `draw_lambert` | position, index, normal | none | base color RGB × fixed `+Z` Lambert factor |
+
+All paths are indexed triangle draws. The fixed renderer does not expose a
+sampler, LOD, wrap mode, filter choice, vertex-slot selection, shader source,
+or pipeline-state selector. Provider/binding maps are private graph details and
+are checked against their selected recipe.
+
+## Frame declaration and execution flow
+
+```text
+ready snapshot(s) + Camera + material + extent
+  -> validate and reserve every required generation
+  -> serialize fixed uniform and build a graph declaration
+  -> compile immutable ExecutionPlan against executor capabilities
+  -> submit uniform upload (phase 1, non-blocking)
+  -> when it completes, execute raster graph (phase 2, non-blocking)
+  -> poll completion
+  -> release reservations + FrameImage, or retain terminal failure
+```
+
+The graph imports immutable streams with their reported `CopyDestination`
+outgoing state, declares vertex/index reads, imports a required texture as a
+sampled resource, creates a linear offscreen `Rgba8Unorm` target, and exports
+that target for copy-source readback. Imported snapshots are exported back in
+their declared outgoing state. RenderGraph reports portable semantics; RHI
+records transitions and fixed native commands from that plan.
+
+Uniform upload and raster execution are separate accepted operations.
+`FixedFrameSubmission::poll` does not block the CPU and starts raster only
+after uniform completion succeeds. `FrameImage` appears only after raster
+completion and reveals metadata, not a host mapping or native texture.
+CPU-oracle readback is RHI test support, never a production renderer API.
+
+Queue synchronization, encoders, barriers, leases, fences, and validation
+capture remain RHI work. See [ADR-0002](adr/0002-rhi-unsafe-containment.md) and
+[ADR-0003](adr/0003-serial-execution-lowering.md).
+
+## Data semantics
+
+### Uniform ABI
+
+`FrameUniform` is exactly 80 bytes: `0..64` is the column-major
+`projection * view` matrix; `64..80` is linear RGBA base color. Camera input,
+the computed matrix, and each color component must be finite; color is in
+`[0, 1]`. The payload is visible to the fixed vertex and fragment stages and is
+not a general uniform-layout API.
+
+### Geometry, UVs, and clipping
+
+Positions are tightly packed `f32x3`; indices are tightly packed `u32`.
+Textured geometry adds one finite `f32x2` UV per position. Normal geometry adds
+one finite normal per position, canonicalized to unit `f32x3` at construction.
+The textured and Lambert paths validate their fixed clip-space input before
+acceptance, including non-finite values, invalid homogeneous `w`, and clipping
+outside the closed contract. UV paths use perspective-correct center
+interpolation.
+
+### Color spaces and normals
+
+`Rgba8Image` represents linear UNORM texels; `Srgba8Image` represents encoded
+sRGB texels. Both upload original RGBA8 bytes, but the sRGB path chooses an sRGB
+native view: RGB is decoded before linear filtering, alpha stays linear, and
+the target stays linear `Rgba8Unorm`. UNORM and sRGB filterability are queried
+independently from actual device capabilities.
+
+`draw_lambert` perspective-interpolates canonical object-space normals, safely
+normalizes a nonzero interpolation, applies a fixed object-space `+Z` Lambert
+factor to RGB, and preserves alpha. It has no transforms, normal matrix,
+caller-visible lights, or PBR semantics.
+
+## Errors, lifetime, and concurrency
+
+The API separates failures by ownership transition:
+
+- invalid input, foreign device, unavailable capability, graph construction, or
+  reservation conflict fail before raster acceptance;
+- uniform failure means raster did not start and releases reservations;
+- raster rejection before native acceptance releases reservations; and
+- accepted work with failed/unobservable completion is terminal and poisons all
+  reserved generations.
+
+`FixedFrameSubmission` retains the snapshots, reservations, uniform operation,
+graph, and RHI submission required by its state. Snapshot clones retain RHI
+leases; device clones in the renderer/executor path keep the native device
+alive until dependent work completes.
+
+The mutex-protected gate safely coordinates snapshot clones, but is deliberately
+conservative: it is not a promise of parallel rendering. Native queue
+serialization and accepted-unknown handling are RHI concerns. Renderer code
+never repairs a poisoned snapshot by guessing state.
+
+## Validation and evidence
+
+Portable unit tests cover domain validation, payload packing, publication,
+reservations, recipe mapping, graph declaration, and failure paths. They do
+not prove DX12/Vulkan correctness.
+
+Windows hardware fixtures run the fixed contracts on both supported native
+backends with required validation and compare readback to CPU oracles. Cases
+distinguish perspective interpolation, integer versus linear sampling, clamp,
+sRGB decode-before-filter, normal-stream binding, Lambert shading, and
+pre-accept versus accepted-unknown faults. Unexpected validation diagnostics
+are failures. RHI readback consumes the graph-exported outgoing state as its
+actual incoming state, so it cannot silently repair a wrong export.
+
+See [ADR-0005](adr/0005-gpu-conformance-evidence.md) and
+[ADR-0008](adr/0008-native-platform-test-gates.md). Native conformance is
+separate from compile/link and CPU-only graph evidence.
+
+## Extension boundaries
+
+New renderer work needs a narrow tested contract. A scene-submission path must
+resolve scene data to renderer-owned packets before graph declaration; it must
+not move asset lifetime or native commands into RenderGraph. A general material,
+shader, or pipeline API must intentionally replace/extend the closed recipe
+boundary with explicit layout, binding, capability, lifetime, and cross-backend
+semantics.
+
+Surface/present should sit at a renderer/RHI boundary above swapchain details,
+while RenderGraph remains per-frame access planning. Scheduling, parallel
+recording, transient aliasing, and caches are lowering optimizations only when
+measurement proves they are needed; they do not alter declared frame semantics.
+
+Until those contracts exist, the six-recipe system is the supported renderer
+implementation and remains deliberately closed.

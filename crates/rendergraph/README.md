@@ -12,7 +12,7 @@ single-queue execution SPI verified by the deterministic CPU-only `TestRhi`.
 The companion
 [`fluxel-rhi`](https://github.com/Moore-Sky/fluxel-renderer/tree/main/crates/rhi)
 crate implements fixed Raster, Compute, and Copy subsets on native DX12 and
-Vulkan through the same immutable plan. The 0.1.4 native profile is limited to
+Vulkan through the same immutable plan. The native profile is limited to
 R01 clear/triangle, R02 indexed viewport/scissor, and X01's closed
 Raster→Compute→Copy recipe; surfaces, renderer lowering, and a general shader
 or pipeline API remain outside it.
@@ -22,12 +22,10 @@ or pipeline API remain outside it.
 ```toml
 [dependencies.fluxel-rendergraph]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.1.4"
 ```
 
-The crate is not published on crates.io yet, so the tagged Git dependency is
-the current installation path. `v0.1.0` begins this workspace's independent
-release sequence from a pre-migration source snapshot. It requires Rust 1.87
+The crate is not published on crates.io yet, so the Git dependency is the
+current installation path. It requires Rust 1.87
 or newer, uses edition 2024, and has no production GPU dependency.
 
 ## Quick start
@@ -188,7 +186,7 @@ crate and its drivers.
 
 - Real-GPU execution is limited to the fixed Raster, Compute, and Copy profile
   on Windows DX12/Vulkan. R01/R02/X01 pass their exact CPU oracles on both
-  backends with Required validation on the recorded 0.1.4 release hardware.
+  backends with Required validation on the recorded release hardware.
 - No surface acquisition, resize/recreation, or present execution.
 - No native multi-queue lowering, resource aliasing, or GPU conformance claim.
 - The execution SPI is provisional while the first native backend is built;

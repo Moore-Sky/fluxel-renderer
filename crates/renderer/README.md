@@ -21,7 +21,6 @@ pipeline/bind-group API, or present pixels.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/Moore-Sky/fluxel-renderer"
-tag = "v0.2.7"
 features = ["gpu-upload"]
 ```
 
@@ -100,20 +99,20 @@ inspectable submission input without adding sorting policy prematurely.
 With default features the crate has no dependencies, no `unsafe`, and no native
 API calls, and builds wherever Rust 1.87 supports the workspace. `gpu-upload`
 adds the safe `fluxel-rhi` boundary; native execution is currently implemented
-on Windows DX12/Vulkan. The 0.2.2 U03 fixtures compare the Camera/material
+on Windows DX12/Vulkan. The U03 fixtures compare the Camera/material
 uniform fixed offscreen draw byte-for-byte with CPU pixel oracles on both
 backends under Required native validation. The renderer crate itself contains
 no `unsafe`.
 
-The 0.2.3 U04 fixtures compare this textured draw byte-for-byte with an
+The U04 fixtures compare this textured draw byte-for-byte with an
 independent CPU oracle on DX12 and Vulkan under Required validation.
-The 0.2.4 U05 fixtures separately prove explicit UV perspective interpolation
+The U05 fixtures separately prove explicit UV perspective interpolation
 against position-derived and linear CPU counter-oracles on both backends.
-The 0.2.5 U06 fixtures additionally prove fixed linear filtering and independently
+The U06 fixtures additionally prove fixed linear filtering and independently
 observable U/V clamp behavior on DX12 and Vulkan.
-The 0.2.6 U07 fixtures distinguish decode-before-filter from encoded-space
+The U07 fixtures distinguish decode-before-filter from encoded-space
 filtering, nearest/repeat, and affine UV counter-oracles on both backends.
-The 0.2.7 U08 fixtures distinguish perspective normal interpolation and
+The U08 fixtures distinguish perspective normal interpolation and
 fragment renormalization from counter-oracles and exercise the exact-zero
 fallback on both backends.
 

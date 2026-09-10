@@ -1,6 +1,6 @@
-#![allow(dead_code)]
-
 //! Shared helpers for the numbered compile-only render-graph examples.
+
+#![allow(dead_code)]
 
 use fluxel_rendergraph::{
     BufferCapabilities, BufferDesc, DeviceCapabilities, DeviceLimits, Extent3d, ExternalOwnership,

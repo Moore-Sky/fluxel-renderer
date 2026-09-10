@@ -1,4 +1,10 @@
-//! Editable render graph declarations and the compile entry point.
+//! Owns editable render-graph declarations and turns them into immutable snapshots.
+//!
+//! This authoring layer records portable resources, passes, roots, and explicit ordering;
+//! it neither chooses backend objects nor records native commands. Compilation consumes a
+//! stable borrow of these declarations, validates their declared semantics, and produces a
+//! [`CompiledGraph`](crate::CompiledGraph) whose identity prevents frame inputs from being
+//! replayed against another graph. Later edits never mutate an already compiled snapshot.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

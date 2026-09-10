@@ -30,7 +30,11 @@ pub struct ImportTextureContract {
     pub descriptor: TextureDesc,
     /// Incoming state expected from the frame binding.
     pub initial_state: ResourceAccessState,
-    /// Owner that must retain the physical texture while the frame is in flight.
+    /// Must be [`ExternalOwnership::Caller`]; the provider's lease keeps the
+    /// caller-owned physical texture alive through GPU completion.
+    ///
+    /// Surface-owned images use [`crate::RenderGraph::import_surface_texture_slot`]
+    /// instead, so surface acquisition and presentation remain adapter-owned.
     pub ownership: ExternalOwnership,
     /// Whether the imported resource begins with defined contents.
     pub initial_contents: InitialContents,
@@ -53,7 +57,8 @@ pub struct ImportBufferContract {
     pub descriptor: BufferDesc,
     /// Incoming state expected from the frame binding.
     pub initial_state: ResourceAccessState,
-    /// Owner that must retain the physical buffer while the frame is in flight.
+    /// Must be [`ExternalOwnership::Caller`]; the provider's lease keeps the
+    /// caller-owned physical buffer alive through GPU completion.
     pub ownership: ExternalOwnership,
     /// Whether the imported resource begins with defined contents.
     pub initial_contents: InitialContents,

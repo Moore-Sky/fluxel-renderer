@@ -1,4 +1,7 @@
-//! Shared recording helpers.
+//! Shares fail-closed recording validation and backend-error latching across pass kinds.
+//!
+//! A callback may observe a portable recording error, but once a backend command has failed its
+//! native error is authoritative and must prevent further success from escaping the pass bridge.
 
 use crate::access::BufferRange;
 
@@ -43,6 +46,8 @@ impl<B: ExecutionBackend, O> CommandBridge<'_, B, O> {
         &mut self,
         callback: RecordResult,
     ) -> Result<(), crate::backend::ExecutionError<B::Error>> {
+        // A backend command may return a portable recording error to stop the
+        // callback, but its native failure is the root cause and must win here.
         if let Some(error) = self.backend_error.take() {
             Err(crate::backend::ExecutionError::Backend(error))
         } else {

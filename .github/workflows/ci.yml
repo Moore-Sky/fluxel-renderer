@@ -33,8 +33,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --all-targets --locked
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - run: cargo test -p fluxel-rhi --no-default-features --locked
+      - run: cargo test -p fluxel-rhi --no-default-features --features test-support --locked
       - run: cargo test --workspace --doc --locked
-      - run: cargo doc --workspace --no-deps --locked
+      - run: cargo test --workspace --doc --all-features --locked
+      - run: cargo doc --workspace --all-features --no-deps --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -71,3 +75,17 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy -p fluxel-rhi --all-targets --all-features --locked -- -D warnings
+
+  windows-workspace:
+    name: Windows workspace native glue
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo test --workspace --all-targets --locked
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test -p fluxel-rhi --no-default-features --locked
+      - run: cargo test -p fluxel-rhi --no-default-features --features test-support --locked

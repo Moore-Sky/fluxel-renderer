@@ -8,6 +8,18 @@ pub(in crate::compile) fn validate_capabilities<F>(
     retained: &HashSet<PassId>,
     caps: &DeviceCapabilities,
 ) -> Result<(), CompileError> {
+    let mut queue_ids = HashSet::new();
+    for queue in &caps.queues {
+        if !queue_ids.insert(queue.id) {
+            return Err(err(
+                CompileErrorKind::UnsupportedSemanticRequirement,
+                Vec::new(),
+                None,
+                "device capabilities contain duplicate logical queue identifiers",
+                Some(caps.clone()),
+            ));
+        }
+    }
     for resource in &graph.resources {
         match resource.origin {
             ResourceOrigin::TextureImport(_, contract)

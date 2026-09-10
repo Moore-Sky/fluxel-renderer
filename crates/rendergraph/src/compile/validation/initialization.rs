@@ -159,6 +159,9 @@ pub(in crate::compile) fn validate_initialization<F>(
         .filter(|p| retained.contains(&p.id))
         .flat_map(|p| p.accesses.iter().filter(|a| a.output_version.is_some()))
         .collect();
+    // This is version propagation, not execution simulation. Each successor has
+    // one writer and is derived strictly from its predecessor, so resource/version
+    // order is sufficient even when topological pass order differs.
     writes.sort_by_key(|a| (a.resource.0, a.output_version.unwrap()));
     for a in writes {
         let pass = writers[&(a.resource, a.output_version.unwrap())];

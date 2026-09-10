@@ -1,3 +1,5 @@
+//! Benchmarks immutable-plan traversal and serial test-backend execution overhead.
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use fluxel_rendergraph::{test_rhi::*, *};
 

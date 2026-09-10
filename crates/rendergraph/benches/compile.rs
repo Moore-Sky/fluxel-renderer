@@ -1,3 +1,5 @@
+//! Benchmarks graph compilation for representative linear and fan-out topologies.
+
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use fluxel_rendergraph::*;
 
