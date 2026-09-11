@@ -37,6 +37,7 @@ struct RunOptions {
     repeat: NonZeroIsize,
     induce_back_pressure: bool,
     verify_accepted_unknown: bool,
+    evidence_pause_ms: u64,
 }
 
 impl RunOptions {
@@ -48,6 +49,7 @@ impl RunOptions {
         let mut repeat = NonZeroIsize::new(1).expect("one is nonzero");
         let mut induce_back_pressure = false;
         let mut verify_accepted_unknown = false;
+        let mut evidence_pause_ms = 0;
         let mut args = args.into_iter();
         while let Some(argument) = args.next() {
             match argument.as_str() {
@@ -59,6 +61,9 @@ impl RunOptions {
                 }
                 "--induce-back-pressure" => induce_back_pressure = true,
                 "--verify-accepted-unknown" => verify_accepted_unknown = true,
+                "--evidence-pause-ms" => {
+                    evidence_pause_ms = parse_positive(&argument, args.next())?;
+                }
                 "--help" | "-h" => return Err(usage().to_owned()),
                 _ => return Err(format!("unknown argument `{argument}`\n{}", usage())),
             }
@@ -68,6 +73,7 @@ impl RunOptions {
             repeat,
             induce_back_pressure,
             verify_accepted_unknown,
+            evidence_pause_ms,
         })
     }
 }
@@ -81,7 +87,7 @@ fn parse_positive(flag: &str, value: Option<String>) -> Result<u64, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: fluxel-windows-dx12-harness [--frames K] [--repeat R] [--induce-back-pressure] [--verify-accepted-unknown]"
+    "usage: fluxel-windows-dx12-harness [--frames K] [--repeat R] [--induce-back-pressure] [--evidence-pause-ms K] [--verify-accepted-unknown]"
 }
 
 fn run_accepted_unknown_oracle() -> Result<(), HarnessError> {
@@ -249,8 +255,7 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
         run_frame_loop(
             &window,
             &mut surface,
-            options.frames,
-            options.induce_back_pressure,
+            options,
             &mut counters,
             &mut ring,
             |surface, presented| {
@@ -372,8 +377,7 @@ struct LifecycleCounters {
 fn run_frame_loop(
     window: &Window,
     surface: &mut Dx12Surface,
-    frame_limit: Option<u64>,
-    induce_back_pressure: bool,
+    options: RunOptions,
     counters: &mut LifecycleCounters,
     ring: &mut FrameRing<VisibleFrameSubmission>,
     mut start_frame: impl FnMut(&mut Dx12Surface, u64) -> Result<VisibleFrameSubmission, HarnessError>,
@@ -422,11 +426,15 @@ fn run_frame_loop(
             eprintln!("surface event=CloseRequested action=stop-new-surface-work");
             break;
         }
-        if frame_limit.is_some_and(|limit| counters.started >= limit) {
+        if options
+            .frames
+            .is_some_and(|limit| counters.started >= limit)
+        {
             break;
         }
         match surface.status() {
             SurfaceStatus::Active { .. } => {
+                let mut reused_controlled_slot = false;
                 let reservation = match ring
                     .try_start(|reservation| start_frame(surface, reservation.serial()))
                 {
@@ -438,7 +446,7 @@ fn run_frame_loop(
                             ring.live_count(),
                             ring.capacity()
                         );
-                        if induce_back_pressure && !induced {
+                        if options.induce_back_pressure && !induced {
                             if ring.live_count() != ring.capacity()
                                 || held_completions.iter().any(Option::is_none)
                             {
@@ -447,6 +455,11 @@ fn run_frame_loop(
                                         .into(),
                                 ));
                             }
+                            evidence_pause(
+                                "capacity-full",
+                                options.evidence_pause_ms,
+                                ring.live_count(),
+                            );
                             let released_slot = held_completions
                                 .iter()
                                 .enumerate()
@@ -488,8 +501,9 @@ fn run_frame_loop(
                         reservation.serial(),
                         reservation.slot()
                     );
+                    reused_controlled_slot = true;
                 }
-                if induce_back_pressure && !induced {
+                if options.induce_back_pressure && !induced {
                     held_completions[reservation.slot()] =
                         Some(hold_next_dx12_presentation_completion());
                     eprintln!(
@@ -509,6 +523,11 @@ fn run_frame_loop(
                 );
                 counters.started += 1;
                 advance_to_submitted(ring, reservation, counters)?;
+                if options.induce_back_pressure && counters.started == 1 {
+                    evidence_pause("one-live", options.evidence_pause_ms, ring.live_count());
+                } else if reused_controlled_slot {
+                    evidence_pause("exact-reuse", options.evidence_pause_ms, ring.live_count());
+                }
             }
             SurfaceStatus::Suspended => {
                 counters.suspended_iterations += 1;
@@ -529,6 +548,14 @@ fn run_frame_loop(
     release_controlled_completions(&mut held_completions);
     drain_frame_ring(ring, counters)?;
     Ok(())
+}
+
+fn evidence_pause(stage: &str, pause_ms: u64, live: usize) {
+    if pause_ms == 0 {
+        return;
+    }
+    eprintln!("evidence stage={stage} live={live} pause_ms={pause_ms}");
+    thread::sleep(Duration::from_millis(pause_ms));
 }
 
 fn release_controlled_completions(completions: &mut [Option<NextDx12PresentationCompletionLatch>]) {

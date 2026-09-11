@@ -13,6 +13,8 @@ fn finite_run_controls_parse_without_gpu() {
             "--repeat",
             "2",
             "--induce-back-pressure",
+            "--evidence-pause-ms",
+            "1500",
             "--verify-accepted-unknown",
         ]
         .map(str::to_owned),
@@ -22,6 +24,7 @@ fn finite_run_controls_parse_without_gpu() {
     assert_eq!(options.repeat.get(), 2);
     assert!(options.induce_back_pressure);
     assert!(options.verify_accepted_unknown);
+    assert_eq!(options.evidence_pause_ms, 1500);
 }
 
 #[test]

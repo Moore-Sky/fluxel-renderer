@@ -32,6 +32,10 @@ are live, the fourth start is rejected before native acquire/record; the harness
 then releases one exact latch, proves only that slot retires, and proves the next
 frame reuses that same slot. The other two completions remain held during that
 observation, so driver timing cannot accidentally satisfy the oracle.
+`--evidence-pause-ms K` adds a finite pause at the one-live, capacity-full, and
+exact-reuse milestones so an external capture process can bind screenshots to
+those logged states. It does not change completion or admission decisions and
+is inert unless explicitly requested.
 `--verify-accepted-unknown` is a separate fault-process oracle: after a real
 successful submit/present it injects unknown completion, then requires slot
 reuse, resize, and shutdown to remain refused and verifies Surface drop retains
