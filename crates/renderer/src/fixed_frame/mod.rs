@@ -17,8 +17,9 @@ use fluxel_rendergraph::{
     ExecutionError, ExportBufferContract, ExportTextureContract, Extent3d, ExternalOwnership,
     FrameBindingError, FrameBindingErrorKind, FrameInputs, FrameResourceProvider,
     ImportBufferContract, ImportTextureContract, IndexFormat, InitialContents, LoadOp,
-    RasterPipelineId, RenderGraph, ResourceAccessState, StoreOp, TextureBindingId, TextureDesc,
-    TextureDimension, TextureFormat, TextureRange, TextureReadUse, Viewport, WriteCoverage,
+    PresentContract, RasterPipelineId, RenderGraph, ResourceAccessState, StoreOp,
+    SurfaceTextureContract, TextureBindingId, TextureDesc, TextureDimension, TextureFormat,
+    TextureRange, TextureReadUse, Viewport, WriteCoverage,
 };
 use fluxel_rhi::experimental::fixed_artifacts::{
     RasterBackend, RasterKernel, RasterObjectProvider,
@@ -26,6 +27,11 @@ use fluxel_rhi::experimental::fixed_artifacts::{
 use fluxel_rhi::{
     Buffer, BufferDescriptor, BufferUploadError, Device, MemoryPolicy, PendingBufferUpload,
     ResourceLease, Texture, UploadedBuffer,
+};
+#[cfg(windows)]
+use fluxel_rhi::{
+    TextureLease,
+    presentation::{AcquiredSurfaceFrame, Dx12Surface, PresentationToken},
 };
 
 use crate::upload::{SnapshotDrawReservation, SnapshotUseError};
@@ -64,6 +70,9 @@ mod submission;
 #[cfg(test)]
 /// CPU and legacy fixed-frame conformance fixtures.
 mod tests;
+/// Renderer-owned visible fixed-frame presentation lifecycle.
+#[cfg(windows)]
+mod visible;
 
 pub use packet::{
     RenderPacket, RenderPacketBuildError, RenderPacketDrawBuildError, RenderPacketFailure,
@@ -75,7 +84,11 @@ pub use renderer::{
     FixedFrameRenderer, FixedFrameUniformObservationError,
 };
 pub use submission::{FixedFrameStatus, FixedFrameSubmission, FrameImage};
+#[cfg(windows)]
+pub use visible::{VisibleFrameStartError, VisibleFrameStatus, VisibleFrameSubmission};
 
+#[cfg(windows)]
+use graph::build_presentable_camera_graph;
 use graph::{
     CameraGraph, build_camera_graph, build_normal_lambert_camera_graph,
     build_textured_camera_graph, build_uv_textured_camera_graph, build_vertex_color_camera_graph,

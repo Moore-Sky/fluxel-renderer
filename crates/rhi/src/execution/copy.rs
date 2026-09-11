@@ -36,6 +36,7 @@ impl ExecutionBackend for CopyBackend {
     type Encoder = CopyEncoder;
     type CommandBuffer = CopyCommandBuffer;
     type Completion = NativeCompletion;
+    type PresentationToken = PresentationToken;
     type Lease = ResourceLease;
     type Error = NativeExecutionError;
 
@@ -351,7 +352,13 @@ impl ExecutionBackend for CopyBackend {
         &mut self,
         queue: QueueId,
         command_buffer: Self::CommandBuffer,
+        presentations: Vec<PresentationSubmission<Self::PresentationToken>>,
     ) -> Result<Self::Completion, Self::Error> {
+        if !presentations.is_empty() {
+            return Err(NativeExecutionError::SubmitRejected(
+                "copy backend does not present acquired surface images".into(),
+            ));
+        }
         if queue != QueueId::new(0) {
             return Err(NativeExecutionError::UnknownQueue(queue));
         }

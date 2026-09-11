@@ -2,10 +2,11 @@
 
 ## Purpose
 
-`fluxel-rhi` is Fluxel's headless native execution boundary. It lowers a
+`fluxel-rhi` is Fluxel's native execution boundary. It lowers a
 portable `fluxel-rendergraph::ExecutionPlan` into a deliberately small DX12 or
 Vulkan command subset and retains native objects until GPU work is terminal. It
-is not a renderer, surface layer, or general graphics API.
+also owns the first fixed-size DX12 surface/acquire/present path. It is not a
+renderer, host/window runtime, or general graphics API.
 
 ```text
 Renderer       scene policy, snapshots, and closed render recipes
@@ -29,7 +30,8 @@ frame scheduling remain above it. See [ADR-0001](adr/0001-assets-outside-renderg
 ## Public facade and module boundaries
 
 `src/lib.rs` is the small safe facade. It exports explicit device opening,
-driver facts, owned resources, execution backends, and structured errors.
+driver facts, owned resources, execution backends, the narrow DX12 presentation
+facade, and structured errors.
 Renderer-shaped closed raster artifacts are isolated under the explicitly
 provisional `experimental::fixed_artifacts` path. It never exports `wgpu-hal`, native pointers, queues,
 command allocators, image views, or host mapping.
@@ -95,12 +97,13 @@ unsupported platform are intentionally different, tested outcomes.
 | non-Windows | any | `PlatformUnsupported` through the stub |
 | any target | `test-support` | doc-hidden conformance helpers, never a production native API |
 
-Support is currently headless Windows DX12/Vulkan only. Headless means no
-window, surface, swapchain, acquisition, present, resize, or loss-recovery
-contract. This is not a claim that Vulkan is intrinsically Windows-only: a new
-platform must preserve explicit selection, opaque ownership, factual
-capabilities, and structured failure. Native platform paths must run on native
-environments rather than be inferred from cross-compilation; see
+Support is currently fixed headless Raster/Compute/Copy execution on Windows
+DX12/Vulkan plus one fixed-size DX12 presentation slice. `Dx12Surface` selects
+a surface-compatible adapter, retains the supplied standard window/display
+handle owner, permits one acquired frame, and keeps HWND/DXGI/HAL details in
+`imp`. Resize, surface generations, Vulkan presentation, loss recovery, and a
+general cross-platform surface API remain absent. Native platform paths must
+run on native environments rather than be inferred from cross-compilation; see
 [ADR-0008](adr/0008-native-platform-test-gates.md).
 
 `Validation::Required` is fail-closed. The private opening path requests and

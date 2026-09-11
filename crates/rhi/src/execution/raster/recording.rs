@@ -19,6 +19,7 @@ impl ExecutionBackend for RasterBackend {
     type Encoder = CopyEncoder;
     type CommandBuffer = CopyCommandBuffer;
     type Completion = NativeCompletion;
+    type PresentationToken = PresentationToken;
     type Lease = ResourceLease;
     type Error = NativeExecutionError;
 
@@ -569,8 +570,48 @@ impl ExecutionBackend for RasterBackend {
         &mut self,
         queue: QueueId,
         command_buffer: CopyCommandBuffer,
+        mut presentations: Vec<PresentationSubmission<Self::PresentationToken>>,
     ) -> Result<NativeCompletion, Self::Error> {
-        self.copy().submit(queue, command_buffer)
+        if queue != QueueId::new(0) {
+            return Err(NativeExecutionError::UnknownQueue(queue));
+        }
+        require_device(
+            command_buffer.device,
+            self.device.identity(),
+            NativeExecutionError::ForeignCommandBuffer,
+        )?;
+        if presentations.is_empty() {
+            return self.copy().submit(queue, command_buffer, presentations);
+        }
+        if presentations.len() != 1 {
+            return Err(NativeExecutionError::SubmitRejected(
+                "raster presentation requires exactly one acquired image".into(),
+            ));
+        }
+        let token = presentations.pop().expect("checked one presentation").token;
+        #[cfg(all(windows, feature = "dx12"))]
+        {
+            let presentation = token.into_native().ok_or_else(|| {
+                NativeExecutionError::SubmitRejected(
+                    "presentation token was already consumed".into(),
+                )
+            })?;
+            let CopyCommandBuffer {
+                native,
+                device: _,
+                leases,
+            } = command_buffer;
+            crate::imp::submit_dx12_presented(native, leases, presentation)
+                .map(NativeCompletion)
+                .map_err(NativeExecutionError::SubmitRejected)
+        }
+        #[cfg(not(all(windows, feature = "dx12")))]
+        {
+            let _ = token;
+            Err(NativeExecutionError::SubmitRejected(
+                "DX12 presentation is unavailable on this target/build".into(),
+            ))
+        }
     }
     fn completion_status(&self, completion: &NativeCompletion) -> CompletionStatus {
         // The trait exposes a total status query. A native query failure cannot

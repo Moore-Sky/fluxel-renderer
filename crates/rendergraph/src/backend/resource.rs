@@ -7,7 +7,8 @@ use crate::{
     },
     error::RecordingError,
     handles::{
-        BindingSetId, BufferBindingId, ComputePipelineId, RasterPipelineId, TextureBindingId,
+        BindingSetId, BufferBindingId, ComputePipelineId, PresentTarget, RasterPipelineId,
+        SurfaceBindingId, TextureBindingId,
     },
     pass::AttachmentOps,
     plan::{BufferUsage, TextureUsage},
@@ -86,6 +87,43 @@ pub struct BoundTexture<T, L> {
     pub initial_state: ResourceAccessState,
     /// Lease retaining the physical texture until submission completion.
     pub lease: L,
+}
+
+/// One acquired, graph-imported presentable image.
+///
+/// The texture is the only part visible while passes are recorded. The opaque
+/// token remains owned by the execution adapter until it is transferred to
+/// [`ExecutionBackend::submit`](crate::backend::ExecutionBackend::submit),
+/// which is the only boundary allowed to present it. This prevents a renderer
+/// callback from presenting an image before the graph's final transition.
+pub struct BoundSurfaceTexture<T, L, P> {
+    /// The acquired image validated against the graph surface contract.
+    pub texture: BoundTexture<T, L>,
+    /// One-shot backend presentation token for this acquired image.
+    pub presentation: P,
+}
+
+/// Result of resolving one acquired presentable image.
+pub type SurfaceBindingResult<B> = Result<
+    BoundSurfaceTexture<
+        <B as ExecutionBackend>::Texture,
+        <B as ExecutionBackend>::Lease,
+        <B as ExecutionBackend>::PresentationToken,
+    >,
+    FrameBindingError,
+>;
+
+/// A one-shot acquired-image token paired with the graph presentation root it
+/// satisfies.
+///
+/// It contains no native surface or swapchain detail. Backends use the token
+/// to perform their native present after accepting the command buffer. Dropping
+/// an unsubmitted submission drops the token and therefore cancels acquisition.
+pub struct PresentationSubmission<P> {
+    /// Graph-declared presentation root associated with this token.
+    pub target: PresentTarget,
+    /// Backend-owned token returned when the image was acquired.
+    pub token: P,
 }
 
 /// A resolved buffer together with the lease that keeps it valid for a frame.
@@ -192,7 +230,9 @@ pub enum ResolvedBindingResource<'a, T, B> {
 /// Resolves opaque per-frame resource identities into backend objects.
 ///
 /// The execution adapter calls this provider only after it has checked that a
-/// frame input contains every import retained by the compiled plan.
+/// frame input contains every import retained by the compiled plan. Surface
+/// bindings model one acquisition: providers must consume a `SurfaceBindingId`
+/// exactly once and return a token that cannot be reused for a later frame.
 pub trait FrameResourceProvider<B: ExecutionBackend> {
     /// Resolves a caller-owned imported texture identity.
     fn texture(
@@ -205,6 +245,24 @@ pub trait FrameResourceProvider<B: ExecutionBackend> {
         &self,
         id: BufferBindingId,
     ) -> Result<BoundBuffer<B::Buffer, B::Lease>, FrameBindingError>;
+
+    /// Resolves one acquired presentable image and its one-shot presentation
+    /// token.
+    ///
+    /// The default keeps providers that only support ordinary imports source
+    /// compatible. Implementations must consume `id`, rather than returning a
+    /// cloneable cached acquisition. A graph that actually retains a surface slot still fails
+    /// closed with [`FrameBindingErrorKind::MissingSurface`](super::FrameBindingErrorKind::MissingSurface).
+    fn surface(&self, id: SurfaceBindingId) -> SurfaceBindingResult<B> {
+        Err(FrameBindingError {
+            kind: super::FrameBindingErrorKind::MissingSurface,
+            texture_slot: None,
+            buffer_slot: None,
+            resource: None,
+            surface_binding: Some(id),
+            detail: "surface binding is not supported by this frame resource provider".to_owned(),
+        })
+    }
 }
 
 /// Resolves renderer-owned opaque pipelines and binding recipes.

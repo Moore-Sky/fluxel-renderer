@@ -1,6 +1,12 @@
 //! Trace types and opaque handles for the deterministic CPU-only backend.
 
-use std::ops::Range;
+use std::{
+    ops::Range,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use crate::{
     access::{BufferCopyRegion, BufferRange, TextureCopyRegion, TextureRange},
@@ -84,6 +90,62 @@ impl TestCompletion {
     /// Returns the submission sequence number carried by this token.
     pub fn sequence(&self) -> u64 {
         self.0
+    }
+}
+
+/// One acquired test presentation token.
+#[derive(Debug)]
+pub struct TestPresentationToken {
+    value: u64,
+    cancellation_count: Arc<AtomicUsize>,
+    presented: bool,
+}
+
+impl TestPresentationToken {
+    /// Creates an opaque test presentation token without a cancellation probe.
+    pub fn new(raw: u64) -> Self {
+        Self::fresh(raw).0
+    }
+
+    /// Creates a token with a probe that observes abandoned acquisitions.
+    pub fn fresh(raw: u64) -> (Self, TestPresentationProbe) {
+        let cancellation_count = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                value: raw,
+                cancellation_count: Arc::clone(&cancellation_count),
+                presented: false,
+            },
+            TestPresentationProbe(cancellation_count),
+        )
+    }
+
+    /// Returns the deterministic value carried by this token.
+    pub fn value(&self) -> u64 {
+        self.value
+    }
+
+    pub(crate) fn mark_presented(mut self) {
+        self.presented = true;
+    }
+}
+
+impl Drop for TestPresentationToken {
+    fn drop(&mut self) {
+        if !self.presented {
+            self.cancellation_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A probe for acquisitions cancelled because their token was not submitted.
+#[derive(Clone, Debug)]
+pub struct TestPresentationProbe(Arc<AtomicUsize>);
+
+impl TestPresentationProbe {
+    /// Returns the number of abandoned acquisitions observed so far.
+    pub fn cancellation_count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -284,6 +346,8 @@ pub enum TestTraceEvent {
         queue: QueueId,
         /// New submission completion token.
         completion: TestCompletion,
+        /// Presentation roots and tokens accepted with this submission.
+        presentations: Vec<(crate::PresentTarget, u64)>,
     },
     /// A completion and its leases were moved to retirement.
     Retire {

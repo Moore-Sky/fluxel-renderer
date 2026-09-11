@@ -119,18 +119,18 @@ pub struct Buffer(pub(in crate::resource) Arc<BufferShared>);
 #[derive(Clone)]
 pub struct BufferLease(pub(in crate::resource) Arc<BufferShared>);
 
-pub(in crate::resource) struct TextureShared {
-    pub(in crate::resource) _native: crate::imp::OwnedTexture,
-    pub(in crate::resource) descriptor: TextureDescriptor,
-    pub(in crate::resource) allowed_usage: TextureUsage,
-    pub(in crate::resource) identity: PhysicalResourceIdentity,
-    pub(in crate::resource) device: fluxel_rendergraph::DeviceIdentity,
+pub(crate) struct TextureShared {
+    pub(crate) _native: crate::imp::OwnedTexture,
+    pub(crate) descriptor: TextureDescriptor,
+    pub(crate) allowed_usage: TextureUsage,
+    pub(crate) identity: PhysicalResourceIdentity,
+    pub(crate) device: fluxel_rendergraph::DeviceIdentity,
 }
 
 /// One opaque owned native texture.
 #[derive(Clone)]
-pub struct Texture(pub(in crate::resource) Arc<TextureShared>);
+pub struct Texture(pub(crate) Arc<TextureShared>);
 
 /// A cloneable lifetime token for a texture.
 #[derive(Clone)]
-pub struct TextureLease(pub(in crate::resource) Arc<TextureShared>);
+pub struct TextureLease(pub(crate) Arc<TextureShared>);

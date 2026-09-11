@@ -20,8 +20,8 @@ The workspace is organised around three crates:
 | Crate | Responsibility |
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
-| `fluxel-rhi` | Headless DX12/Vulkan ownership plus fixed Raster, Compute, and Copy RenderGraph execution. |
-| `fluxel-renderer` | Scene/domain data, immutable GPU snapshots, owned render packets, and fixed headless indexed draws. |
+| `fluxel-rhi` | DX12/Vulkan native ownership and fixed RenderGraph execution, plus the narrow DX12 presentation boundary. |
+| `fluxel-renderer` | Scene/domain data, immutable GPU snapshots, owned render packets, fixed indexed draws, and the first visible-frame transaction. |
 
 The optional `gpu-upload` slice publishes immutable GPU snapshot generations
 after native uploads complete. It can lower an insertion-ordered `DrawList`
@@ -46,13 +46,13 @@ The workspace releases its three crates together.  Git consumers must pin the
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.7.0" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.7.0" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.7.0" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.0" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.0" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.0" }
 ```
 
-`v0.7.0` and each package's `0.7.0` version identify the same historical
-workspace release. See [RELEASING.md](RELEASING.md) for the release gate.
+`v0.8.0` and each package's `0.8.0` version identify the same workspace
+release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
 
@@ -124,18 +124,22 @@ change Cargo manifests, Rust sources, examples, CI, the conformance gate, or
 the released GPU behavior, so they do not create a second GPU certification
 target.
 
-### Current — Stage 1.1 DX12 first visible image
+### Completed — Stage 1.1 DX12 first visible image
 
-The kernel will gain only the narrow presentation boundary needed for a host
-validation harness; it will not become a host-services runtime.
+The kernel gained only the narrow presentation boundary needed for a host
+validation harness; it did not become a host-services runtime.
 
-- [ ] Create a Windows window and the narrow DX12 surface or swapchain path
+- [x] Consume the minimal `fluxel-host` Win32 window and create the narrow DX12 surface/swapchain path
   needed by the demo harness.
-- [ ] Clear an acquired image, draw a fixed triangle, and present it.
-- [ ] Handle close, wait for required GPU work, and release resources in a
+- [x] Clear an acquired image, draw the existing fixed triangle, and present it.
+- [x] Handle close, wait for required GPU work, and release resources in a
   valid order.
-- [ ] Retain a screenshot, backend and adapter diagnostics, and focused tests
+- [x] Retain inspected multi-timepoint screenshots, backend and adapter diagnostics, and focused tests
   for new platform-independent state.
+
+The proof remains deliberately narrow: one fixed-size DX12 window and one live
+frame. Surface generations and resize/minimize lifecycle are the next closure;
+bounded frames-in-flight and Vulkan presentation follow separately.
 
 ### Unscheduled optimizations
 

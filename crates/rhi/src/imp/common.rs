@@ -63,6 +63,18 @@ pub(crate) enum NativeTexture {
     Vulkan(wgpu_hal::vulkan::Texture),
 }
 
+/// A native surface is deliberately kept separate from owned textures: an
+/// acquired swapchain image is returned to the surface by present/discard,
+/// never destroyed through `Device::destroy_texture`.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the private DX12 surface owns a complete native swapchain state"
+)]
+pub(crate) enum NativeSurface {
+    #[cfg(feature = "dx12")]
+    Dx12(wgpu_hal::dx12::Surface),
+}
+
 pub(crate) struct OwnedBuffer {
     pub(crate) native: Option<NativeBuffer>,
     pub(crate) owner: Arc<OpenedDevice>,

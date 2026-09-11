@@ -9,20 +9,22 @@ snapshots into an owned opaque `RenderPacket`, then non-blockingly submit its
 ordered legacy unlit draws as one compiled graph, raster pass, and native
 submission. The feature also supports deliberately closed single-draw
 `f32x3/u32` indexed, textured, vertex-color, and Lambert paths that return
-opaque offscreen image metadata.
+opaque offscreen image metadata. The Stage 1.1 visible path uses the same
+legacy-unlit camera/material recipe to draw one acquired DX12 image and returns
+a non-blocking presentation submission.
 It can separately upload canonical unit normals and execute one closed,
 non-textured fixed-Lambert draw.
 
 It is intentionally not a complete GPU renderer: it does not compile general
 material shaders, expose configurable samplers/PBR or a general
-pipeline/bind-group API, or present pixels.
+pipeline/bind-group API, or own windows and swapchains.
 
 ## Optional GPU upload
 
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.7.0"
+tag = "v0.8.0"
 features = ["gpu-upload"]
 ```
 

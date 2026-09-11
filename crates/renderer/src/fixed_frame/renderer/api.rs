@@ -18,6 +18,25 @@ impl FixedFrameRenderer {
         }
     }
 
+    /// Creates the renderer form coupled to one DX12 presentation surface.
+    ///
+    /// Unlike [`Self::new`], this obtains the surface-compatible raster backend
+    /// and its presentation capability snapshot from the surface. A caller
+    /// therefore cannot accidentally compile a visible graph against a
+    /// headless device backend.
+    #[must_use]
+    #[cfg(windows)]
+    pub fn for_surface(surface: &Dx12Surface) -> Self {
+        let device = surface.device();
+        let backend = surface.raster_backend();
+        let capabilities = fluxel_rendergraph::ExecutionBackend::capabilities(&backend).clone();
+        Self {
+            executor: Arc::new(fluxel_rendergraph::FrameExecutor::new(backend)),
+            capabilities,
+            device,
+        }
+    }
+
     /// Starts one fixed indexed draw without waiting for the GPU.
     pub fn draw(
         &self,
@@ -34,6 +53,45 @@ impl FixedFrameRenderer {
                 .map_err(DrawStartError::Graph)?,
         );
         self.start_camera(snapshot, graph, uniform)
+    }
+
+    /// Starts the fixed indexed triangle recipe on one already-acquired
+    /// presentable image.
+    ///
+    /// The acquired frame is consumed here, so a harness cannot reuse its
+    /// presentation permission or assemble a parallel graph/provider path.
+    /// Poll the returned submission to observe completion before acquiring the
+    /// next image from the surface.
+    #[cfg(windows)]
+    pub fn draw_to_surface(
+        &self,
+        snapshot: &IndexedMeshSnapshot,
+        camera: &crate::Camera,
+        material: &crate::BasicMaterial,
+        acquired: AcquiredSurfaceFrame,
+    ) -> Result<VisibleFrameSubmission, VisibleFrameStartError> {
+        let surface = acquired.into_binding();
+        let descriptor = surface.texture.descriptor;
+        let extent = [descriptor.extent.width, descriptor.extent.height];
+        validate_indexed_input(snapshot, &self.device, extent)
+            .map_err(VisibleFrameStartError::Draw)?;
+        if surface.texture.device != self.device.identity() {
+            return Err(VisibleFrameStartError::ForeignSurfaceDevice);
+        }
+        let uniform = FrameUniform::new(camera, material)
+            .map_err(|_| VisibleFrameStartError::Draw(DrawStartError::InvalidCameraMaterial))?;
+        let graph = Arc::new(
+            build_presentable_camera_graph(
+                snapshot,
+                SurfaceTextureContract { descriptor },
+                &self.capabilities,
+            )
+            .map_err(|error| VisibleFrameStartError::Draw(DrawStartError::Graph(error)))?,
+        );
+        let reservation = snapshot
+            .reserve_for_draw()
+            .map_err(|error| VisibleFrameStartError::Draw(map_snapshot_use(error)))?;
+        self.start_visible_camera(snapshot, graph, uniform, reservation, surface)
     }
 
     /// Starts the closed object-space `+Z` Lambert draw over explicit unit normals.

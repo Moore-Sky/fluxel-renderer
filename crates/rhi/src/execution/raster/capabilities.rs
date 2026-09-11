@@ -33,6 +33,16 @@ impl RasterBackend {
         }
     }
 
+    /// Creates the fixed backend only for a surface-compatible DX12 device.
+    #[cfg(all(windows, feature = "dx12"))]
+    pub(crate) fn for_dx12_surface(device: Device) -> Self {
+        Self {
+            capabilities: raster_surface_capabilities(&device),
+            device,
+            retired: Vec::new(),
+        }
+    }
+
     /// Returns the conservative cross-backend capability profile.
     pub fn portable_capabilities() -> DeviceCapabilities {
         raster_capabilities_from_limit([65_535; 3])
@@ -89,6 +99,23 @@ fn raster_capabilities(device: &Device) -> DeviceCapabilities {
         facts.rgba8_unorm_filterable,
         facts.rgba8_unorm_srgb_filterable,
     )
+}
+
+#[cfg(all(windows, feature = "dx12"))]
+fn raster_surface_capabilities(device: &Device) -> DeviceCapabilities {
+    let facts = device.capabilities();
+    let mut capabilities = raster_capabilities_from_limit_and_filterability(
+        facts.max_compute_workgroups_per_dimension,
+        facts.rgba8_unorm_filterable,
+        facts.rgba8_unorm_srgb_filterable,
+    );
+    capabilities.queues[0].capabilities.present = true;
+    capabilities.surface = Some(SurfaceCapabilities::new(
+        vec![TextureFormat::Rgba8Unorm],
+        true,
+        false,
+    ));
+    capabilities
 }
 
 fn raster_capabilities_from_limit(maximum: [u32; 3]) -> DeviceCapabilities {

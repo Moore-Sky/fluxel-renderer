@@ -6,9 +6,11 @@ pub(in crate::compile) fn validate_roots<F>(
     graph: &RenderGraph<F>,
     resources: &HashMap<ResourceId, &ResourceDecl>,
     writers: &HashMap<VersionKey, PassId>,
+    retained: &HashSet<PassId>,
     caps: &DeviceCapabilities,
 ) -> Result<(), CompileError> {
     let mut resource_roots = HashMap::new();
+    let mut present_resources = HashSet::new();
     for root in &graph.roots {
         let root_fact = match *root {
             RootDecl::Texture(_, resource, version, contract) => {
@@ -91,6 +93,15 @@ pub(in crate::compile) fn validate_roots<F>(
                 }
             }
             RootDecl::Present(_, r, v, _) => {
+                if !present_resources.insert(r) {
+                    return Err(err(
+                        CompileErrorKind::InvalidExportOrPresent,
+                        Vec::new(),
+                        Some(r),
+                        "one acquired presentation image cannot satisfy multiple present roots",
+                        None,
+                    ));
+                }
                 let d = resources[&r];
                 let ResourceKind::Texture(t) = d.kind else {
                     return Err(err(
@@ -130,6 +141,25 @@ pub(in crate::compile) fn validate_roots<F>(
                 }
             }
             RootDecl::SideEffect(..) => {}
+        }
+    }
+    let live_surface_resources: HashSet<_> = graph
+        .passes
+        .iter()
+        .filter(|pass| retained.contains(&pass.id))
+        .flat_map(|pass| pass.accesses.iter().map(|access| access.resource))
+        .filter(|resource| matches!(resources[resource].origin, ResourceOrigin::Surface(_, _)))
+        .chain(present_resources.iter().copied())
+        .collect();
+    for resource in live_surface_resources {
+        if !present_resources.contains(&resource) {
+            return Err(err(
+                CompileErrorKind::InvalidExportOrPresent,
+                Vec::new(),
+                Some(resource),
+                "every acquired surface image must have exactly one present root",
+                None,
+            ));
         }
     }
     Ok(())

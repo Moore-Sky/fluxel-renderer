@@ -11,21 +11,25 @@ pub(super) use core::{fmt, time::Duration};
 pub(super) use std::collections::HashMap;
 pub(super) use std::ops::Range;
 
+#[cfg(all(windows, feature = "dx12"))]
+pub(super) use fluxel_rendergraph::SurfaceCapabilities;
 pub(super) use fluxel_rendergraph::{
     BoundBuffer, BoundTexture, BufferCapabilities, BufferCopyRegion, BufferDesc, BufferRange,
     BufferUsage, BufferUsageKind, CompletionFailure, CompletionStatus, DeviceCapabilities,
-    DeviceLimits, ExecutionBackend, IndexFormat, LoadOp, QueueCapabilities, QueueDescriptor,
-    QueueId, RasterPassDescriptor, RecordingCapabilities, RecordingModel, ResourceAccessState,
-    ScissorRect, StoreOp, SynchronizationCapabilities, TextureCopyRegion, TextureDesc,
-    TextureFormat, TextureFormatCapabilities, TextureRange, TextureUsage, TextureUsageKind,
-    TimestampCapabilities, TransientResourceCapabilities, TransitionCapabilities, Viewport,
+    DeviceLimits, ExecutionBackend, IndexFormat, LoadOp, PresentationSubmission, QueueCapabilities,
+    QueueDescriptor, QueueId, RasterPassDescriptor, RecordingCapabilities, RecordingModel,
+    ResourceAccessState, ScissorRect, StoreOp, SynchronizationCapabilities, TextureCopyRegion,
+    TextureDesc, TextureFormat, TextureFormatCapabilities, TextureRange, TextureUsage,
+    TextureUsageKind, TimestampCapabilities, TransientResourceCapabilities, TransitionCapabilities,
+    Viewport,
 };
 
 pub(super) use crate::{
     Buffer, BufferDescriptor, ComputeBindings, ComputePipeline, Device, MemoryPolicy,
-    RasterNormalBindings, RasterPipeline, RasterTextureBindings, RasterUniformBindings,
-    RasterUvLinearClampTextureBindings, RasterUvTextureBindings, RasterVertexColorBindings,
-    ResourceCreateError, ResourceLease, Texture, TextureDescriptor, TexturePackBindings,
+    PresentationToken, RasterNormalBindings, RasterPipeline, RasterTextureBindings,
+    RasterUniformBindings, RasterUvLinearClampTextureBindings, RasterUvTextureBindings,
+    RasterVertexColorBindings, ResourceCreateError, ResourceLease, Texture, TextureDescriptor,
+    TexturePackBindings,
 };
 
 mod compute;

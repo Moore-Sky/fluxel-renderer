@@ -132,7 +132,8 @@ impl<F: 'static> RenderGraph<F> {
         }
     }
 
-    /// Declares a retained surface-texture slot that may become a presentation root.
+    /// Declares a retained surface-texture slot for an acquired image that
+    /// enters in `Present` state and must end at one presentation root.
     pub fn import_surface_texture_slot(
         &mut self,
         name: impl Into<String>,

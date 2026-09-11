@@ -202,7 +202,7 @@ impl FixedFrameSubmission {
             objects,
         ) {
             Ok(frame) => {
-                self.target_export = Some(graph.target_export);
+                self.target_export = graph.target_export;
                 self.phase = CameraPhase::RasterAccepted(frame);
                 FixedFrameStatus::Pending
             }
@@ -331,7 +331,9 @@ impl Drop for FixedFrameSubmission {
     }
 }
 
-fn execution_error(error: ExecutionError<NativeExecutionError>) -> FixedFrameExecutionError {
+pub(super) fn execution_error(
+    error: ExecutionError<NativeExecutionError>,
+) -> FixedFrameExecutionError {
     match error {
         ExecutionError::FrameBinding(error) => FixedFrameExecutionError::FrameBinding(error),
         ExecutionError::Recording(error) => FixedFrameExecutionError::Recording(error),

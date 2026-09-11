@@ -119,9 +119,12 @@ Exports are roots with an explicit final state. `FrameExports` returns the
 physical exported object, descriptor, caller-owned lease, and its
 `outgoing_state`. A consumer such as an RHI readback helper must use that
 reported state as its actual incoming state; it must not assume or silently
-repair a convenient state. Surface imports and `present` are part of portable
-declaration vocabulary, but surface acquisition and presentation execution are
-not implemented by the current executor.
+repair a convenient state. Surface imports and `present` are portable
+declaration vocabulary. An acquired image enters through a one-shot opaque
+presentation token; a retained surface must close to exactly one Present root,
+and the executor transfers that token to backend submission only after the
+final presentation transition is recorded. Native acquisition, swapchain
+policy, and the actual Present call remain RHI responsibilities.
 
 At frame resolution, `FrameResourceProvider` converts opaque IDs to
 `BoundTexture`/`BoundBuffer`. The provider supplies a device identity, a

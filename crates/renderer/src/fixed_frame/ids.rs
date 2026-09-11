@@ -15,6 +15,14 @@ pub(super) fn fixed_pipeline() -> RasterPipelineId {
 pub(super) fn uniform_binding() -> BufferBindingId {
     BufferBindingId::new(0x0220_0003)
 }
+/// The renderer-owned binding identity for one acquired presentable image.
+///
+/// The RHI owns the corresponding one-shot acquisition token; this opaque id
+/// only selects it for the fixed visible-frame graph.
+#[cfg(windows)]
+pub(super) fn surface_binding() -> fluxel_rendergraph::SurfaceBindingId {
+    fluxel_rendergraph::SurfaceBindingId::new(0x0220_0004)
+}
 pub(super) fn camera_pipeline() -> RasterPipelineId {
     RasterPipelineId::new(0x0220_0001)
 }

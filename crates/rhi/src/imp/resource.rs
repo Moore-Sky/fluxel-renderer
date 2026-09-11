@@ -493,6 +493,24 @@ impl Drop for NativeSubmission {
                 render_views,
                 failure,
             } => {
+                // No fence means a submit failure may already have accepted
+                // command lists, while leaving no completion proof. Do not
+                // destructure-and-return here: that would drop encoder/views/
+                // leases still used by GPU.
+                if fence.is_none() {
+                    let retained = std::mem::take(leases);
+                    let retained_staging = std::mem::take(staging_buffers);
+                    let retained_views = std::mem::take(render_views);
+                    std::mem::forget((
+                        owner.clone(),
+                        encoder.take(),
+                        command_buffer.take(),
+                        retained,
+                        retained_staging,
+                        retained_views,
+                    ));
+                    return;
+                }
                 let (
                     NativeDevice::Dx12 { device, .. },
                     Some(mut encoder),

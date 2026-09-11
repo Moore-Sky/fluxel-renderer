@@ -83,6 +83,7 @@ impl ExecutionBackend for ComputeBackend {
     type Encoder = CopyEncoder;
     type CommandBuffer = CopyCommandBuffer;
     type Completion = NativeCompletion;
+    type PresentationToken = PresentationToken;
     type Lease = ResourceLease;
     type Error = NativeExecutionError;
 
@@ -365,8 +366,9 @@ impl ExecutionBackend for ComputeBackend {
         &mut self,
         queue: QueueId,
         command_buffer: CopyCommandBuffer,
+        presentations: Vec<PresentationSubmission<Self::PresentationToken>>,
     ) -> Result<NativeCompletion, Self::Error> {
-        self.copy().submit(queue, command_buffer)
+        self.copy().submit(queue, command_buffer, presentations)
     }
     fn completion_status(&self, completion: &NativeCompletion) -> CompletionStatus {
         // ExecutionBackend requires a total query. A native query error cannot

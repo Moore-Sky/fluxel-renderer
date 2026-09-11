@@ -316,7 +316,14 @@ fn assert_exports(submission: &FixedFrameSubmission, graph: &CameraGraph) {
         );
     }
     assert_eq!(
-        exports.texture(graph.target_export).unwrap().outgoing_state,
+        exports
+            .texture(
+                graph
+                    .target_export
+                    .expect("headless graph exports its target")
+            )
+            .unwrap()
+            .outgoing_state,
         ResourceAccessState::CopySource
     );
 }
@@ -521,7 +528,14 @@ fn artifact(
             .buffer(graph.vertex_color_export.unwrap())
             .unwrap()
             .outgoing_state,
-        states.texture(graph.target_export).unwrap().outgoing_state,
+        states
+            .texture(
+                graph
+                    .target_export
+                    .expect("headless graph exports its target")
+            )
+            .unwrap()
+            .outgoing_state,
         test_support::validation_diagnostics(device),
     );
 }

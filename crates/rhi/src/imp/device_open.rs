@@ -142,7 +142,7 @@ fn open_vulkan(_: DeviceOptions) -> Result<OpenedDevice, OpenError> {
     })
 }
 
-fn instance_descriptor(validation: Validation) -> wgpu_hal::InstanceDescriptor<'static> {
+pub(crate) fn instance_descriptor(validation: Validation) -> wgpu_hal::InstanceDescriptor<'static> {
     wgpu_hal::InstanceDescriptor {
         name: "fluxel-rhi",
         flags: match validation {
@@ -157,7 +157,7 @@ fn instance_descriptor(validation: Validation) -> wgpu_hal::InstanceDescriptor<'
 }
 
 #[cfg(feature = "dx12")]
-fn dx12_validation_is_enabled(device: &wgpu_hal::dx12::Device) -> bool {
+pub(crate) fn dx12_validation_is_enabled(device: &wgpu_hal::dx12::Device) -> bool {
     use windows::{Win32::Graphics::Direct3D12::ID3D12InfoQueue, core::Interface as _};
 
     device.raw_device().cast::<ID3D12InfoQueue>().is_ok()
@@ -198,13 +198,13 @@ fn vulkan_validation_is_available() -> bool {
             .is_ok_and(|name| name == validation_features)
     })
 }
-fn native_error(backend: Backend, error: impl core::fmt::Display) -> OpenError {
+pub(crate) fn native_error(backend: Backend, error: impl core::fmt::Display) -> OpenError {
     OpenError::NativeUnavailable {
         backend,
         reason: error.to_string(),
     }
 }
-fn required_limits(
+pub(crate) fn required_limits(
     backend: Backend,
     capabilities: &wgpu_hal::Capabilities,
 ) -> Result<wgt::Limits, OpenError> {
@@ -215,7 +215,7 @@ fn required_limits(
         Err(OpenError::RequiredLimitsUnavailable { backend })
     }
 }
-fn hardware(backend: Backend, info: &wgt::AdapterInfo) -> HardwareInfo {
+pub(crate) fn hardware(backend: Backend, info: &wgt::AdapterInfo) -> HardwareInfo {
     HardwareInfo {
         backend,
         name: info.name.clone(),
@@ -233,14 +233,14 @@ fn hardware(backend: Backend, info: &wgt::AdapterInfo) -> HardwareInfo {
         driver_info: info.driver_info.clone(),
     }
 }
-fn rgba8_unorm_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
+pub(crate) fn rgba8_unorm_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
     // SAFETY: the selected adapter remains retained through device creation;
     // this read-only format query has no resource or queue side effects.
     unsafe { adapter.texture_format_capabilities(wgt::TextureFormat::Rgba8Unorm) }
         .contains(wgpu_hal::TextureFormatCapabilities::SAMPLED_LINEAR)
 }
 
-fn rgba8_unorm_srgb_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
+pub(crate) fn rgba8_unorm_srgb_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
     // SAFETY: the selected adapter remains retained through device creation;
     // this read-only format query has no resource or queue side effects. Query
     // sRGB separately because UNORM facts must never imply it.
@@ -248,7 +248,7 @@ fn rgba8_unorm_srgb_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
         .contains(wgpu_hal::TextureFormatCapabilities::SAMPLED_LINEAR)
 }
 
-fn capabilities(
+pub(crate) fn capabilities(
     _: wgt::Features,
     capabilities: &wgpu_hal::Capabilities,
     rgba8_unorm_filterable: bool,

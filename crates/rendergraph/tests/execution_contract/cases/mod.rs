@@ -10,7 +10,7 @@ use std::sync::{
 use fluxel_rendergraph::{
     test_rhi::{
         TestBindingResource, TestBindings, TestBuffer, TestCompletion, TestComputePipeline,
-        TestRegistry, TestRhi, TestRhiError, TestTexture, TestTraceEvent,
+        TestPresentationToken, TestRegistry, TestRhi, TestRhiError, TestTexture, TestTraceEvent,
     },
     *,
 };

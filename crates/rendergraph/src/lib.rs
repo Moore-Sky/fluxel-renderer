@@ -7,9 +7,9 @@
 //!
 //! The current release has a reusable single-queue execution plan, frame
 //! resource and render-object providers, validated command recording,
-//! completion retirement, a deterministic CPU-only `TestRhi`, and typed
-//! resource-usage requirements. Real GPU command and surface execution remain
-//! deliberate future boundaries. Start with the numbered examples and the
+//! completion retirement, imported presentable-image execution, a deterministic
+//! CPU-only `TestRhi`, and typed resource-usage requirements. Native GPU
+//! objects remain a deliberate backend boundary. Start with the numbered examples and the
 //! repository's `documents/design-rendergraph.md`.
 //!
 //! The public API is intentionally available from this crate root; implementation
@@ -48,10 +48,11 @@ pub use access::{
 };
 pub use backend::{
     BindingResourceSemantic, BoundBindings, BoundBuffer, BoundComputePipeline, BoundRasterPipeline,
-    BoundTexture, CompletionFailure, CompletionStatus, DeviceIdentity, ExecutionBackend,
-    ExecutionError, FrameBindingError, FrameBindingErrorKind, FrameResourceProvider,
-    PhysicalResourceIdentity, RasterColorAttachment, RasterDepthStencilAttachment,
-    RasterPassDescriptor, RenderObjectProvider, ResolvedBindingResource,
+    BoundSurfaceTexture, BoundTexture, CompletionFailure, CompletionStatus, DeviceIdentity,
+    ExecutionBackend, ExecutionError, FrameBindingError, FrameBindingErrorKind,
+    FrameResourceProvider, PhysicalResourceIdentity, PresentationSubmission, RasterColorAttachment,
+    RasterDepthStencilAttachment, RasterPassDescriptor, RenderObjectProvider,
+    ResolvedBindingResource, SurfaceBindingResult,
 };
 pub use compile::{
     CapabilityFallback, CompileOutput, CompileReport, CompileResult, CompiledGraph, ExplicitOrder,

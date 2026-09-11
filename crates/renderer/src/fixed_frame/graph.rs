@@ -1,7 +1,8 @@
 //! Builds fixed-frame RenderGraph declarations from closed raster recipes.
 //!
-//! Graphs restore imported snapshot states on export and expose the offscreen target
-//! as `CopySource` for the post-graph readback oracle. Native handles remain opaque:
+//! Graphs restore imported snapshot states on export. The headless recipe exposes an
+//! offscreen `CopySource` for the readback oracle; the presentation recipe imports an
+//! acquired image and makes it the graph's present root. Native handles remain opaque:
 //! this module only translates closed recipes into portable graph slots and commands.
 
 #[cfg(all(test, windows))]
@@ -38,7 +39,15 @@ pub(super) struct CameraGraph {
     pub(super) texture_export: Option<fluxel_rendergraph::ExportTextureSlot>,
     pub(super) pipeline: RasterPipelineId,
     pub(super) bindings: BindingSetId,
-    pub(super) target_export: fluxel_rendergraph::ExportTextureSlot,
+    /// Offscreen output when this is a headless recipe.
+    pub(super) target_export: Option<fluxel_rendergraph::ExportTextureSlot>,
+    /// Acquired-image binding slot for a presentation recipe. It is absent for
+    /// headless recipes, whose target is a renderer-created transient.
+    #[allow(
+        dead_code,
+        reason = "the acquired-frame submission consumes this after the RHI surface facade lands"
+    )]
+    pub(super) surface_slot: Option<fluxel_rendergraph::ImportTextureSlot>,
     #[allow(
         dead_code,
         reason = "U03 test-only evidence checks restored snapshot states"
@@ -192,7 +201,150 @@ pub(super) fn build_camera_graph(
         texture_export: None,
         pipeline: camera_pipeline(),
         bindings: camera_bindings(),
-        target_export,
+        target_export: Some(target_export),
+        surface_slot: None,
+        position_export,
+        index_export,
+        texture_coordinate_export: None,
+        normal_export: None,
+        vertex_color_export: None,
+    })
+}
+
+/// Builds the presentation form of the legacy fixed-camera recipe.
+///
+/// This deliberately retains the same pipeline, bind-group recipe, vertex and
+/// index lowering as [`build_camera_graph`].  Only the graph-owned target is
+/// replaced: the caller later binds one acquired image to `surface_slot`, and
+/// the execution adapter consumes the matching acquired-image token at the
+/// graph's presentation root.
+/// No native surface object crosses this renderer boundary.
+#[allow(
+    dead_code,
+    reason = "the acquired-frame renderer submission is added with the RHI surface facade"
+)]
+pub(super) fn build_presentable_camera_graph(
+    snapshot: &IndexedMeshSnapshot,
+    surface: SurfaceTextureContract,
+    capabilities: &DeviceCapabilities,
+) -> Result<CameraGraph, fluxel_rendergraph::CompileError> {
+    let mut graph = RenderGraph::new();
+    let positions = graph.import_buffer_slot(
+        "camera-frame-positions",
+        ImportBufferContract {
+            descriptor: snapshot.positions().buffer().descriptor().buffer,
+            initial_state: snapshot.positions().outgoing_state(),
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let indices = graph.import_buffer_slot(
+        "camera-frame-indices",
+        ImportBufferContract {
+            descriptor: snapshot.indices().buffer().descriptor().buffer,
+            initial_state: snapshot.indices().outgoing_state(),
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let uniform = graph.import_buffer_slot(
+        "camera-frame-uniform",
+        ImportBufferContract {
+            descriptor: fluxel_rendergraph::BufferDesc {
+                size: FRAME_UNIFORM_BYTES as u64,
+            },
+            initial_state: ResourceAccessState::CopyDestination,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let target = graph.import_surface_texture_slot("camera-frame-presentable-target", surface);
+    let extent = [
+        surface.descriptor.extent.width,
+        surface.descriptor.extent.height,
+    ];
+    let count = snapshot.index_count();
+    let pass = graph.add_raster_pass(
+        "camera-material-indexed",
+        |pass| {
+            let output = pass.color_attachment(
+                target.version,
+                ColorAttachmentDesc {
+                    index: 0,
+                    range: TextureRange::Whole,
+                    operations: AttachmentOps {
+                        load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+                        store: StoreOp::Store,
+                        write_coverage: WriteCoverage::Full,
+                    },
+                },
+            );
+            let vertices = pass.read_buffer(
+                &positions.version,
+                fluxel_rendergraph::BufferReadUse::Vertex,
+                BufferRange::Whole,
+            );
+            let indices_read = pass.read_buffer(
+                &indices.version,
+                fluxel_rendergraph::BufferReadUse::Index,
+                BufferRange::Whole,
+            );
+            let uniform_read = pass.read_buffer(
+                &uniform.version,
+                fluxel_rendergraph::BufferReadUse::Uniform,
+                BufferRange::Whole,
+            );
+            (output, (vertices, indices_read, uniform_read))
+        },
+        move |commands, resolver, data, _| {
+            commands.set_pipeline(camera_pipeline())?;
+            let bindings = resolver.resolve_bindings(
+                camera_bindings(),
+                &[BindingResource::BufferRead(&data.2)],
+                &[],
+            )?;
+            commands.set_bindings(&bindings)?;
+            commands.set_vertex_buffer(0, &data.0)?;
+            commands.set_index_buffer(&data.1, IndexFormat::Uint32)?;
+            commands.set_viewport(Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent[0] as f32,
+                height: extent[1] as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            })?;
+            commands.draw_indexed(0..count, 0, 0..1)
+        },
+    );
+    let position_export = graph.export_buffer(
+        positions.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let index_export = graph.export_buffer(
+        indices.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    graph.present(pass.output, PresentContract::new());
+    let compiled = graph.compile(capabilities)?.graph;
+    Ok(CameraGraph {
+        compiled,
+        position_slot: positions.slot,
+        index_slot: indices.slot,
+        uniform_slot: uniform.slot,
+        texture_coordinate_slot: None,
+        normal_slot: None,
+        vertex_color_slot: None,
+        texture_slot: None,
+        texture_export: None,
+        pipeline: camera_pipeline(),
+        bindings: camera_bindings(),
+        target_export: None,
+        surface_slot: Some(target.slot),
         position_export,
         index_export,
         texture_coordinate_export: None,
@@ -362,7 +514,8 @@ pub(super) fn build_normal_lambert_camera_graph(
         texture_export: None,
         pipeline: normal_lambert_pipeline(),
         bindings: normal_lambert_bindings(),
-        target_export,
+        target_export: Some(target_export),
+        surface_slot: None,
         position_export,
         index_export,
         texture_coordinate_export: None,
@@ -522,7 +675,8 @@ pub(super) fn build_vertex_color_camera_graph(
         texture_export: None,
         pipeline: vertex_color_pipeline(),
         bindings: vertex_color_bindings(),
-        target_export,
+        target_export: Some(target_export),
+        surface_slot: None,
         position_export,
         index_export,
         texture_coordinate_export: None,
@@ -690,7 +844,8 @@ pub(super) fn build_textured_camera_graph(
         texture_export: Some(texture_export),
         pipeline: textured_pipeline(),
         bindings: textured_bindings(),
-        target_export,
+        target_export: Some(target_export),
+        surface_slot: None,
         position_export,
         index_export,
         texture_coordinate_export: None,
@@ -886,7 +1041,8 @@ pub(super) fn build_uv_textured_camera_graph<T: FrameTexture>(
         texture_export: Some(texture_export),
         pipeline,
         bindings,
-        target_export,
+        target_export: Some(target_export),
+        surface_slot: None,
         position_export,
         index_export,
         texture_coordinate_export: Some(texture_coordinate_export),

@@ -13,7 +13,6 @@ use std::{
 use crate::{
     CompiledGraph,
     backend::{ExecutionBackend, ExecutionError, FrameResourceProvider, RenderObjectProvider},
-    internal::{ResourceOrigin, RootDecl},
 };
 
 use super::{
@@ -82,17 +81,6 @@ impl<B: ExecutionBackend> FrameExecutor<B> {
             return Err(ExecutionError::WrongCompiledGraph);
         }
         let live = live_resources(graph);
-        if graph.resources.iter().any(|resource| {
-            live.contains(&resource.id) && matches!(resource.origin, ResourceOrigin::Surface(_, _))
-        }) || graph
-            .roots
-            .iter()
-            .any(|root| matches!(root, RootDecl::Present(_, _, _, _)))
-        {
-            return Err(ExecutionError::UnsupportedExecutionFeature(
-                "surface and present are deferred to the 0.3 line",
-            ));
-        }
         let queue =
             graph
                 .execution_plan()
@@ -112,6 +100,7 @@ impl<B: ExecutionBackend> FrameExecutor<B> {
             physical,
             resource_leases,
             mut retained,
+            presentations,
         } = resolve_resources(graph, &execution, resources, &mut *backend, &live)?;
         let exports = build_exports(graph, &physical, &resource_leases);
         let mut encoder = backend
@@ -141,7 +130,7 @@ impl<B: ExecutionBackend> FrameExecutor<B> {
             .finish_encoder(encoder)
             .map_err(ExecutionError::Backend)?;
         let completion = backend
-            .submit(queue, command_buffer)
+            .submit(queue, command_buffer, presentations)
             .map_err(ExecutionError::Backend)?;
         drop(backend);
 

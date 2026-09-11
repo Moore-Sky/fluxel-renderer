@@ -18,7 +18,7 @@ the closed U02 renderer snapshot recipe, its closed U03 Camera/material-uniform
 variant, the closed uniform-plus-texture raster variant, and the closed X01 texture-pack
 compute recipe needed for one
 Raster→Compute→Copy chain. It does **not** expose general mapping/readback,
-acquire or present a surface, a general shader/pipeline API, renderer lowering,
+general acquire/present abstractions, a general shader/pipeline API, renderer lowering,
 multiple queues, or transient aliasing.
 
 `Device::upload_immutable_buffer` and the closed
@@ -37,7 +37,7 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.7.0"
+tag = "v0.8.0"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -47,7 +47,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.7.0"
+tag = "v0.8.0"
 default-features = false
 features = ["dx12"]
 ```
@@ -225,8 +225,11 @@ collected Required-validation diagnostics empty.
 | Windows | Supported when its feature, loader, driver, and selected adapter are available | Supported when its feature, loader, driver, and selected adapter are available |
 | macOS, Linux, other targets | Returns `PlatformUnsupported` | Returns `PlatformUnsupported` |
 
-Headless means no window or surface is created. It does not imply that a
-surface, swapchain, or presentation path is supported.
+`Device::open` remains headless: it creates no window or surface. On Windows
+with the `dx12` feature, the separately constructed `presentation::Dx12Surface`
+is the one Stage-1 fixed RGBA8 FIFO surface/swapchain path. It retains an
+`Arc` window owner until acquired work is discarded or retired; it is not a
+general surface or presentation API.
 
 ## Performance and scope
 
@@ -245,9 +248,9 @@ until terminal completion; rejected and accepted-unknown submission paths stay
 distinct.
 Buffer Copies require 4-byte-aligned source offset, destination offset, and
 size, checked in both graph recording and RHI lowering. Queue operations are
-serialized per opened device, including error-path idle waits. Surface/present,
-general shaders/pipelines, renderer lowering, multi-queue, parallel recording,
-aliasing, and performance work remain out of scope.
+serialized per opened device, including error-path idle waits. Surface/present
+outside the one fixed DX12 path, general shaders/pipelines, renderer lowering,
+multi-queue, parallel recording, aliasing, and performance work remain out of scope.
 
 ## Testing and development
 

@@ -36,9 +36,12 @@ impl ResourceStates {
             let initial = match resource.origin {
                 ResourceOrigin::TextureImport(_, contract) => contract.initial_state,
                 ResourceOrigin::BufferImport(_, contract) => contract.initial_state,
-                ResourceOrigin::Transient | ResourceOrigin::Surface(_, _) => {
-                    ResourceAccessState::Undefined
-                }
+                ResourceOrigin::Transient => ResourceAccessState::Undefined,
+                // Acquired images begin in their portable presentation state.
+                // The graph's first retained access transitions them to its
+                // declared use, and the required present root transitions them
+                // back before the token is submitted.
+                ResourceOrigin::Surface(_, _) => ResourceAccessState::Present,
             };
             let state = match resource.kind {
                 ResourceKind::Texture(descriptor) => {

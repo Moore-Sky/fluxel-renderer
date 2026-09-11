@@ -5,19 +5,23 @@ use std::{cell::RefCell, collections::HashMap};
 use super::{
     backend::TestRhi,
     lease::{TestLease, TestLeaseProbe},
-    trace::{TestBindings, TestBuffer, TestComputePipeline, TestRasterPipeline, TestTexture},
+    trace::{
+        TestBindings, TestBuffer, TestComputePipeline, TestPresentationToken, TestRasterPipeline,
+        TestTexture,
+    },
 };
 
 use crate::{
     backend::{
         BindingResourceSemantic, BoundBindings, BoundBuffer, BoundComputePipeline,
-        BoundRasterPipeline, BoundTexture, DeviceIdentity, FrameBindingError,
+        BoundRasterPipeline, BoundSurfaceTexture, BoundTexture, DeviceIdentity, FrameBindingError,
         FrameBindingErrorKind, FrameResourceProvider, RenderObjectProvider,
         ResolvedBindingResource,
     },
     error::{DiagnosticContext, RecordingError, RecordingErrorKind},
     handles::{
-        BindingSetId, BufferBindingId, ComputePipelineId, RasterPipelineId, TextureBindingId,
+        BindingSetId, BufferBindingId, ComputePipelineId, RasterPipelineId, SurfaceBindingId,
+        TextureBindingId,
     },
     plan::{BufferUsage, TextureUsage},
     rhi::{BufferDesc, ResourceAccessState, TextureDesc},
@@ -36,6 +40,10 @@ struct RegisteredBuffer {
     usage: BufferUsage,
     initial_state: ResourceAccessState,
     lease: TestLease,
+}
+struct RegisteredSurface {
+    texture: RegisteredTexture,
+    presentation: TestPresentationToken,
 }
 struct RegisteredRaster {
     physical: TestRasterPipeline,
@@ -90,6 +98,7 @@ pub struct TestBindingResolution {
 pub struct TestRegistry {
     device: DeviceIdentity,
     textures: HashMap<TextureBindingId, RegisteredTexture>,
+    surfaces: RefCell<HashMap<SurfaceBindingId, RegisteredSurface>>,
     buffers: HashMap<BufferBindingId, RegisteredBuffer>,
     raster: HashMap<RasterPipelineId, RegisteredRaster>,
     compute: HashMap<ComputePipelineId, RegisteredCompute>,
@@ -103,6 +112,7 @@ impl TestRegistry {
         Self {
             device,
             textures: HashMap::new(),
+            surfaces: RefCell::new(HashMap::new()),
             buffers: HashMap::new(),
             raster: HashMap::new(),
             compute: HashMap::new(),
@@ -128,6 +138,32 @@ impl TestRegistry {
                 usage,
                 initial_state,
                 lease,
+            },
+        );
+        probe
+    }
+    /// Registers an acquired presentation image and returns its observable lease probe.
+    pub fn register_surface(
+        &mut self,
+        id: SurfaceBindingId,
+        physical: TestTexture,
+        descriptor: TextureDesc,
+        usage: TextureUsage,
+        initial_state: ResourceAccessState,
+        presentation: TestPresentationToken,
+    ) -> TestLeaseProbe {
+        let (lease, probe) = TestLease::fresh();
+        self.surfaces.get_mut().insert(
+            id,
+            RegisteredSurface {
+                texture: RegisteredTexture {
+                    physical,
+                    descriptor,
+                    usage,
+                    initial_state,
+                    lease,
+                },
+                presentation,
             },
         );
         probe
@@ -283,6 +319,36 @@ impl FrameResourceProvider<TestRhi> for TestRegistry {
             usage: item.usage,
             initial_state: item.initial_state,
             lease: item.lease.clone(),
+        })
+    }
+    fn surface(
+        &self,
+        _id: SurfaceBindingId,
+    ) -> Result<BoundSurfaceTexture<TestTexture, TestLease, TestPresentationToken>, FrameBindingError>
+    {
+        let item = self
+            .surfaces
+            .borrow_mut()
+            .remove(&_id)
+            .ok_or_else(|| FrameBindingError {
+                kind: FrameBindingErrorKind::MissingSurface,
+                texture_slot: None,
+                buffer_slot: None,
+                resource: None,
+                surface_binding: Some(_id),
+                detail: "test surface binding is not registered".to_owned(),
+            })?;
+        Ok(BoundSurfaceTexture {
+            texture: BoundTexture {
+                device: self.device,
+                identity: item.texture.physical.identity(),
+                physical: item.texture.physical,
+                descriptor: item.texture.descriptor,
+                usage: item.texture.usage,
+                initial_state: item.texture.initial_state,
+                lease: item.texture.lease.clone(),
+            },
+            presentation: item.presentation,
         })
     }
 }

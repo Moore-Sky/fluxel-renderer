@@ -58,6 +58,8 @@ pub use fixed_frame::{
     RenderPacketFailure, RenderPacketReservationError, RenderPacketStartError, RenderPacketStatus,
     RenderPacketSubmission,
 };
+#[cfg(all(windows, feature = "gpu-upload"))]
+pub use fixed_frame::{VisibleFrameStartError, VisibleFrameStatus, VisibleFrameSubmission};
 #[cfg(feature = "gpu-upload")]
 pub use upload::{
     BaseColorTextureSnapshot, BaseColorTextureUpload, BaseColorTextureUploadFailure,
@@ -186,6 +188,16 @@ impl fmt::Display for ModelTransformError {
 }
 
 impl std::error::Error for ModelTransformError {}
+
+#[cfg(all(test, feature = "gpu-upload", not(windows)))]
+mod non_windows_gpu_upload_tests {
+    use super::*;
+
+    #[test]
+    fn gpu_upload_keeps_the_headless_renderer_api_off_windows() {
+        let _: fn(fluxel_rhi::Device) -> FixedFrameRenderer = FixedFrameRenderer::new;
+    }
+}
 
 /// Vertex positions and optional triangle indices for one mesh.
 #[derive(Clone, Debug, PartialEq)]

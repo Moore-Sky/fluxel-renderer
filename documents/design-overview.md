@@ -26,10 +26,11 @@ accident of callback order or one backend's behavior. Its central goals are:
   conformance.
 
 It is not a general graphics API, a scene/asset database, a shader authoring
-framework, or a presentation runtime today. In particular, there is currently
-no general pipeline or bind-group builder, general shader reflection API,
-surface acquisition/present path, multi-queue scheduler, transient aliasing
-implementation, or stable asset/resource handle and cache ABI.
+framework, or a presentation runtime. In particular, there is currently no
+general pipeline or bind-group builder, general shader reflection API,
+cross-platform surface lifecycle, multi-queue scheduler, transient aliasing
+implementation, or stable asset/resource handle and cache ABI. The one proven
+presentation slice is a fixed-size DX12 surface used by a Windows proof harness.
 
 ## Layer model and dependency direction
 
@@ -49,9 +50,9 @@ never become graph concepts.
 
 | Layer | Owns | Explicitly does not own |
 | --- | --- | --- |
-| `fluxel-renderer` | Domain inputs, renderer policy, GPU snapshot publication, fixed frame coordination, and the selection of closed recipes | Asset loading/cache identity, graph compilation, native handles, barriers, queue commands, or presentation |
+| `fluxel-renderer` | Domain inputs, renderer policy, GPU snapshot publication, fixed frame coordination, closed recipes, and the visible fixed-frame transaction | Asset loading/cache identity, graph compilation, native handles, barriers, swapchains, or host/window policy |
 | `fluxel-rendergraph` | Logical resources and versions, declared accesses, validation, dependencies, culling, transitions, and immutable execution plans | Scenes, asset handles, shader/pipeline policy, allocation, native handles, queue submission, or readback implementation |
-| `fluxel-rhi` | Device-affine native resources, opaque artifacts/bindings, backend lowering, command recording, submission, completion, and native diagnostics | Scene selection, asset policy, general renderer lowering, or a public general graphics API |
+| `fluxel-rhi` | Device-affine native resources, opaque artifacts/bindings, backend lowering, command recording, submission, completion, native diagnostics, and surface/swapchain presentation | Scene selection, asset policy, host/window ownership, general renderer lowering, or a public general graphics API |
 
 Assets cross a repository boundary without moving platform or GPU policy into
 one shared crate. `fluxel-bases` owns durable identity, typed handles,
@@ -89,7 +90,7 @@ an insertion-ordered `DrawList`. A renderer decides which snapshot generation,
 material behavior, and ordering policy are legal for the frame. Persistent CPU
 data is validated before it enters the asynchronous GPU path.
 
-The current renderer has deliberately narrow, headless fixed paths: immutable
+The current renderer has deliberately narrow fixed paths: immutable
 indexed mesh, texture, normal, and vertex-color snapshots are published only
 after their uploads complete, and a fixed-frame coordinator selects one of a
 small set of private, closed raster recipes. A recipe jointly specifies the
@@ -261,10 +262,11 @@ while internal implementation evolves.
 ## Platform boundary
 
 The portable graph and default renderer-domain model are not tied to a native
-API. Native execution is presently headless and Windows-focused, with DX12 and
-Vulkan feature selection. Non-Windows native requests fail explicitly rather
-than silently emulating a backend. There is no Surface/Present, resize,
-lost-surface recovery, or web renderer today.
+API. Native execution is Windows-focused, with headless DX12/Vulkan feature
+selection and a separate fixed-size DX12 surface path. Non-Windows native
+requests fail explicitly rather than silently emulating a backend. There is no
+Vulkan presentation, surface-generation/resize contract, lost-surface recovery,
+or web renderer today.
 
 Windows MSVC is the primary Windows development/native test environment. Linux
 must be tested natively (for example in WSL2/Ubuntu), because it exercises

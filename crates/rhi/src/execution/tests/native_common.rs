@@ -377,14 +377,16 @@ pub(super) fn run_submission_failure_paths(backend_kind: crate::Backend) {
     let encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
     let command = backend.finish_encoder(encoder).unwrap();
     assert!(matches!(
-        backend.submit(QueueId::new(0), command),
+        backend.submit(QueueId::new(0), command, Vec::new()),
         Err(NativeExecutionError::SubmitRejected(_))
     ));
 
     crate::imp::inject_submit_accepted_unknown_once();
     let encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
     let command = backend.finish_encoder(encoder).unwrap();
-    let completion = backend.submit(QueueId::new(0), command).unwrap();
+    let completion = backend
+        .submit(QueueId::new(0), command, Vec::new())
+        .unwrap();
     assert_eq!(
         backend.completion_status(&completion),
         CompletionStatus::Failed(CompletionFailure::DeviceLost)
@@ -397,7 +399,9 @@ pub(super) fn run_submission_failure_paths(backend_kind: crate::Backend) {
 
     let encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
     let command = backend.finish_encoder(encoder).unwrap();
-    let completion = backend.submit(QueueId::new(0), command).unwrap();
+    let completion = backend
+        .submit(QueueId::new(0), command, Vec::new())
+        .unwrap();
     crate::imp::inject_completion_pending_once();
     assert_eq!(
         backend.completion_status(&completion),

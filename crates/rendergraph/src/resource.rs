@@ -43,7 +43,9 @@ pub struct ImportTextureContract {
 /// Static requirements for an acquired presentation image slot.
 ///
 /// Surface ownership and acquisition state are supplied by the surface adapter,
-/// not selected by graph authoring code.
+/// not selected by graph authoring code. The portable contract fixes every
+/// acquired image's incoming state to [`ResourceAccessState::Present`]: a
+/// retained graph therefore records `Present → use → Present` around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurfaceTextureContract {
     /// Texture shape and format required by the compiled graph.

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`fluxel-renderer` is the application-facing, headless renderer layer in the
+`fluxel-renderer` is the application-facing renderer layer in the
 Fluxel workspace. It owns renderer policy: it accepts typed scene-domain data,
 coordinates immutable GPU snapshots, lowers supported scene input into owned
 packets, selects proven raster contracts, and declares the corresponding frame
@@ -13,7 +13,8 @@ The crate provides portable domain objects (`Camera`, `Geometry`, `Mesh`,
 that publish immutable mesh and texture snapshots after GPU completion; an
 owned `RenderPacket` for ordered legacy unlit indexed draws; and seven closed
 single-draw indexed contracts which yield opaque offscreen `FrameImage`
-metadata after completion. The default crate has no graphics-backend dependency;
+metadata after completion. The DX12 visible slice reuses the legacy-unlit
+camera/material recipe for one acquired presentation image. The default crate has no graphics-backend dependency;
 GPU coordination and fixed drawing require the `gpu-upload` feature.
 
 This document is a description of the current system, not a release history.
@@ -66,7 +67,7 @@ The current renderer intentionally has no:
   samplers, views, or material parameters;
 - transformed-normal Lambert shading, lights, depth, blending, culling,
   batching, instancing, PBR, animation, or scene-file loading;
-- Surface acquisition, presentation, resize, or lost-surface recovery; or
+- surface acquisition, swapchain policy, resize, or lost-surface recovery; or
 - multi-queue scheduling, parallel recording, aliasing, or performance policy.
 
 The fixed API is a correctness vertical slice, not an early general pipeline
@@ -385,8 +386,10 @@ shader, or pipeline API must intentionally replace/extend the closed recipe
 boundary with explicit layout, binding, capability, lifetime, and cross-backend
 semantics.
 
-Surface/present should sit at a renderer/RHI boundary above swapchain details,
-while RenderGraph remains per-frame access planning. Scheduling, parallel
+The fixed visible-frame path sits at the renderer/RHI boundary above private
+swapchain details: Renderer accepts one acquired opaque binding, RenderGraph
+plans its use and final presentation intent, and RHI owns acquire/submit/present
+and completion. This is not a general surface or window API. Scheduling, parallel
 recording, transient aliasing, and caches are lowering optimizations only when
 measurement proves they are needed; they do not alter declared frame semantics.
 

@@ -3,8 +3,9 @@
 //! This crate exposes no `wgpu-hal` types. It opens one headless DX12 or Vulkan
 //! device, owns buffers and 2D textures, and executes deliberately fixed Copy,
 //! Compute, and Raster subsets of a portable RenderGraph plan through barriers,
-//! one submission, completion, and lease-backed retirement. Surfaces and
-//! presentation remain outside this milestone. Narrow immutable buffer and
+//! one submission, completion, and lease-backed retirement. On Windows with
+//! the DX12 feature, the narrow presentation façade owns a surface/swapchain
+//! while retaining its window through acquired-image retirement. Narrow immutable buffer and
 //! whole RGBA8 texture uploads retain staging and destination storage through
 //! completion.
 //!
@@ -36,6 +37,9 @@ mod execution;
 /// encode the renderer's current fixed recipes rather than a general pipeline
 /// contract. They may change or be removed in a future minor release.
 pub mod experimental;
+/// Rendering-owned Windows presentation boundary for the current vertical slice.
+#[cfg(all(windows, feature = "dx12"))]
+pub mod presentation;
 mod resource;
 
 pub use execution::{
@@ -47,6 +51,14 @@ pub use execution::{
 pub use execution::{RasterTextureReadback, readback_exported_raster_texture_for_test};
 /// Opaque identity of one physical RenderGraph resource generation.
 pub use fluxel_rendergraph::PhysicalResourceIdentity;
+#[cfg(all(windows, feature = "dx12"))]
+pub use presentation::{AcquiredSurfaceFrame, Dx12Surface, PresentationToken, SurfaceError};
+/// Uninhabited presentation token used by non-DX12 builds to keep portable
+/// execution profiles structurally total while rejecting presentation.
+#[cfg(not(all(windows, feature = "dx12")))]
+pub struct PresentationToken {
+    _private: (),
+}
 pub use resource::{
     Buffer, BufferDescriptor, BufferLease, BufferUploadError, BufferUploadStage,
     ComputeArtifactIdentity, ComputeBindings, ComputeBindingsLease, ComputeCreateError,

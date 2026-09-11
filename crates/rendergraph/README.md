@@ -22,7 +22,7 @@ or pipeline API remain outside it.
 ```toml
 [dependencies.fluxel-rendergraph]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.7.0"
+tag = "v0.8.0"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -138,6 +138,11 @@ one graph instantiated with distinct frame inputs.
 `FrameResourceProvider`, and a renderer-owned `RenderObjectProvider`. The
 provided `TestRhi` validates protocol order, transitions, binding checks, and
 completion-based retirement; it does not run shaders or emulate GPU memory.
+For a present root, the resource provider resolves an acquired presentable
+image together with an opaque one-shot token. The executor records the graph's
+final `Present` transition and transfers that token, paired with its graph root,
+only to `ExecutionBackend::submit`; native surface and swapchain objects never
+enter graph declarations or pass callbacks.
 On Windows, `fluxel-rhi` separately executes the same immutable plan on DX12
 and Vulkan for fixed Raster, Compute, and Copy release fixtures. Its support
 is not a general graph shader surface: a renderer/RHI provider registers opaque

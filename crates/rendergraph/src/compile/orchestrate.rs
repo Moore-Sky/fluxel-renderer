@@ -123,7 +123,7 @@ pub(crate) fn compile_graph<F>(
     let execution_order = topo(&graph.passes, &retained, &deps, &orders)?;
     validate_initialization(graph, &resources, &retained, &writers)?;
     validate_capabilities(graph, &resources, &retained, caps)?;
-    validate_roots(graph, &resources, &writers, caps)?;
+    validate_roots(graph, &resources, &writers, &retained, caps)?;
     let passes: Vec<PassDecl<F>> = graph
         .passes
         .iter()

@@ -9,7 +9,7 @@ use crate::{
     rhi::{BufferDesc, DeviceCapabilities, IndexFormat, QueueId, ResourceAccessState, TextureDesc},
 };
 
-use super::{BoundBuffer, BoundTexture, RasterPassDescriptor};
+use super::{BoundBuffer, BoundTexture, PresentationSubmission, RasterPassDescriptor};
 
 /// Stable identity of one backend device instance.
 ///
@@ -81,6 +81,11 @@ pub trait ExecutionBackend {
     type CommandBuffer;
     /// Submission-completion object, such as a fence or timeline value.
     type Completion: Clone;
+    /// One-shot token that allows an acquired image to be presented after its
+    /// graph submission. It deliberately has no graph-visible surface data.
+    /// Dropping an unsubmitted token must safely cancel or abandon its native
+    /// acquisition, including after any pre-submit execution error.
+    type PresentationToken;
     /// Lease retained by newly created transient resources until completion.
     type Lease: Clone;
     /// Backend-specific failure type.
@@ -266,16 +271,25 @@ pub trait ExecutionBackend {
         encoder: Self::Encoder,
     ) -> Result<Self::CommandBuffer, Self::Error>;
 
-    /// Submits one finished command buffer to the backend's ordered queue.
+    /// Submits one finished command buffer to the backend's ordered queue and
+    /// presents the acquired images associated with the supplied roots.
+    ///
+    /// The backend must consume each token only after accepting the command
+    /// buffer, and must retain any native image lifetime required by that
+    /// presentation until the returned completion becomes terminal. On an
+    /// `Err`, it must leave every supplied token unconsumed so token `Drop`
+    /// performs the required cancellation.
     ///
     /// Returning `Err` guarantees that this call did not transfer any GPU work
-    /// to the queue. If a backend cannot determine whether work was accepted,
-    /// it must return `Ok` with a completion that later reports [`CompletionStatus::Failed`],
-    /// so the executor can retire every lease safely.
+    /// or presentation request to native queues. After command acceptance, a
+    /// backend must return `Ok` even if presentation later fails or acceptance
+    /// is uncertain; its completion must become terminal (including
+    /// [`CompletionStatus::Failed`]) so the executor can retire every lease safely.
     fn submit(
         &mut self,
         queue: QueueId,
         command_buffer: Self::CommandBuffer,
+        presentations: Vec<PresentationSubmission<Self::PresentationToken>>,
     ) -> Result<Self::Completion, Self::Error>;
 
     /// Returns the current completion state of one prior submission.

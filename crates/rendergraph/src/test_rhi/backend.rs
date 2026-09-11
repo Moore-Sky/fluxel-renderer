@@ -10,7 +10,8 @@ use super::{
     lease::TestLease,
     trace::{
         TestBindings, TestBuffer, TestColorAttachment, TestCompletion, TestComputePipeline,
-        TestDepthStencilAttachment, TestRasterPipeline, TestTexture, TestTraceEvent,
+        TestDepthStencilAttachment, TestPresentationToken, TestRasterPipeline, TestTexture,
+        TestTraceEvent,
     },
 };
 
@@ -18,7 +19,7 @@ use crate::{
     access::{BufferCopyRegion, BufferRange, TextureCopyRegion, TextureRange},
     backend::{
         BoundBuffer, BoundTexture, CompletionStatus, DeviceIdentity, ExecutionBackend,
-        RasterPassDescriptor,
+        PresentationSubmission, RasterPassDescriptor,
     },
     pass::{ScissorRect, Viewport},
     plan::{BufferUsage, TextureUsage},
@@ -86,6 +87,8 @@ pub struct TestRhi {
     retired: Vec<Retired>,
     ended_passes: usize,
     fail_next: Option<TestRhiError>,
+    fail_finish_encoder: Option<TestRhiError>,
+    fail_submit: Option<TestRhiError>,
     transient_texture_usage: Option<TextureUsage>,
     transient_buffer_usage: Option<BufferUsage>,
 }
@@ -104,6 +107,8 @@ impl TestRhi {
             retired: Vec::new(),
             ended_passes: 0,
             fail_next: None,
+            fail_finish_encoder: None,
+            fail_submit: None,
             transient_texture_usage: None,
             transient_buffer_usage: None,
         }
@@ -127,6 +132,16 @@ impl TestRhi {
     /// Causes the next fallible backend operation to return `error`.
     pub fn fail_next(&mut self, error: TestRhiError) {
         self.fail_next = Some(error);
+    }
+
+    /// Causes the next encoder finish to fail before submission acceptance.
+    pub fn fail_finish_encoder(&mut self, error: TestRhiError) {
+        self.fail_finish_encoder = Some(error);
+    }
+
+    /// Causes the next submission to fail before command acceptance.
+    pub fn fail_submit(&mut self, error: TestRhiError) {
+        self.fail_submit = Some(error);
     }
 
     /// Makes subsequent transient texture allocations report this physical
@@ -197,6 +212,7 @@ impl ExecutionBackend for TestRhi {
     type Encoder = TestEncoder;
     type CommandBuffer = TestCommandBuffer;
     type Completion = TestCompletion;
+    type PresentationToken = TestPresentationToken;
     type Lease = TestLease;
     type Error = TestRhiError;
 
@@ -567,6 +583,9 @@ impl ExecutionBackend for TestRhi {
         &mut self,
         mut _encoder: TestEncoder,
     ) -> Result<TestCommandBuffer, TestRhiError> {
+        if let Some(error) = self.fail_finish_encoder.take() {
+            return Err(error);
+        }
         self.failure()?;
         if self.trace_enabled {
             _encoder.events.push(TestTraceEvent::Finish {
@@ -582,7 +601,11 @@ impl ExecutionBackend for TestRhi {
         &mut self,
         _queue: QueueId,
         _command_buffer: TestCommandBuffer,
+        _presentations: Vec<PresentationSubmission<TestPresentationToken>>,
     ) -> Result<TestCompletion, TestRhiError> {
+        if let Some(error) = self.fail_submit.take() {
+            return Err(error);
+        }
         self.failure()?;
         if _command_buffer.queue != _queue {
             return Err(TestRhiError::new(
@@ -591,11 +614,20 @@ impl ExecutionBackend for TestRhi {
         }
         let completion = TestCompletion::new(self.next_completion);
         self.next_completion += 1;
+        let presentations: Vec<_> = _presentations
+            .into_iter()
+            .map(|presentation| {
+                let value = presentation.token.value();
+                presentation.token.mark_presented();
+                (presentation.target, value)
+            })
+            .collect();
         if self.trace_enabled {
             self.trace.extend(_command_buffer.events);
             self.trace.push(TestTraceEvent::Submit {
                 queue: _queue,
                 completion,
+                presentations,
             });
         }
         self.completion
