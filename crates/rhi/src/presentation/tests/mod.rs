@@ -119,3 +119,49 @@ fn live_frame_drop_quarantines_surface_ownership() {
     ));
     assert!(released_flag.load(Ordering::Acquire));
 }
+
+#[test]
+fn multiple_live_tickets_keep_drop_quarantine_until_every_ticket_retires() {
+    let tickets = crate::imp::NativePresentationTickets::new(2);
+    let first = tickets.try_acquire().unwrap();
+    let second = tickets.try_acquire().unwrap();
+    assert!(tickets.any_live());
+    drop(first);
+    assert!(
+        tickets.any_live(),
+        "one retired frame must not release another"
+    );
+
+    let retained_flag = Arc::new(AtomicBool::new(false));
+    assert!(quarantine_live_drop_ownership(
+        tickets.any_live(),
+        DropFlag(Arc::clone(&retained_flag)),
+    ));
+    assert!(!retained_flag.load(Ordering::Acquire));
+
+    drop(second);
+    assert!(!tickets.any_live());
+}
+
+#[test]
+fn presentation_ticket_capacity_refuses_aliasing_and_recovers_one_exact_slot() {
+    let capacity = crate::imp::DX12_PRESENTABLE_IMAGE_COUNT;
+    assert_eq!(
+        capacity,
+        crate::imp::DX12_MAXIMUM_FRAME_LATENCY as usize + 1
+    );
+    let tickets = crate::imp::NativePresentationTickets::new(capacity);
+    assert_eq!(tickets.capacity(), 3);
+    let first = tickets.try_acquire().unwrap();
+    let second = tickets.try_acquire().unwrap();
+    let third = tickets.try_acquire().unwrap();
+    assert!(tickets.try_acquire().is_none());
+
+    drop(second);
+    let replacement = tickets.try_acquire().unwrap();
+    assert!(tickets.try_acquire().is_none());
+    assert_eq!(tickets.live_count(), 3);
+
+    drop((first, third, replacement));
+    assert_eq!(tickets.live_count(), 0);
+}

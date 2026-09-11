@@ -6,6 +6,9 @@
 //! discarded on drop by the safe façade.
 
 use super::*;
+
+pub(crate) const DX12_MAXIMUM_FRAME_LATENCY: u32 = 2;
+pub(crate) const DX12_PRESENTABLE_IMAGE_COUNT: usize = DX12_MAXIMUM_FRAME_LATENCY as usize + 1;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use wgpu_hal::Surface as _;
 
@@ -14,9 +17,9 @@ pub(crate) struct NativePresentationToken {
     pub(crate) surface: Arc<Mutex<NativeSurface>>,
     pub(crate) acquired: Option<NativeAcquiredSurfaceTexture>,
     pub(crate) fence: Option<NativeSurfaceFence>,
-    /// Stays true from acquire until the native image has been discarded or
-    /// the accepted submission's complete bundle has been retired.
-    pub(crate) live_frame: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Exists from acquire until discard or retirement of an accepted bundle.
+    /// It cannot be forged by safe callers and release is completion-driven.
+    pub(crate) presentation_ticket: Option<NativePresentationLease>,
     /// Type-erased `Arc<W>` from the public façade. It is intentionally held
     /// by the token because accepted-unknown quarantine can outlive Surface.
     pub(crate) _window: Arc<dyn std::any::Any>,
@@ -43,9 +46,7 @@ impl Drop for NativePresentationToken {
                 unsafe { device.destroy_fence(fence) };
             }
         }
-        if let Some(live_frame) = self.live_frame.take() {
-            live_frame.store(false, std::sync::atomic::Ordering::Release);
-        }
+        drop(self.presentation_ticket.take());
     }
 }
 
@@ -158,7 +159,7 @@ pub(crate) fn configure_dx12_surface(
         #[cfg(feature = "dx12")]
         (NativeDevice::Dx12 { device, .. }, NativeSurface::Dx12(surface)) => {
             let config = wgpu_hal::SurfaceConfiguration {
-                maximum_frame_latency: 2,
+                maximum_frame_latency: DX12_MAXIMUM_FRAME_LATENCY,
                 present_mode: wgt::PresentMode::Fifo,
                 composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
                 format: wgt::TextureFormat::Rgba8Unorm,
@@ -183,7 +184,7 @@ pub(crate) fn acquire_dx12_surface(
     owner: &Arc<OpenedDevice>,
     surface: Arc<Mutex<NativeSurface>>,
     window: Arc<dyn std::any::Any>,
-    live_frame: Arc<std::sync::atomic::AtomicBool>,
+    presentation_ticket: NativePresentationLease,
     descriptor: TextureDesc,
     allowed_usage: TextureUsage,
 ) -> Result<(OwnedTexture, NativePresentationToken), String> {
@@ -196,8 +197,9 @@ pub(crate) fn acquire_dx12_surface(
             // image and is passed to both acquire and the sole submit that may
             // use it.
             let fence = unsafe { device.create_fence() }.map_err(|e| e.to_string())?;
-            // SAFETY: safe façade permits at most one outstanding frame and the
-            // surface was configured before acquisition.
+            // SAFETY: the surface is configured and queue serialization keeps
+            // acquire ordered with configuration/teardown. Each call owns a
+            // distinct private ticket until discard or completion retirement.
             let acquired = match unsafe { native_surface.acquire_texture(None, &fence) } {
                 Ok(value) => value.texture,
                 Err(error) => {
@@ -242,7 +244,7 @@ pub(crate) fn acquire_dx12_surface(
                     surface: Arc::clone(&surface),
                     acquired: Some(NativeAcquiredSurfaceTexture::Dx12(acquired)),
                     fence: Some(NativeSurfaceFence::Dx12(fence)),
-                    live_frame: Some(live_frame),
+                    presentation_ticket: Some(presentation_ticket),
                     _window: window,
                 },
             ))
@@ -256,18 +258,12 @@ pub(crate) fn discard_presentation(token: NativePresentationToken) {
 }
 
 impl NativePresentationToken {
-    /// Moves the acquire gate into the accepted command bundle after present
+    /// Moves this ticket into the accepted command bundle after present
     /// has consumed the native image. Window/surface ownership stays here and
     /// is released immediately; only derived render-view retirement remains.
     fn take_completion_lease(&mut self) -> Option<NativePresentationLease> {
-        transfer_presentation_lease(&mut self.live_frame)
+        self.presentation_ticket.take()
     }
-}
-
-pub(crate) fn transfer_presentation_lease(
-    live_frame: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
-) -> Option<NativePresentationLease> {
-    live_frame.take().map(NativePresentationLease::new)
 }
 
 /// Submits a command buffer and consumes exactly one acquired DX12 image.
@@ -330,6 +326,15 @@ pub(crate) fn submit_dx12_presented(
             let presentation_lease = token
                 .take_completion_lease()
                 .expect("an acquired surface token owns its live-frame gate");
+            // A completion hold is deliberately consumed only after both
+            // submit and present succeeded. Copy/upload submissions, rejected
+            // work, and present failures therefore cannot consume it.
+            let presentation_completion_hold = present
+                .is_none()
+                .then(take_next_dx12_presentation_completion_hold)
+                .flatten();
+            let injected_accepted_unknown =
+                present.is_none() && take_dx12_presentation_accepted_unknown();
             // `Queue::present` takes the acquired texture by value; successful
             // submit has therefore consumed the only surface-owned image.
             // The token now only carries the thread-affine window lease and
@@ -346,7 +351,12 @@ pub(crate) fn submit_dx12_presented(
                     staging_buffers: Vec::new(),
                     render_views,
                     presentation_lease: Some(presentation_lease),
-                    failure: present.map(|_| CompletionFailure::ExecutionFailed),
+                    presentation_completion_hold,
+                    failure: if injected_accepted_unknown {
+                        Some(CompletionFailure::DeviceLost)
+                    } else {
+                        present.map(|_| CompletionFailure::ExecutionFailed)
+                    },
                 },
             ))))
         }

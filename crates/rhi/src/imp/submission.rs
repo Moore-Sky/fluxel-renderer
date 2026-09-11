@@ -64,6 +64,7 @@ pub(crate) fn submit_copy_with_staging(
                     staging_buffers,
                     render_views,
                     presentation_lease: None,
+                    presentation_completion_hold: None,
                     failure: inject_accepted_unknown.then_some(CompletionFailure::DeviceLost),
                 },
                 Err(error) => {
@@ -93,6 +94,7 @@ pub(crate) fn submit_copy_with_staging(
                             staging_buffers,
                             render_views,
                             presentation_lease: None,
+                            presentation_completion_hold: None,
                             failure: Some(CompletionFailure::DeviceLost),
                         }
                     }
@@ -194,11 +196,15 @@ pub(crate) fn completion_status(completion: &NativeCompletion) -> Result<Complet
         NativeSubmission::Dx12 {
             owner,
             fence: Some(fence),
+            presentation_completion_hold,
             failure,
             ..
         } => {
             if let Some(failure) = *failure {
                 return Ok(CompletionStatus::Failed(failure));
+            }
+            if presentation_completion_is_held(presentation_completion_hold.as_ref()) {
+                return Ok(CompletionStatus::Pending);
             }
             let NativeDevice::Dx12 { device, .. } = &owner.native else {
                 unreachable!()
@@ -267,11 +273,15 @@ pub(crate) fn wait_completion(
         NativeSubmission::Dx12 {
             owner,
             fence: Some(fence),
+            presentation_completion_hold,
             failure,
             ..
         } => {
             if let Some(failure) = *failure {
                 return Ok(CompletionStatus::Failed(failure));
+            }
+            if presentation_completion_is_held(presentation_completion_hold.as_ref()) {
+                return Ok(CompletionStatus::Pending);
             }
             let NativeDevice::Dx12 { device, .. } = &owner.native else {
                 unreachable!()
@@ -327,6 +337,15 @@ pub(crate) fn wait_completion(
     })
 }
 
+/// Keeps the test oracle local to presentation completion observation. The
+/// caller passes this only from DX12 `NativeSubmission`; uploads and copies
+/// have no hold field and cannot consume or observe an armed latch.
+pub(crate) fn presentation_completion_is_held(
+    hold: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> bool {
+    hold.is_some_and(|hold| hold.load(std::sync::atomic::Ordering::Acquire))
+}
+
 #[cfg(any(test, feature = "test-support"))]
 static TEST_SUBMIT_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// Number of successful queue accepts to allow before consuming the configured
@@ -338,6 +357,18 @@ static TEST_SUBMIT_FAULT_AFTER: std::sync::atomic::AtomicUsize =
 #[cfg(any(test, feature = "test-support"))]
 static TEST_COMPLETION_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// Presentation-only accepted-unknown fault. It is consumed after a DX12
+/// queue submit and present both succeed, never by generic submissions.
+#[cfg(any(test, feature = "test-support"))]
+static TEST_DX12_PRESENTATION_ACCEPTED_UNKNOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// FIFO weak handles armed by conformance code. A handle dropped before a
+/// successful present is skipped, so stale tests cannot hold a later frame.
+#[cfg(any(test, feature = "test-support"))]
+static TEST_PRESENTATION_COMPLETION_HOLDS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::VecDeque<std::sync::Weak<std::sync::atomic::AtomicBool>>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn inject_submit_rejected_once() {
@@ -404,4 +435,69 @@ pub(super) fn take_submit_fault() -> u8 {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn inject_completion_pending_once() {
     TEST_COMPLETION_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn inject_dx12_presentation_accepted_unknown_once() {
+    TEST_DX12_PRESENTATION_ACCEPTED_UNKNOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Called only after the presentation lowering has successfully submitted and
+/// presented its acquired image. No upload/copy path may consume this fault.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn take_dx12_presentation_accepted_unknown() -> bool {
+    TEST_DX12_PRESENTATION_ACCEPTED_UNKNOWN.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn take_dx12_presentation_accepted_unknown() -> bool {
+    false
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn arm_next_dx12_presentation_completion_hold(
+    hold: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let holds = TEST_PRESENTATION_COMPLETION_HOLDS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+    holds
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push_back(std::sync::Arc::downgrade(hold));
+}
+
+/// Consumes one still-live hold only at the successful-present boundary.
+/// Upload/copy submissions never call this helper.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn take_next_dx12_presentation_completion_hold()
+-> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    let holds = TEST_PRESENTATION_COMPLETION_HOLDS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let mut holds = holds
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while let Some(hold) = holds.pop_front() {
+        if let Some(hold) = hold.upgrade() {
+            if hold.load(std::sync::atomic::Ordering::Acquire) {
+                return Some(hold);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+pub(crate) fn clear_dx12_presentation_completion_holds_for_test() {
+    let holds = TEST_PRESENTATION_COMPLETION_HOLDS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+    holds
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn take_next_dx12_presentation_completion_hold()
+-> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    None
 }

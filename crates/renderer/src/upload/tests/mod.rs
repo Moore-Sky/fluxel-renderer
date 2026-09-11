@@ -158,8 +158,8 @@ fn publication_policy_represents_partial_acceptance_without_ready_output() {
 }
 
 #[test]
-fn generation_use_gate_serializes_clones_and_poison_is_monotonic() {
-    gate::generation_use_gate_serializes_clones_and_poison_is_monotonic();
+fn generation_use_gate_allows_concurrent_immutable_readers_and_poison_is_monotonic() {
+    gate::generation_use_gate_allows_concurrent_immutable_readers_and_poison_is_monotonic();
 }
 
 #[cfg(windows)]

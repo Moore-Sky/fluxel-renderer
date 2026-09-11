@@ -49,6 +49,13 @@ pub enum VisibleFrameStatus {
     Pending,
     /// Another operation temporarily holds the renderer executor.
     Busy,
+    /// Raster submission was accepted and the acquired image was consumed by
+    /// the native presentation path; GPU completion is not yet known.
+    ///
+    /// This does not promise that a later native present operation succeeded.
+    /// The milestone permits orchestration to acquire a later surface image;
+    /// it does not permit this submission's resources or frame slot to retire.
+    Submitted,
     /// The image was submitted and presented successfully.
     Complete,
     /// The work did not establish its promised terminal state.
@@ -233,7 +240,7 @@ impl VisibleFrameSubmission {
         ) {
             Ok(frame) => {
                 self.phase = VisiblePhase::RasterAccepted(frame);
-                VisibleFrameStatus::Pending
+                VisibleFrameStatus::Submitted
             }
             Err(ExecutionError::ExecutorBusy) => {
                 self.phase = VisiblePhase::RasterReady(uniform);

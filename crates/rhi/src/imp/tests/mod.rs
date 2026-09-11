@@ -4,30 +4,119 @@
 use super::*;
 
 #[cfg(feature = "dx12")]
+static PRESENTATION_HOLD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(feature = "dx12")]
 #[test]
-fn presentation_gate_handoff_and_retirement_follow_native_bundle_lifetime() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+fn presentation_tickets_retire_independently_with_native_bundle_lifetime() {
+    let tickets = NativePresentationTickets::new(3);
+    let first = tickets.try_acquire().unwrap();
+    let second = tickets.try_acquire().unwrap();
+    // Independent acquired frames both prevent teardown; retiring one cannot
+    // accidentally release the other.
+    assert_eq!(tickets.live_count(), 2);
+    drop(first);
+    assert_eq!(tickets.live_count(), 1);
+    assert!(tickets.any_live());
+    drop(second);
+    assert_eq!(tickets.live_count(), 0);
 
-    let gate = Arc::new(AtomicBool::new(true));
-    let mut token_gate = Some(Arc::clone(&gate));
-    let lease = transfer_presentation_lease(&mut token_gate)
-        .expect("an acquired token has a live-frame gate");
-    // Token handoff itself must not make resize/unconfigure legal.
-    assert!(token_gate.is_none());
-    assert!(gate.load(Ordering::Acquire));
-    // Known retirement drops the lightweight lease only after the submission
-    // has destroyed its derived views.
-    drop(lease);
-    assert!(!gate.load(Ordering::Acquire));
-
-    let unknown_gate = Arc::new(AtomicBool::new(true));
-    let unknown = NativePresentationLease::new(Arc::clone(&unknown_gate));
-    // Accepted-unknown quarantine intentionally retains the gate forever.
+    let unknown = tickets.try_acquire().unwrap();
+    // Accepted-unknown quarantine intentionally retains its own ticket.
     std::mem::forget(unknown);
-    assert!(unknown_gate.load(Ordering::Acquire));
+    assert!(tickets.any_live());
+}
+
+#[cfg(feature = "dx12")]
+#[test]
+fn unknown_presentation_completion_drop_quarantines_its_ticket() {
+    let tickets = NativePresentationTickets::new(1);
+    let lease = tickets.try_acquire().expect("one ticket");
+    quarantine_presentation_lease(Some(lease));
+    assert!(
+        tickets.any_live(),
+        "failure completion Drop must not make the presentable image reusable"
+    );
+}
+
+#[cfg(feature = "dx12")]
+#[test]
+fn presentation_completion_hold_is_fifo_and_drop_releases_it() {
+    use std::sync::atomic::Ordering;
+
+    let _serial = PRESENTATION_HOLD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_dx12_presentation_completion_holds_for_test();
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let second = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    arm_next_dx12_presentation_completion_hold(&first);
+    arm_next_dx12_presentation_completion_hold(&second);
+    let consumed_first = take_next_dx12_presentation_completion_hold().expect("first hold");
+    assert!(Arc::ptr_eq(&first, &consumed_first));
+    first.store(false, Ordering::Release);
+    assert!(!consumed_first.load(Ordering::Acquire));
+    let consumed_second = take_next_dx12_presentation_completion_hold().expect("second hold");
+    assert!(Arc::ptr_eq(&second, &consumed_second));
+    clear_dx12_presentation_completion_holds_for_test();
+}
+
+#[cfg(feature = "dx12")]
+#[test]
+fn dropped_unconsumed_presentation_hold_is_not_taken_by_a_later_present() {
+    let _serial = PRESENTATION_HOLD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_dx12_presentation_completion_holds_for_test();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    arm_next_dx12_presentation_completion_hold(&dropped);
+    drop(dropped);
+    assert!(
+        take_next_dx12_presentation_completion_hold().is_none(),
+        "a dropped handle must not latch a future presentation"
+    );
+    clear_dx12_presentation_completion_holds_for_test();
+}
+
+#[cfg(feature = "dx12")]
+#[test]
+fn presentation_hold_predicate_observes_drop_release_without_touching_other_work() {
+    use std::sync::atomic::Ordering;
+
+    let _serial = PRESENTATION_HOLD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_dx12_presentation_completion_holds_for_test();
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    assert!(presentation_completion_is_held(Some(&hold)));
+    hold.store(false, Ordering::Release);
+    assert!(!presentation_completion_is_held(Some(&hold)));
+    assert!(!presentation_completion_is_held(None));
+
+    // An armed hold remains queued until the presentation path explicitly
+    // takes it; generic copy/upload completion observation never calls take.
+    let queued = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    arm_next_dx12_presentation_completion_hold(&queued);
+    assert!(
+        !presentation_completion_is_held(None),
+        "a non-presentation completion has no hold to observe"
+    );
+    assert!(Arc::ptr_eq(
+        &queued,
+        &take_next_dx12_presentation_completion_hold().expect("presentation consumes queued hold")
+    ));
+    clear_dx12_presentation_completion_holds_for_test();
+}
+
+#[cfg(feature = "dx12")]
+#[test]
+fn presentation_accepted_unknown_fault_is_one_shot() {
+    let _serial = PRESENTATION_HOLD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    inject_dx12_presentation_accepted_unknown_once();
+    assert!(take_dx12_presentation_accepted_unknown());
+    assert!(!take_dx12_presentation_accepted_unknown());
 }
 
 #[cfg(test)]

@@ -444,7 +444,6 @@ fn start_uniform(
 
 fn reservation_error(error: SnapshotUseError) -> RenderPacketReservationError {
     match error {
-        SnapshotUseError::InFlight => RenderPacketReservationError::Busy,
         SnapshotUseError::Poisoned => RenderPacketReservationError::Poisoned,
     }
 }

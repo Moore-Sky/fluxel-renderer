@@ -2,16 +2,22 @@
 
 use super::*;
 
-pub(crate) fn generation_use_gate_serializes_clones_and_poison_is_monotonic() {
+pub(crate) fn generation_use_gate_allows_concurrent_immutable_readers_and_poison_is_monotonic() {
     let gate = Arc::new(SnapshotUseGate::new());
-    let reservation = gate.reserve().unwrap();
-    assert_eq!(gate.reserve().unwrap_err(), SnapshotUseError::InFlight);
-    reservation.release_before_submit();
+    let mut first = gate.reserve().unwrap();
+    let mut second = gate.reserve().unwrap();
 
-    let mut accepted = gate.reserve().unwrap();
-    accepted.release_complete();
+    // Finishing one reader must not serialize or invalidate another reader of
+    // the same immutable generation.
+    second.release_complete();
+    let mut third = gate.reserve().unwrap();
+    first.release_complete();
+    third.release_complete();
     let poisoned = gate.reserve().unwrap();
+    let mut sibling = gate.reserve().unwrap();
     drop(poisoned);
+    // A known completion after a sibling has become unknown cannot revive it.
+    sibling.release_complete();
     assert_eq!(gate.reserve().unwrap_err(), SnapshotUseError::Poisoned);
 }
 

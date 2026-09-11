@@ -10,6 +10,47 @@ use crate::{
     UploadedBuffer, UploadedTexture,
 };
 
+/// RAII latch for exactly one later successful DX12 presentation completion.
+///
+/// While this handle lives, polling and waiting for the consumed presentation
+/// completion report `Pending`; dropping it releases that completion without
+/// changing native fence state. It is intentionally unavailable to production
+/// builds and never affects copy/upload completions. On unsupported platforms
+/// it is a no-op so portable conformance code remains compilable.
+#[doc(hidden)]
+pub struct NextDx12PresentationCompletionLatch {
+    #[cfg(all(windows, feature = "dx12"))]
+    held: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for NextDx12PresentationCompletionLatch {
+    fn drop(&mut self) {
+        #[cfg(all(windows, feature = "dx12"))]
+        self.held.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Holds the next successful DX12 presentation completion until the returned
+/// handle is dropped.
+///
+/// This is a narrowly scoped frames-in-flight oracle: the hold is consumed
+/// after `submit` and `present` both succeed, rather than at generic queue
+/// submission, so upload/copy work cannot consume it.
+#[doc(hidden)]
+#[must_use]
+pub fn hold_next_dx12_presentation_completion() -> NextDx12PresentationCompletionLatch {
+    #[cfg(all(windows, feature = "dx12"))]
+    {
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        crate::imp::arm_next_dx12_presentation_completion_hold(&held);
+        NextDx12PresentationCompletionLatch { held }
+    }
+    #[cfg(not(all(windows, feature = "dx12")))]
+    {
+        NextDx12PresentationCompletionLatch {}
+    }
+}
+
 /// Clears diagnostics collected after `Device::open` enabled capture.
 pub fn clear_validation_diagnostics(device: &Device) {
     #[cfg(windows)]
@@ -85,6 +126,17 @@ pub fn inject_submit_accepted_unknown_after(successful_submits: usize) {
 pub fn inject_completion_pending_once() {
     #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
     crate::imp::inject_completion_pending_once();
+}
+
+/// Makes the next successful DX12 present report accepted-but-unknown
+/// completion after its native image has been submitted and presented.
+///
+/// Unlike the generic submission hook, this is consumed exclusively by the
+/// presentation lowering; it exercises surface-ticket quarantine rather than
+/// pretending that work was rejected before queue acceptance.
+pub fn inject_dx12_presentation_accepted_unknown_once() {
+    #[cfg(all(windows, feature = "dx12"))]
+    crate::imp::inject_dx12_presentation_accepted_unknown_once();
 }
 
 /// Reads a finalized immutable upload using its exact published state.

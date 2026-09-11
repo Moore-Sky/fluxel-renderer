@@ -9,9 +9,11 @@ snapshots into an owned opaque `RenderPacket`, then non-blockingly submit its
 ordered legacy unlit draws as one compiled graph, raster pass, and native
 submission. The feature also supports deliberately closed single-draw
 `f32x3/u32` indexed, textured, vertex-color, and Lambert paths that return
-opaque offscreen image metadata. The Stage 1.1 visible path uses the same
+opaque offscreen image metadata. The Stage 1 visible path uses the same
 legacy-unlit camera/material recipe to draw one acquired DX12 image and returns
-a non-blocking presentation submission.
+a non-blocking presentation submission. Multiple submissions may retain
+independent immutable snapshot read leases; a private proof scheduler, not the
+renderer API, bounds frames in flight.
 It can separately upload canonical unit normals and execute one closed,
 non-textured fixed-Lambert draw.
 
@@ -24,7 +26,7 @@ pipeline/bind-group API, or own windows and swapchains.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.0"
+tag = "v0.8.2"
 features = ["gpu-upload"]
 ```
 
@@ -41,10 +43,14 @@ and a nonzero extent. It serializes `projection * view` and the linear
 blocking, then submits one fixed triangle-list Raster recipe only after that
 upload completes. Poll the returned `FixedFrameSubmission`: `Pending` covers
 either uniform upload or Raster completion, while retryable `Busy` retains the
-operation. `Complete` yields an opaque `FrameImage`; terminal or otherwise
-unproven accepted Raster work poisons that snapshot generation. Snapshot clones
-share the same single-in-flight state; no native texture or buffer handle is
-exposed.
+operation. `Submitted` reports that raster submission was accepted and the
+acquired image was consumed by the native presentation path, but does not claim
+present or GPU completion. `Complete` yields an opaque `FrameImage`; terminal
+or otherwise unproven accepted Raster work poisons that snapshot generation.
+Snapshot clones share one generation that permits concurrent immutable readers;
+each reader releases only after its own known completion, while any unknown
+accepted result poisons the generation monotonically. No native texture or
+buffer handle is exposed.
 
 `FixedFrameRenderer::lower_draw_list` accepts an insertion-ordered `DrawList`
 and one ready `IndexedMeshSnapshot` for each draw at the same positional index.

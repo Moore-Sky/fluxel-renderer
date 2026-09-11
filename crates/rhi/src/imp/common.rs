@@ -372,23 +372,68 @@ pub(crate) enum NativeFinished {
 #[derive(Clone)]
 pub(crate) struct NativeCompletion(pub(crate) Arc<std::sync::Mutex<NativeSubmission>>);
 
+/// Private accounting for every acquired or accepted-present surface image.
+///
+/// A ticket is created only by the surface façade and is moved, never copied,
+/// through its native token and (after accepted present) completion bundle.
+/// The count is deliberately not a public frame/image index: it only answers
+/// whether teardown may touch the swapchain at all.
+pub(crate) struct NativePresentationTickets {
+    live: std::sync::atomic::AtomicUsize,
+    capacity: usize,
+}
+
+impl NativePresentationTickets {
+    pub(crate) fn new(capacity: usize) -> std::sync::Arc<Self> {
+        assert!(capacity > 0, "presentation ticket capacity must be nonzero");
+        std::sync::Arc::new(Self {
+            live: std::sync::atomic::AtomicUsize::new(0),
+            capacity,
+        })
+    }
+
+    pub(crate) fn try_acquire(self: &std::sync::Arc<Self>) -> Option<NativePresentationLease> {
+        self.live
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |live| (live < self.capacity).then_some(live + 1),
+            )
+            .ok()
+            .map(|_| NativePresentationLease {
+                tickets: std::sync::Arc::clone(self),
+            })
+    }
+
+    pub(crate) fn any_live(&self) -> bool {
+        self.live.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_count(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
 /// The post-present part of an acquired-frame gate. It deliberately contains
 /// no window or surface ownership, so ordinary completions remain Send/Sync.
 /// It is released only after the submission has destroyed derived views.
 pub(crate) struct NativePresentationLease {
-    live_frame: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl NativePresentationLease {
-    pub(crate) fn new(live_frame: Arc<std::sync::atomic::AtomicBool>) -> Self {
-        Self { live_frame }
-    }
+    tickets: std::sync::Arc<NativePresentationTickets>,
 }
 
 impl Drop for NativePresentationLease {
     fn drop(&mut self) {
-        self.live_frame
-            .store(false, std::sync::atomic::Ordering::Release);
+        let prior = self
+            .tickets
+            .live
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(prior > 0, "presentation ticket accounting underflow");
     }
 }
 
@@ -407,6 +452,9 @@ pub(crate) enum NativeSubmission {
         staging_buffers: Vec<OwnedBuffer>,
         render_views: Vec<NativeRenderView>,
         presentation_lease: Option<NativePresentationLease>,
+        /// Test-only completion hold consumed only after a successful DX12
+        /// present. It is absent for copy/upload and failed present paths.
+        presentation_completion_hold: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         failure: Option<CompletionFailure>,
     },
     #[cfg(feature = "vulkan")]

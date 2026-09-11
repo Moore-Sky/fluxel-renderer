@@ -37,7 +37,7 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.1"
+tag = "v0.8.2"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -47,7 +47,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.1"
+tag = "v0.8.2"
 default-features = false
 features = ["dx12"]
 ```
@@ -70,8 +70,12 @@ The Windows DX12 presentation slice accepts only standard window/display
 handles. `Dx12Surface` exposes an opaque generation and Active, Suspended,
 Poisoned, or Closed lifecycle state; zero-sized targets suspend acquisition,
 and a later non-zero extent creates a fresh generation only after known
-retirement of the old one. Native swapchain objects and HWND remain private.
-This remains a serial one-live-frame proof, not a general surface API.
+retirement of the old one. Each acquired image owns a private capacity-bounded
+ticket until discard or completion-driven destruction of its derived views;
+resize and shutdown refuse while any ticket remains live. Native swapchain
+objects, ticket capacity, image indices, synchronization, and HWND remain
+private. Renderer frames-in-flight policy is separate from this native image
+availability guard; this is still not a general surface API.
 
 ## Open a device
 

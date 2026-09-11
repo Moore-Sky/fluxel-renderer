@@ -46,12 +46,12 @@ The workspace releases its three crates together.  Git consumers must pin the
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.1" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.1" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.1" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.2" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.2" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.2" }
 ```
 
-`v0.8.1` and each package's `0.8.1` version identify the same workspace
+`v0.8.2` and each package's `0.8.2` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -149,9 +149,21 @@ validation harness; it did not become a host-services runtime.
   native outcomes and premature Surface drop quarantine the full ownership
   bundle instead of guessing that teardown is safe.
 
-The proof remains deliberately narrow: DX12, one live frame, and conservative
-queue-idle retirement for recreation. Bounded frames-in-flight is the next
-closure; Vulkan presentation follows separately.
+The proof remains deliberately narrow: DX12 and conservative queue-idle
+retirement for recreation. Vulkan presentation follows separately.
+
+### Stage 1.3 DX12 bounded frames-in-flight
+
+- [x] Keep the Windows proof scheduler at a private bounded capacity of three;
+  no slot, fence, image index, or triple-buffer policy enters public API.
+- [x] Reserve scheduler capacity before surface acquisition and apply explicit
+  back pressure when all slots remain live.
+- [x] Let immutable renderer snapshots retain independent concurrent read
+  leases while each visible submission owns its completion lifetime.
+- [x] Track every acquired/presented image with an independent RHI ticket;
+  resize and shutdown refuse to touch the swapchain until all tickets retire.
+- [x] Expose only the policy-neutral `VisibleFrameStatus::Submitted` milestone
+  needed to distinguish native submission from completion-driven slot reuse.
 
 ### Unscheduled optimizations
 

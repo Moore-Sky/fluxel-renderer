@@ -10,16 +10,15 @@ pub(super) static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// Why a ready snapshot cannot start another renderer draw.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotUseError {
-    /// An accepted draw for this generation has not reached a terminal state.
-    InFlight,
     /// A prior accepted draw did not prove that the fixed outgoing states held.
     Poisoned,
 }
 
-/// One private reservation for a snapshot generation.
+/// One private immutable-read lease for a snapshot generation.
 ///
-/// Dropping an accepted operation without proving completion poisons the gate;
-/// a pre-submit caller explicitly releases this reservation instead.
+/// Several immutable readers may coexist. Dropping an accepted operation without
+/// proving completion poisons the whole generation; a pre-submit caller explicitly
+/// releases its own lease instead.
 #[derive(Debug)]
 pub(crate) struct SnapshotDrawReservation {
     gate: Arc<SnapshotUseGate>,
@@ -66,7 +65,7 @@ pub(super) struct SnapshotUseGate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SnapshotUseState {
     Ready,
-    InFlight,
+    Readers(usize),
     Poisoned,
 }
 
@@ -84,13 +83,23 @@ impl SnapshotUseGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match *state {
             SnapshotUseState::Ready => {
-                *state = SnapshotUseState::InFlight;
+                *state = SnapshotUseState::Readers(1);
                 Ok(SnapshotDrawReservation {
                     gate: Arc::clone(self),
                     active: true,
                 })
             }
-            SnapshotUseState::InFlight => Err(SnapshotUseError::InFlight),
+            SnapshotUseState::Readers(readers) => {
+                *state = SnapshotUseState::Readers(
+                    readers
+                        .checked_add(1)
+                        .expect("snapshot reader count overflow"),
+                );
+                Ok(SnapshotDrawReservation {
+                    gate: Arc::clone(self),
+                    active: true,
+                })
+            }
             SnapshotUseState::Poisoned => Err(SnapshotUseError::Poisoned),
         }
     }
@@ -100,8 +109,16 @@ impl SnapshotUseGate {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        debug_assert_eq!(*state, SnapshotUseState::InFlight);
-        *state = SnapshotUseState::Ready;
+        match *state {
+            SnapshotUseState::Readers(1) => *state = SnapshotUseState::Ready,
+            SnapshotUseState::Readers(readers) => *state = SnapshotUseState::Readers(readers - 1),
+            // A sibling accepted submission became unknown. Its poison is
+            // monotonic, so a later known reader cannot restore this generation.
+            SnapshotUseState::Poisoned => {}
+            SnapshotUseState::Ready => {
+                debug_assert!(false, "released snapshot lease was not active")
+            }
+        }
     }
 
     fn poison(&self) {

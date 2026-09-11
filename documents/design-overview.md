@@ -31,7 +31,9 @@ general pipeline or bind-group builder, general shader reflection API,
 cross-platform surface abstraction, multi-queue scheduler, transient aliasing
 implementation, or stable asset/resource handle and cache ABI. The one proven
 presentation slice is a DX12 surface-generation lifecycle used by a Windows
-proof harness; it handles resize/minimize/restore but is not a general platform API.
+proof harness; it handles resize/minimize/restore and independent acquired-frame
+tickets, while the harness privately proves bounded frames-in-flight. It is not
+a general platform API or public frame scheduler.
 
 ## Layer model and dependency direction
 
@@ -264,7 +266,9 @@ while internal implementation evolves.
 
 The portable graph and default renderer-domain model are not tied to a native
 API. Native execution is Windows-focused, with headless DX12/Vulkan feature
-selection and a separate DX12 surface-generation path. Non-Windows native
+selection and a separate DX12 surface-generation/ticket path. The Windows proof
+harness owns its bounded three-slot admission and back-pressure policy; RHI only
+guards native image availability and completion-driven teardown. Non-Windows native
 requests fail explicitly rather than silently emulating a backend. There is no
 Vulkan presentation, lost-surface/device recovery, general cross-platform
 surface API, or web renderer today.

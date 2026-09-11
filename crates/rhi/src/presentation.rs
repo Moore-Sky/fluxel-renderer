@@ -13,10 +13,7 @@ use core::fmt;
 use std::{
     any::Any,
     rc::Rc,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -43,7 +40,10 @@ pub enum SurfaceError {
     Configure(String),
     /// The next backbuffer could not be acquired before recording.
     Acquire(String),
-    /// The caller tried to acquire while a prior frame is still outstanding.
+    /// Native presentable-image capacity is exhausted for this surface.
+    ///
+    /// This protects swapchain image ownership only; it is independent from
+    /// the renderer's higher-level bounded frames-in-flight policy.
     FrameOutstanding,
     /// Shutdown was requested while an acquired frame still exists.
     FrameStillAcquired,
@@ -67,7 +67,9 @@ impl fmt::Display for SurfaceError {
             Self::Open(value) => write!(f, "DX12 surface open failed: {value}"),
             Self::Configure(value) => write!(f, "DX12 surface configure failed: {value}"),
             Self::Acquire(value) => write!(f, "DX12 surface acquire failed: {value}"),
-            Self::FrameOutstanding => f.write_str("a surface frame is already acquired"),
+            Self::FrameOutstanding => {
+                f.write_str("DX12 surface has no free presentable-image capacity")
+            }
             Self::FrameStillAcquired => {
                 f.write_str("cannot shut down with an acquired surface frame")
             }
@@ -151,18 +153,18 @@ pub struct Dx12Surface {
     status: SurfaceStatus,
     next_generation: u64,
     closed: bool,
-    live_frame: Arc<AtomicBool>,
+    presentation_tickets: Arc<imp::NativePresentationTickets>,
     _thread_affinity: Rc<()>,
 }
 
 impl Drop for Dx12Surface {
     fn drop(&mut self) {
-        let frame_outstanding = self.live_frame.load(Ordering::Acquire);
+        let frame_outstanding = self.presentation_tickets.any_live();
         let retained = (
             Arc::clone(&self.device.inner),
             Arc::clone(&self.native),
             Arc::clone(&self.window),
-            Arc::clone(&self.live_frame),
+            Arc::clone(&self.presentation_tickets),
         );
         // A successful present may have moved only a lightweight gate into a
         // Send-capable completion. If callers drop Surface before that bundle
@@ -184,7 +186,7 @@ impl Drop for Dx12Surface {
             Arc::clone(&self.device.inner),
             Arc::clone(&self.native),
             Arc::clone(&self.window),
-            Arc::clone(&self.live_frame),
+            Arc::clone(&self.presentation_tickets),
         );
         if !quarantine_after_teardown_failure(
             imp::unconfigure_dx12_surface(&self.device.inner, &self.native),
@@ -327,7 +329,9 @@ impl Dx12Surface {
             next_generation,
             closed: false,
             window,
-            live_frame: Arc::new(AtomicBool::new(false)),
+            presentation_tickets: imp::NativePresentationTickets::new(
+                imp::DX12_PRESENTABLE_IMAGE_COUNT,
+            ),
             _thread_affinity: Rc::new(()),
         })
     }
@@ -370,7 +374,7 @@ impl Dx12Surface {
         if matches!(transition, SurfaceTransition::Noop) {
             return Ok(self.status);
         }
-        if self.live_frame.load(Ordering::Acquire) {
+        if self.presentation_tickets.any_live() {
             return Err(SurfaceError::FrameOutstanding);
         }
         if matches!(
@@ -410,7 +414,8 @@ impl Dx12Surface {
         Ok(self.status)
     }
 
-    /// Acquires the sole frame that may be recorded for this surface now.
+    /// Acquires one presentable image. Each acquisition owns an independent
+    /// private ticket until discard or known completion retirement.
     pub fn acquire(&mut self) -> Result<AcquiredSurfaceFrame, SurfaceError> {
         if self.closed {
             return Err(SurfaceError::NotConfigured);
@@ -425,9 +430,10 @@ impl Dx12Surface {
                 SurfaceStatus::Active { .. } => unreachable!(),
             });
         };
-        if self.live_frame.swap(true, Ordering::AcqRel) {
-            return Err(SurfaceError::FrameOutstanding);
-        }
+        let ticket = self
+            .presentation_tickets
+            .try_acquire()
+            .ok_or(SurfaceError::FrameOutstanding)?;
         let descriptor = TextureDesc {
             dimension: TextureDimension::D2,
             extent: fluxel_rendergraph::Extent3d {
@@ -448,13 +454,12 @@ impl Dx12Surface {
             &self.device.inner,
             Arc::clone(&self.native),
             Arc::clone(&self.window),
-            Arc::clone(&self.live_frame),
+            ticket,
             descriptor,
             usage,
         ) {
             Ok(value) => value,
             Err(error) => {
-                self.live_frame.store(false, Ordering::Release);
                 return Err(SurfaceError::Acquire(error));
             }
         };
@@ -495,7 +500,7 @@ impl Dx12Surface {
             }
             ShutdownTransition::RetireThenClose | ShutdownTransition::Close => {}
         }
-        if self.live_frame.load(Ordering::Acquire) {
+        if self.presentation_tickets.any_live() {
             return Err(SurfaceError::FrameStillAcquired);
         }
         if matches!(
@@ -529,7 +534,7 @@ impl Dx12Surface {
             Arc::clone(&self.device.inner),
             Arc::clone(&self.native),
             Arc::clone(&self.window),
-            Arc::clone(&self.live_frame),
+            Arc::clone(&self.presentation_tickets),
         );
         let _ = quarantine_live_drop_ownership(true, retained);
     }

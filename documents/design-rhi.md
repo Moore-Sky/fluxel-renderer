@@ -100,13 +100,16 @@ unsupported platform are intentionally different, tested outcomes.
 Support is currently fixed headless Raster/Compute/Copy execution on Windows
 DX12/Vulkan plus one DX12 presentation lifecycle slice. `Dx12Surface` selects
 a surface-compatible adapter, retains the supplied standard window/display
-handle owner, permits one live frame, and keeps HWND/DXGI/HAL details in
+handle owner, permits multiple independently ticketed acquired frames up to
+the private native image capacity, and keeps HWND/DXGI/HAL details in
 `imp`. Non-zero configurations receive opaque monotonic generations; resize
 retires the old generation before recreation, while zero-size/minimize becomes
-Suspended and restore configures a fresh generation. A lightweight completion
-lease keeps acquisition closed until derived views are destroyed, and unknown
-retirement quarantines native/window ownership. Vulkan presentation, loss
-recovery, bounded frames-in-flight, and a general cross-platform surface API
+Suspended and restore configures a fresh generation. Each lightweight
+completion ticket remains live until its derived views are destroyed; any live
+ticket blocks lifecycle teardown, and unknown retirement quarantines native/
+window ownership. The ticket limit protects native swapchain image uniqueness;
+renderer-owned bounded frame scheduling remains a separate private policy.
+Vulkan presentation, loss recovery, and a general cross-platform surface API
 remain absent. Native platform paths must run on native environments rather
 than be inferred from cross-compilation; see
 [ADR-0008](adr/0008-native-platform-test-gates.md).

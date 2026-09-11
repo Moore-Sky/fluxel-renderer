@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// Retains a presentation ticket when accepted work lacks a completion proof.
+///
+/// This is intentionally separate from ordinary resource quarantine so the
+/// surface capacity gate cannot become free merely because completion Drop
+/// runs after a failed/unknown presentation.
+#[cfg(feature = "dx12")]
+pub(crate) fn quarantine_presentation_lease(lease: Option<NativePresentationLease>) {
+    std::mem::forget(lease);
+}
+
 impl Drop for OwnedBuffer {
     fn drop(&mut self) {
         let native = self.native.take().expect("owned buffer destroyed once");
@@ -492,6 +502,7 @@ impl Drop for NativeSubmission {
                 staging_buffers,
                 render_views,
                 presentation_lease,
+                presentation_completion_hold,
                 failure,
             } => {
                 // No fence means a submit failure may already have accepted
@@ -502,7 +513,8 @@ impl Drop for NativeSubmission {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
-                    let retained_presentation_lease = presentation_lease.take();
+                    quarantine_presentation_lease(presentation_lease.take());
+                    let retained_presentation_completion_hold = presentation_completion_hold.take();
                     std::mem::forget((
                         owner.clone(),
                         encoder.take(),
@@ -510,7 +522,7 @@ impl Drop for NativeSubmission {
                         retained,
                         retained_staging,
                         retained_views,
-                        retained_presentation_lease,
+                        retained_presentation_completion_hold,
                     ));
                     return;
                 }
@@ -522,7 +534,8 @@ impl Drop for NativeSubmission {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
-                    let retained_presentation_lease = presentation_lease.take();
+                    quarantine_presentation_lease(presentation_lease.take());
+                    let retained_presentation_completion_hold = presentation_completion_hold.take();
                     std::mem::forget((
                         owner.clone(),
                         encoder.take(),
@@ -531,7 +544,7 @@ impl Drop for NativeSubmission {
                         retained,
                         retained_staging,
                         retained_views,
-                        retained_presentation_lease,
+                        retained_presentation_completion_hold,
                     ));
                     return;
                 }
@@ -557,7 +570,8 @@ impl Drop for NativeSubmission {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
-                    let retained_presentation_lease = presentation_lease.take();
+                    quarantine_presentation_lease(presentation_lease.take());
+                    let retained_presentation_completion_hold = presentation_completion_hold.take();
                     std::mem::forget((
                         owner.clone(),
                         encoder,
@@ -566,7 +580,7 @@ impl Drop for NativeSubmission {
                         retained,
                         retained_staging,
                         retained_views,
-                        retained_presentation_lease,
+                        retained_presentation_completion_hold,
                     ));
                 } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
                     // SAFETY: the sole command buffer completed at fence value 1.
@@ -578,11 +592,13 @@ impl Drop for NativeSubmission {
                     // Views are now destroyed and fence completion proved, so
                     // a subsequent resize/unconfigure may retire this surface.
                     drop(presentation_lease.take());
+                    drop(presentation_completion_hold.take());
                 } else {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
-                    let retained_presentation_lease = presentation_lease.take();
+                    quarantine_presentation_lease(presentation_lease.take());
+                    let retained_presentation_completion_hold = presentation_completion_hold.take();
                     std::mem::forget((
                         owner.clone(),
                         encoder,
@@ -591,7 +607,7 @@ impl Drop for NativeSubmission {
                         retained,
                         retained_staging,
                         retained_views,
-                        retained_presentation_lease,
+                        retained_presentation_completion_hold,
                     ));
                 }
             }

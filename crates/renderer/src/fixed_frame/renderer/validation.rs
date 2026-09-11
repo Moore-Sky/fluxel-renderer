@@ -14,13 +14,11 @@ pub(super) fn rgba8_unorm_srgb_filterable(capabilities: &DeviceCapabilities) -> 
 }
 pub(super) fn map_snapshot_use(error: SnapshotUseError) -> DrawStartError {
     match error {
-        SnapshotUseError::InFlight => DrawStartError::SnapshotInFlight,
         SnapshotUseError::Poisoned => DrawStartError::SnapshotPoisoned,
     }
 }
 fn map_texture_use(error: SnapshotUseError) -> DrawStartError {
     match error {
-        SnapshotUseError::InFlight => DrawStartError::TextureInFlight,
         SnapshotUseError::Poisoned => DrawStartError::TexturePoisoned,
     }
 }
