@@ -22,6 +22,10 @@ use crate::fixed_frame::{
 
 use super::*;
 use crate::upload::{SnapshotDrawReservation, SnapshotUseError};
+#[cfg(windows)]
+use fluxel_rhi::presentation::AcquiredSurfaceFrame;
+#[cfg(windows)]
+use fluxel_rhi::{ResourceLease, Texture, presentation::PresentationToken};
 
 /// Internal progress state.  Only one uniform copy can be pending: starting
 /// draw `n + 1` is allowed only after draw `n` has been finalized, which makes
@@ -46,8 +50,13 @@ pub struct RenderPacketSubmission {
     objects: Option<RasterObjectProvider>,
     ready_uniforms: Vec<UploadedBuffer>,
     reservations: Vec<SnapshotDrawReservation>,
+    #[cfg(windows)]
+    surface:
+        Option<fluxel_rendergraph::BoundSurfaceTexture<Texture, ResourceLease, PresentationToken>>,
     pub(super) target_export: Option<fluxel_rendergraph::ExportTextureSlot>,
     image: Option<super::super::FrameImage>,
+    #[cfg(windows)]
+    presented: bool,
     failure: Option<RenderPacketFailure>,
     #[cfg(all(test, windows))]
     pub(super) completed: Option<fluxel_rendergraph::ExecutedFrame<RasterBackend>>,
@@ -61,11 +70,14 @@ impl core::fmt::Debug for RenderPacketSubmission {
             PacketPhase::RasterAccepted(_) => "raster-accepted",
             PacketPhase::Terminal => "terminal",
         };
-        formatter
-            .debug_struct("RenderPacketSubmission")
+        let mut debug = formatter.debug_struct("RenderPacketSubmission");
+        debug
             .field("draw_count", &self.packet.draws().len())
             .field("phase", &phase)
-            .field("complete", &self.image.is_some())
+            .field("complete", &self.image.is_some());
+        #[cfg(windows)]
+        debug.field("presented", &self.presented);
+        debug
             .field("failed", &self.failure.is_some())
             .finish_non_exhaustive()
     }
@@ -96,7 +108,74 @@ impl super::super::FixedFrameRenderer {
                 return Err(RenderPacketStartError::GraphIdentityExhausted);
             }
         };
-        self.start_reserved_packet(packet, graph, reservations)
+        self.start_reserved_packet(
+            packet,
+            graph,
+            reservations,
+            #[cfg(windows)]
+            None,
+        )
+    }
+
+    /// Submits one ordered packet to a single acquired presentable image.
+    ///
+    /// Every draw in the packet shares this one linear presentation token.
+    /// The token and all snapshot reservations retire together only after the
+    /// accepted frame proves completion.
+    #[cfg(windows)]
+    pub fn submit_packet_to_surface(
+        &self,
+        packet: RenderPacket,
+        acquired: AcquiredSurfaceFrame,
+    ) -> Result<RenderPacketSubmission, RenderPacketStartError> {
+        if packet.device() != self.device.identity() {
+            return Err(RenderPacketStartError::ForeignPacketDevice);
+        }
+        let surface = acquired.into_binding();
+        if surface.texture.device != self.device.identity() {
+            return Err(RenderPacketStartError::ForeignSurfaceDevice);
+        }
+        let extent = [
+            surface.texture.descriptor.extent.width,
+            surface.texture.descriptor.extent.height,
+        ];
+        if extent != packet.extent() {
+            return Err(RenderPacketStartError::SurfaceExtentMismatch {
+                packet: packet.extent(),
+                surface: extent,
+            });
+        }
+        let mut reservations = self.reserve_packet_snapshots(&packet)?;
+        let graph = match super::graph::build_presentable_packet_graph(
+            &packet,
+            fluxel_rendergraph::SurfaceTextureContract {
+                descriptor: surface.texture.descriptor,
+            },
+            &self.capabilities,
+        ) {
+            Ok(graph) => graph,
+            Err(super::PacketGraphBuildError::Compile(error)) => {
+                release_reservations(&mut reservations);
+                return Err(RenderPacketStartError::Graph(error));
+            }
+            Err(super::PacketGraphBuildError::IdentityExhausted) => {
+                release_reservations(&mut reservations);
+                return Err(RenderPacketStartError::GraphIdentityExhausted);
+            }
+        };
+        let surface = fluxel_rendergraph::BoundSurfaceTexture {
+            texture: fluxel_rendergraph::BoundTexture {
+                device: surface.texture.device,
+                identity: surface.texture.identity,
+                physical: surface.texture.physical,
+                descriptor: surface.texture.descriptor,
+                usage: surface.texture.usage,
+                initial_state: surface.texture.initial_state,
+                lease: surface.texture.lease.into(),
+            },
+            presentation: surface.presentation,
+        };
+        self.start_reserved_packet(packet, graph, reservations, Some(surface))
     }
 
     /// Starts a packet with a graph allocation supplied by a paired native
@@ -111,7 +190,13 @@ impl super::super::FixedFrameRenderer {
             return Err(RenderPacketStartError::ForeignPacketDevice);
         }
         let reservations = self.reserve_packet_snapshots(&packet)?;
-        self.start_reserved_packet(packet, graph, reservations)
+        self.start_reserved_packet(
+            packet,
+            graph,
+            reservations,
+            #[cfg(windows)]
+            None,
+        )
     }
 
     /// Reserves every generation once, preserving first-draw error identity.
@@ -146,6 +231,9 @@ impl super::super::FixedFrameRenderer {
         packet: RenderPacket,
         graph: PacketGraph,
         mut reservations: Vec<SnapshotDrawReservation>,
+        #[cfg(windows)] surface: Option<
+            fluxel_rendergraph::BoundSurfaceTexture<Texture, ResourceLease, PresentationToken>,
+        >,
     ) -> Result<RenderPacketSubmission, RenderPacketStartError> {
         let pipeline = match self
             .device
@@ -192,8 +280,12 @@ impl super::super::FixedFrameRenderer {
             objects: Some(objects),
             ready_uniforms: Vec::new(),
             reservations,
+            #[cfg(windows)]
+            surface,
             target_export: None,
             image: None,
+            #[cfg(windows)]
+            presented: false,
             failure: None,
             #[cfg(all(test, windows))]
             completed: None,
@@ -218,6 +310,10 @@ impl RenderPacketSubmission {
     pub fn poll(&mut self) -> RenderPacketStatus {
         if let Some(image) = &self.image {
             return RenderPacketStatus::Complete(image.clone());
+        }
+        #[cfg(windows)]
+        if self.presented {
+            return RenderPacketStatus::Presented;
         }
         if let Some(failure) = &self.failure {
             return RenderPacketStatus::Failed(failure.clone());
@@ -307,7 +403,13 @@ impl RenderPacketSubmission {
             .as_ref()
             .expect("pre-raster packet retains object provider");
         debug_assert_eq!(self.ready_uniforms.len(), self.packet.draws().len());
-        let resources = PacketResources::new(&self.packet, graph, &self.ready_uniforms);
+        let resources = PacketResources::new(
+            &self.packet,
+            graph,
+            &self.ready_uniforms,
+            #[cfg(windows)]
+            self.surface.take(),
+        );
         let mut inputs = FrameInputs::new(());
         for snapshot in &graph.snapshots {
             inputs
@@ -317,6 +419,10 @@ impl RenderPacketSubmission {
         for draw in &graph.draws {
             inputs.bind_buffer(draw.uniform_slot, draw.uniform_binding);
         }
+        #[cfg(windows)]
+        if let Some(surface_slot) = graph.surface_slot {
+            inputs.bind_surface(surface_slot, super::super::surface_binding());
+        }
         match self.executor.execute(
             &graph.compiled,
             graph.compiled.instantiate_local(inputs),
@@ -324,11 +430,19 @@ impl RenderPacketSubmission {
             objects,
         ) {
             Ok(frame) => {
-                self.target_export = Some(graph.target_export);
+                self.target_export = graph.target_export;
                 self.phase = PacketPhase::RasterAccepted(frame);
+                #[cfg(windows)]
+                if graph.surface_slot.is_some() {
+                    return RenderPacketStatus::Submitted;
+                }
                 RenderPacketStatus::Pending
             }
             Err(ExecutionError::ExecutorBusy) => {
+                #[cfg(windows)]
+                {
+                    self.surface = resources.take_surface();
+                }
                 self.phase = PacketPhase::RasterReady;
                 RenderPacketStatus::Busy
             }
@@ -355,10 +469,16 @@ impl RenderPacketSubmission {
                 RenderPacketStatus::Pending
             }
             Ok(CompletionStatus::Complete) => {
-                let Some(exported) = frame.exports.texture(
-                    self.target_export
-                        .expect("accepted packet has a target export"),
-                ) else {
+                let Some(target_export) = self.target_export else {
+                    release_reservations_complete(&mut self.reservations);
+                    self.graph.take();
+                    self.objects.take();
+                    self.ready_uniforms.clear();
+                    self.presented = true;
+                    self.phase = PacketPhase::Terminal;
+                    return RenderPacketStatus::Presented;
+                };
+                let Some(exported) = frame.exports.texture(target_export) else {
                     return self.finish_accepted(RenderPacketFailure::RasterObservation {
                         cause: FixedFrameRasterObservationError::MissingTargetExport,
                     });

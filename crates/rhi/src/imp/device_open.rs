@@ -164,7 +164,7 @@ pub(crate) fn dx12_validation_is_enabled(device: &wgpu_hal::dx12::Device) -> boo
 }
 
 #[cfg(feature = "vulkan")]
-fn vulkan_validation_is_available() -> bool {
+pub(crate) fn vulkan_validation_is_available() -> bool {
     let validation_layer = c"VK_LAYER_KHRONOS_validation";
     let validation_features = c"VK_EXT_validation_features";
     // SAFETY: loading the process Vulkan loader performs no device operation;

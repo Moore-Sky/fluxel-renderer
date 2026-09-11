@@ -15,6 +15,8 @@ use fluxel_rendergraph::{
     IndexFormat, InitialContents, LoadOp, RenderGraph, ResourceAccessState, StoreOp, TextureDesc,
     TextureDimension, TextureFormat, TextureRange, Viewport, WriteCoverage,
 };
+#[cfg(windows)]
+use fluxel_rendergraph::{PresentContract, SurfaceTextureContract};
 
 use crate::frame_uniform::FRAME_UNIFORM_BYTES;
 
@@ -25,7 +27,9 @@ use crate::fixed_frame::{camera_bindings, camera_pipeline};
 #[derive(Clone)]
 pub(in crate::fixed_frame) struct PacketGraph {
     pub(in crate::fixed_frame) compiled: Arc<fluxel_rendergraph::CompiledGraph<()>>,
-    pub(in crate::fixed_frame) target_export: ExportTextureSlot,
+    pub(in crate::fixed_frame) target_export: Option<ExportTextureSlot>,
+    #[cfg(windows)]
+    pub(in crate::fixed_frame) surface_slot: Option<fluxel_rendergraph::ImportTextureSlot>,
     pub(in crate::fixed_frame) snapshots: Vec<SnapshotImport>,
     pub(in crate::fixed_frame) draws: Vec<DrawImport>,
 }
@@ -102,6 +106,32 @@ pub(in crate::fixed_frame) fn build_packet_graph(
     packet: &RenderPacket,
     capabilities: &DeviceCapabilities,
 ) -> Result<PacketGraph, PacketGraphBuildError> {
+    build_packet_graph_for_target(packet, capabilities, PacketTarget::Offscreen)
+}
+
+/// Builds the same ordered draw declaration against one acquired presentable
+/// image. The graph owns presentation intent; native surface details stay in
+/// the RHI binding supplied at execution.
+#[cfg(windows)]
+pub(in crate::fixed_frame) fn build_presentable_packet_graph(
+    packet: &RenderPacket,
+    surface: SurfaceTextureContract,
+    capabilities: &DeviceCapabilities,
+) -> Result<PacketGraph, PacketGraphBuildError> {
+    build_packet_graph_for_target(packet, capabilities, PacketTarget::Presentable(surface))
+}
+
+enum PacketTarget {
+    Offscreen,
+    #[cfg(windows)]
+    Presentable(SurfaceTextureContract),
+}
+
+fn build_packet_graph_for_target(
+    packet: &RenderPacket,
+    capabilities: &DeviceCapabilities,
+    target_kind: PacketTarget,
+) -> Result<PacketGraph, PacketGraphBuildError> {
     let mut graph = RenderGraph::new();
     let mut ids = PacketIdIssuer::new();
     let mut snapshots = Vec::<ImportedSnapshot>::new();
@@ -159,21 +189,30 @@ pub(in crate::fixed_frame) fn build_packet_graph(
         );
     }
 
-    let target = graph.create_texture(
-        "packet-target",
-        TextureDesc {
-            dimension: TextureDimension::D2,
-            extent: Extent3d {
-                width: packet.extent()[0],
-                height: packet.extent()[1],
-                depth: 1,
-            },
-            mip_levels: 1,
-            array_layers: 1,
-            sample_count: 1,
-            format: TextureFormat::Rgba8Unorm,
+    let target_desc = TextureDesc {
+        dimension: TextureDimension::D2,
+        extent: Extent3d {
+            width: packet.extent()[0],
+            height: packet.extent()[1],
+            depth: 1,
         },
-    );
+        mip_levels: 1,
+        array_layers: 1,
+        sample_count: 1,
+        format: TextureFormat::Rgba8Unorm,
+    };
+    #[cfg(windows)]
+    let mut surface_slot = None;
+    let target = match target_kind {
+        PacketTarget::Offscreen => graph.create_texture("packet-target", target_desc),
+        #[cfg(windows)]
+        PacketTarget::Presentable(surface) => {
+            debug_assert_eq!(surface.descriptor, target_desc);
+            let imported = graph.import_surface_texture_slot("packet-presentable-target", surface);
+            surface_slot = Some(imported.slot);
+            imported.version
+        }
+    };
     let extent = packet.extent();
     let pass = graph.add_raster_pass(
         "packet-legacy-unlit-indexed",
@@ -278,12 +317,19 @@ pub(in crate::fixed_frame) fn build_packet_graph(
             uniform_binding: uniform_bindings[draw_index],
         })
         .collect();
-    let target_export = graph.export_texture(
-        pass.output,
-        ExportTextureContract {
-            final_state: ResourceAccessState::CopySource,
-        },
-    );
+    let target_export = match target_kind {
+        PacketTarget::Offscreen => Some(graph.export_texture(
+            pass.output,
+            ExportTextureContract {
+                final_state: ResourceAccessState::CopySource,
+            },
+        )),
+        #[cfg(windows)]
+        PacketTarget::Presentable(_) => {
+            graph.present(pass.output, PresentContract::new());
+            None
+        }
+    };
     let compiled = graph
         .compile(capabilities)
         .map_err(PacketGraphBuildError::Compile)?
@@ -291,6 +337,8 @@ pub(in crate::fixed_frame) fn build_packet_graph(
     Ok(PacketGraph {
         compiled: Arc::new(compiled),
         target_export,
+        #[cfg(windows)]
+        surface_slot,
         snapshots,
         draws,
     })

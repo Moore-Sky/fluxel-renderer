@@ -11,7 +11,7 @@ pub(super) use core::{fmt, time::Duration};
 pub(super) use std::collections::HashMap;
 pub(super) use std::ops::Range;
 
-#[cfg(all(windows, feature = "dx12"))]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 pub(super) use fluxel_rendergraph::SurfaceCapabilities;
 pub(super) use fluxel_rendergraph::{
     BoundBuffer, BoundTexture, BufferCapabilities, BufferCopyRegion, BufferDesc, BufferRange,

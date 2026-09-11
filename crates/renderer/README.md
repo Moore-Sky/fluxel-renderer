@@ -10,8 +10,9 @@ ordered legacy unlit draws as one compiled graph, raster pass, and native
 submission. The feature also supports deliberately closed single-draw
 `f32x3/u32` indexed, textured, vertex-color, and Lambert paths that return
 opaque offscreen image metadata. The Stage 1 visible path uses the same
-legacy-unlit camera/material recipe to draw one acquired DX12 image and returns
-a non-blocking presentation submission. Multiple submissions may retain
+legacy-unlit camera/material recipe to draw one acquired DX12 or Vulkan
+presentable image and returns a non-blocking presentation submission. An ordered
+packet can carry the deterministic multi-object proof scene; multiple submissions may retain
 independent immutable snapshot read leases; a private proof scheduler, not the
 renderer API, bounds frames in flight.
 It can separately upload canonical unit normals and execute one closed,
@@ -26,7 +27,7 @@ pipeline/bind-group API, or own windows and swapchains.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.2"
+tag = "v0.8.3"
 features = ["gpu-upload"]
 ```
 
@@ -69,6 +70,13 @@ raster graph only after all uniforms complete. Raster completion releases
 reservations; an unproven accepted raster outcome poisons them. Multiple packet
 entries may reference one snapshot generation while retaining their own ordered
 draws and uniforms.
+
+Packet preparation uses private `slot-graph` only for the real CPU dependency
+shape: shared scene input fans out to per-object validation/uniform preparation
+and fans back in to insertion-ordered assembly. It neither exposes graph/node
+identities nor models GPU submission, completion, or synchronization.
+`async-runtime` is not a renderer dependency; native scheduling and shutdown
+belong to the host layer.
 
 `Rgba8Image` validates a nonzero two-dimensional tight RGBA8 payload.
 `BaseColorTextureUpload::begin` borrows it and starts a non-blocking immutable

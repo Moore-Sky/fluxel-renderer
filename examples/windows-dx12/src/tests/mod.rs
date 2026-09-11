@@ -8,6 +8,8 @@ use super::{RunOptions, process_event_batch};
 fn finite_run_controls_parse_without_gpu() {
     let options = RunOptions::parse(
         [
+            "--backend",
+            "vulkan",
             "--frames",
             "12",
             "--repeat",
@@ -20,6 +22,7 @@ fn finite_run_controls_parse_without_gpu() {
         .map(str::to_owned),
     )
     .unwrap();
+    assert_eq!(options.backend, fluxel_rhi::Backend::Vulkan);
     assert_eq!(options.frames, Some(12));
     assert_eq!(options.repeat.get(), 2);
     assert!(options.induce_back_pressure);
@@ -34,8 +37,8 @@ fn zero_frames_is_rejected() {
 
 #[test]
 fn repeat_rejects_values_larger_than_platform_isize() {
-    let error = RunOptions::parse(["--repeat", &u64::MAX.to_string()].map(str::to_owned))
-        .unwrap_err();
+    let error =
+        RunOptions::parse(["--repeat", &u64::MAX.to_string()].map(str::to_owned)).unwrap_err();
     assert_eq!(error, "--repeat is too large for this platform");
 }
 

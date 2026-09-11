@@ -68,11 +68,13 @@ pub(crate) enum NativeTexture {
 /// never destroyed through `Device::destroy_texture`.
 #[allow(
     clippy::large_enum_variant,
-    reason = "the private DX12 surface owns a complete native swapchain state"
+    reason = "the private surface owns a complete native swapchain state"
 )]
 pub(crate) enum NativeSurface {
     #[cfg(feature = "dx12")]
     Dx12(wgpu_hal::dx12::Surface),
+    #[cfg(feature = "vulkan")]
+    Vulkan(wgpu_hal::vulkan::Surface),
 }
 
 pub(crate) struct OwnedBuffer {
@@ -427,6 +429,69 @@ pub(crate) struct NativePresentationLease {
     tickets: std::sync::Arc<NativePresentationTickets>,
 }
 
+/// One Vulkan surface's timeline fence. HAL records the fence/value pair in
+/// swapchain metadata at submit, so every later acquire for that surface must
+/// use this same fence and monotonically increasing value.
+#[cfg(feature = "vulkan")]
+pub(crate) struct VulkanPresentationSync {
+    owner: Arc<OpenedDevice>,
+    fence: Option<wgpu_hal::vulkan::Fence>,
+    next_signal_value: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "vulkan")]
+impl VulkanPresentationSync {
+    pub(crate) fn new(owner: Arc<OpenedDevice>) -> Result<Arc<Self>, String> {
+        let NativeDevice::Vulkan { device, .. } = &owner.native else {
+            return Err("Vulkan presentation sync received a non-Vulkan device".into());
+        };
+        let fence = unsafe { device.create_fence() }.map_err(|error| error.to_string())?;
+        Ok(Arc::new(Self {
+            owner,
+            fence: Some(fence),
+            next_signal_value: std::sync::atomic::AtomicU64::new(1),
+        }))
+    }
+
+    pub(crate) fn fence(&self) -> Result<&wgpu_hal::vulkan::Fence, String> {
+        self.fence
+            .as_ref()
+            .ok_or_else(|| "Vulkan presentation fence was already destroyed".into())
+    }
+
+    pub(crate) fn reserve_signal_value(&self) -> Result<u64, String> {
+        self.next_signal_value
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |value| value.checked_add(1),
+            )
+            .map_err(|_| "Vulkan presentation fence value exhausted".to_owned())
+    }
+}
+
+#[cfg(feature = "vulkan")]
+impl Drop for VulkanPresentationSync {
+    fn drop(&mut self) {
+        if let (NativeDevice::Vulkan { device, .. }, Some(fence)) =
+            (&self.owner.native, self.fence.take())
+        {
+            // No token/completion can retain this final Arc. Ordinary teardown
+            // waits for idle; accepted-unknown retains the Arc indefinitely.
+            unsafe { device.destroy_fence(fence) };
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) enum NativeVulkanFence {
+    Owned(wgpu_hal::vulkan::Fence),
+    Presentation {
+        sync: Arc<VulkanPresentationSync>,
+        value: u64,
+    },
+}
+
 impl Drop for NativePresentationLease {
     fn drop(&mut self) {
         let prior = self
@@ -462,10 +527,11 @@ pub(crate) enum NativeSubmission {
         owner: Arc<OpenedDevice>,
         encoder: Option<wgpu_hal::vulkan::CommandEncoder>,
         command_buffer: Option<wgpu_hal::vulkan::CommandBuffer>,
-        fence: Option<wgpu_hal::vulkan::Fence>,
+        fence: Option<NativeVulkanFence>,
         leases: Vec<ResourceLease>,
         staging_buffers: Vec<OwnedBuffer>,
         render_views: Vec<NativeRenderView>,
+        presentation_lease: Option<NativePresentationLease>,
         failure: Option<CompletionFailure>,
     },
     TerminalFailure(CompletionFailure),

@@ -31,7 +31,7 @@ use fluxel_rhi::{
 #[cfg(windows)]
 use fluxel_rhi::{
     TextureLease,
-    presentation::{AcquiredSurfaceFrame, Dx12Surface, PresentationToken},
+    presentation::{AcquiredSurfaceFrame, PresentationToken, Surface},
 };
 
 use crate::upload::{SnapshotDrawReservation, SnapshotUseError};

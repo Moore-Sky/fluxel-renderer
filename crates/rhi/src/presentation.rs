@@ -1,10 +1,10 @@
-//! Rendering-owned DX12 presentation façade.
+//! Rendering-owned backend-neutral presentation façade.
 //!
 //! This narrow Windows-only boundary binds a native window lifetime to one
-//! DX12 surface. It intentionally exposes neither HWND nor DXGI/HAL types.
+//! native surface. It intentionally exposes neither HWND nor DXGI/Vulkan/HAL types.
 //! A surface has one portable generation/state façade: resize first retires a
 //! configured generation, then either suspends at zero extent or configures a
-//! fresh generation. Explicit [`Dx12Surface::shutdown`] is the observable teardown operation.
+//! fresh generation. Explicit [`Surface::shutdown`] is the observable teardown operation.
 //! Its `Drop` fallback only attempts the same idle-and-unconfigure sequence
 //! when no acquired frame remains; accepted-unknown quarantine deliberately
 //! keeps the token, native surface, and window lease alive instead.
@@ -27,7 +27,7 @@ use fluxel_rendergraph::{
     TextureFormat, TextureUsage, TextureUsageKind,
 };
 
-/// Failure while creating, configuring, acquiring, or shutting down a DX12
+/// Failure while creating, configuring, acquiring, or shutting down a
 /// presentation surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -64,12 +64,10 @@ impl fmt::Display for SurfaceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WindowHandle(value) => write!(f, "window handle unavailable: {value}"),
-            Self::Open(value) => write!(f, "DX12 surface open failed: {value}"),
-            Self::Configure(value) => write!(f, "DX12 surface configure failed: {value}"),
-            Self::Acquire(value) => write!(f, "DX12 surface acquire failed: {value}"),
-            Self::FrameOutstanding => {
-                f.write_str("DX12 surface has no free presentable-image capacity")
-            }
+            Self::Open(value) => write!(f, "surface open failed: {value}"),
+            Self::Configure(value) => write!(f, "surface configure failed: {value}"),
+            Self::Acquire(value) => write!(f, "surface acquire failed: {value}"),
+            Self::FrameOutstanding => f.write_str("surface has no free presentable-image capacity"),
             Self::FrameStillAcquired => {
                 f.write_str("cannot shut down with an acquired surface frame")
             }
@@ -86,7 +84,7 @@ impl std::error::Error for SurfaceError {}
 
 /// Comparable identity for one configured presentable-resource generation.
 ///
-/// Values are allocated only by [`Dx12Surface`]; callers can compare and log
+/// Values are allocated only by [`Surface`]; callers can compare and log
 /// them but cannot construct or mutate one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct SurfaceGeneration(u64);
@@ -121,7 +119,7 @@ impl SurfaceExtent {
     }
 }
 
-/// Observable portable lifecycle state of a DX12 presentation surface.
+/// Observable portable lifecycle state of a presentation surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceStatus {
     /// A configured generation can acquire images at this extent.
@@ -139,11 +137,11 @@ pub enum SurfaceStatus {
     Closed,
 }
 
-/// A rendering-owned DX12 surface that keeps its native window alive.
+/// A rendering-owned surface that keeps its native window alive.
 ///
 /// It is deliberately !Send and !Sync: window affinity and swapchain lifetime
 /// stay on the harness thread in this first visible-image slice.
-pub struct Dx12Surface {
+pub struct Surface {
     device: Device,
     native: Arc<Mutex<imp::NativeSurface>>,
     // The native DXGI surface may outlive an acquired token in accepted-unknown
@@ -154,10 +152,12 @@ pub struct Dx12Surface {
     next_generation: u64,
     closed: bool,
     presentation_tickets: Arc<imp::NativePresentationTickets>,
+    #[cfg(feature = "vulkan")]
+    vulkan_presentation_sync: Option<Arc<imp::VulkanPresentationSync>>,
     _thread_affinity: Rc<()>,
 }
 
-impl Drop for Dx12Surface {
+impl Drop for Surface {
     fn drop(&mut self) {
         let frame_outstanding = self.presentation_tickets.any_live();
         let retained = (
@@ -189,7 +189,7 @@ impl Drop for Dx12Surface {
             Arc::clone(&self.presentation_tickets),
         );
         if !quarantine_after_teardown_failure(
-            imp::unconfigure_dx12_surface(&self.device.inner, &self.native),
+            imp::unconfigure_surface(&self.device.inner, &self.native),
             retained,
         ) {
             self.status = SurfaceStatus::Suspended;
@@ -275,8 +275,8 @@ fn quarantine_live_drop_ownership<T>(frame_outstanding: bool, ownership: T) -> b
     }
 }
 
-impl Dx12Surface {
-    /// Opens a DX12 device selected specifically for this window. A zero
+impl Surface {
+    /// Opens a device selected specifically for this window. A zero
     /// initial extent is valid and starts suspended without configuring HAL.
     ///
     /// This is the Stage 1 single-surface bootstrap entry point, not a promise
@@ -284,6 +284,7 @@ impl Dx12Surface {
     /// selection. Callers must not infer future Device/Surface topology from
     /// this proof API.
     pub fn open<W>(
+        backend: crate::Backend,
         window: Arc<W>,
         options: DeviceOptions,
         width: u32,
@@ -301,8 +302,8 @@ impl Dx12Surface {
             .window_handle()
             .map_err(|e| SurfaceError::WindowHandle(e.to_string()))?
             .as_raw();
-        let (opened, native_surface) =
-            imp::open_dx12_surface(options, display, native_window).map_err(SurfaceError::Open)?;
+        let (opened, native_surface) = imp::open_surface(backend, options, display, native_window)
+            .map_err(SurfaceError::Open)?;
         let device = Device {
             hardware: opened.hardware.clone(),
             capabilities: opened.capabilities,
@@ -310,12 +311,15 @@ impl Dx12Surface {
             identity: fluxel_rendergraph::DeviceIdentity::new(next_identity()),
         };
         let native = Arc::new(Mutex::new(native_surface));
+        #[cfg(feature = "vulkan")]
+        let vulkan_presentation_sync = imp::create_vulkan_presentation_sync(&device.inner, &native)
+            .map_err(SurfaceError::Configure)?;
         let (status, next_generation) = if extent.drawable() {
             // This is initial configuration: no earlier generation, acquired
             // image, or queue submission exists, and every native owner is
             // still local to this constructor. A configure error can therefore
             // return normally without releasing accepted/unknown GPU work.
-            imp::configure_dx12_surface(&device.inner, &native, width, height)
+            imp::configure_surface(&device.inner, &native, width, height)
                 .map_err(SurfaceError::Configure)?;
             (
                 SurfaceStatus::Active {
@@ -334,9 +338,9 @@ impl Dx12Surface {
             next_generation,
             closed: false,
             window,
-            presentation_tickets: imp::NativePresentationTickets::new(
-                imp::DX12_PRESENTABLE_IMAGE_COUNT,
-            ),
+            presentation_tickets: imp::NativePresentationTickets::new(imp::PRESENTABLE_IMAGE_COUNT),
+            #[cfg(feature = "vulkan")]
+            vulkan_presentation_sync,
             _thread_affinity: Rc::new(()),
         })
     }
@@ -350,7 +354,7 @@ impl Dx12Surface {
     /// RGBA8 presentation contract; headless backend construction remains
     /// deliberately non-presentable.
     pub fn raster_backend(&self) -> crate::RasterBackend {
-        crate::RasterBackend::for_dx12_surface(self.device())
+        crate::RasterBackend::for_surface(self.device())
     }
 
     /// Returns the current portable presentation lifecycle state.
@@ -386,7 +390,7 @@ impl Dx12Surface {
             transition,
             SurfaceTransition::RetireThenSuspend | SurfaceTransition::RetireThenConfigure
         ) {
-            if let Err(error) = imp::unconfigure_dx12_surface(&self.device.inner, &self.native) {
+            if let Err(error) = imp::unconfigure_surface(&self.device.inner, &self.native) {
                 self.poison_and_quarantine();
                 return Err(SurfaceError::Poisoned(format!(
                     "old generation retirement failed: {error}"
@@ -401,7 +405,7 @@ impl Dx12Surface {
             return Ok(self.status);
         }
         let generation = self.reserve_generation()?;
-        if let Err(error) = imp::configure_dx12_surface(
+        if let Err(error) = imp::configure_surface(
             &self.device.inner,
             &self.native,
             extent.width,
@@ -455,11 +459,13 @@ impl Dx12Surface {
             TextureUsageKind::ColorAttachment,
             TextureUsageKind::Present,
         ]);
-        let (native, token) = match imp::acquire_dx12_surface(
+        let (native, token) = match imp::acquire_surface(
             &self.device.inner,
             Arc::clone(&self.native),
             Arc::clone(&self.window),
             ticket,
+            #[cfg(feature = "vulkan")]
+            self.vulkan_presentation_sync.clone(),
             descriptor,
             usage,
         ) {
@@ -512,7 +518,7 @@ impl Dx12Surface {
             classify_shutdown(self.status, self.closed),
             ShutdownTransition::RetireThenClose
         ) {
-            if let Err(error) = imp::unconfigure_dx12_surface(&self.device.inner, &self.native) {
+            if let Err(error) = imp::unconfigure_surface(&self.device.inner, &self.native) {
                 self.poison_and_quarantine();
                 return Err(SurfaceError::Poisoned(format!(
                     "shutdown retirement failed: {error}"
@@ -575,7 +581,7 @@ impl AcquiredSurfaceFrame {
     }
 }
 
-/// Opaque one-shot permission to present an acquired DX12 image.
+/// Opaque one-shot permission to present an acquired image.
 pub struct PresentationToken {
     pub(crate) native: Option<imp::NativePresentationToken>,
 }

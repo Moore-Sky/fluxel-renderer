@@ -37,7 +37,7 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.2"
+tag = "v0.8.3"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -47,7 +47,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.2"
+tag = "v0.8.3"
 default-features = false
 features = ["dx12"]
 ```
@@ -66,19 +66,18 @@ returns `OpenError::BackendDisabled`; a non-Windows build returns
 `OpenError::PlatformUnsupported`. Adding the dependency opens no device. Rust
 1.87 and edition 2024 are required.
 
-The Windows DX12 presentation slice accepts only standard window/display
-handles. `Dx12Surface` exposes an opaque generation and Active, Suspended,
-Poisoned, or Closed lifecycle state; zero-sized targets suspend acquisition,
-and a later non-zero extent creates a fresh generation only after known
-retirement of the old one. Each acquired image owns a private capacity-bounded
-ticket until discard or completion-driven destruction of its derived views;
-resize and shutdown refuse while any ticket remains live. Native swapchain
-objects, ticket capacity, image indices, synchronization, and HWND remain
-private. Renderer frames-in-flight policy is separate from this native image
-availability guard. `Dx12Surface::open` is the Stage 1 single-surface
-bootstrap and selects its present-compatible device as part of that proof; it
-does not freeze the eventual multi-surface Device/Surface topology. This is
-still not a general surface API.
+The Windows presentation slice accepts only standard window/display handles.
+Backend-neutral `presentation::Surface` opens a fixed RGBA8 FIFO target on
+DX12 or Vulkan and exposes an opaque generation plus Active, Suspended,
+Poisoned, or Closed lifecycle state. Zero-sized targets suspend acquisition;
+a later non-zero extent creates a fresh generation only after known retirement
+of the old one. Each acquired image owns a private capacity-bounded ticket
+until discard or completion-driven destruction of derived views. Resize and
+shutdown refuse while any ticket remains live; native swapchain objects, ticket
+capacity, image indices, synchronization, and HWND remain private. Renderer
+bounded frames-in-flight and back pressure are separate private scheduler policy.
+`Surface::open` is a single-surface bootstrap, not a general surface API or a
+commitment to an eventual multi-surface topology.
 
 ## Open a device
 
@@ -239,10 +238,10 @@ collected Required-validation diagnostics empty.
 | Windows | Supported when its feature, loader, driver, and selected adapter are available | Supported when its feature, loader, driver, and selected adapter are available |
 | macOS, Linux, other targets | Returns `PlatformUnsupported` | Returns `PlatformUnsupported` |
 
-`Device::open` remains headless: it creates no window or surface. On Windows
-with the `dx12` feature, the separately constructed `presentation::Dx12Surface`
-is the one Stage-1 fixed RGBA8 FIFO surface/swapchain path. It retains an
-`Arc` window owner until acquired work is discarded or retired; it is not a
+`Device::open` remains headless: it creates no window or surface. On Windows,
+the separately constructed `presentation::Surface` is the Stage-1 fixed RGBA8
+FIFO surface/swapchain path for the chosen DX12 or Vulkan backend. It retains
+an `Arc` window owner until acquired work is discarded or retired; it is not a
 general surface or presentation API.
 
 ## Performance and scope
@@ -263,7 +262,7 @@ distinct.
 Buffer Copies require 4-byte-aligned source offset, destination offset, and
 size, checked in both graph recording and RHI lowering. Queue operations are
 serialized per opened device, including error-path idle waits. Surface/present
-outside the one fixed DX12 path, general shaders/pipelines, renderer lowering,
+outside the one fixed DX12/Vulkan path, general shaders/pipelines, renderer lowering,
 multi-queue, parallel recording, aliasing, and performance work remain out of scope.
 
 ## Testing and development

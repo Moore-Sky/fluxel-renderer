@@ -8,6 +8,10 @@
 **/*.rs.bk
 *.profraw
 
+# Python evidence-script bytecode
+__pycache__/
+*.py[cod]
+
 # Local Codex project instructions
 /AGENTS.md
 

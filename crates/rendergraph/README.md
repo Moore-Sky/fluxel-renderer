@@ -22,7 +22,7 @@ or pipeline API remain outside it.
 ```toml
 [dependencies.fluxel-rendergraph]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.2"
+tag = "v0.8.3"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -193,7 +193,9 @@ crate and its drivers.
 - Real-GPU execution is limited to the fixed Raster, Compute, and Copy profile
   on Windows DX12/Vulkan. R01/R02/X01 pass their exact CPU oracles on both
   backends with Required validation on the recorded release hardware.
-- No surface acquisition, resize/recreation, or present execution.
+- No native surface acquisition, resize/recreation, or present execution in
+  RenderGraph itself. It only declares an imported presentable resource and
+  final present intent; RHI owns native presentation.
 - No native multi-queue lowering, resource aliasing, or GPU conformance claim.
 - The execution SPI is provisional while the first native backend is built;
   declaration semantics and compiler diagnostics are the stable center.

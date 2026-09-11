@@ -58,7 +58,7 @@ mod diagnostics;
 mod lowering;
 #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 mod pipeline;
-#[cfg(all(windows, feature = "dx12"))]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 mod presentation;
 #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 mod resource;
@@ -87,7 +87,7 @@ pub(crate) use diagnostics::*;
 pub(crate) use lowering::*;
 #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 pub(crate) use pipeline::*;
-#[cfg(all(windows, feature = "dx12"))]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 pub(crate) use presentation::*;
 #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 pub(crate) use resource::*;

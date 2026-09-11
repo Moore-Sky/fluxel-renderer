@@ -138,19 +138,20 @@ dependencies = [
 
 [[package]]
 name = "fluxel-renderer"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "fluxel-rendergraph",
  "fluxel-rhi",
+ "slot-graph",
 ]
 
 [[package]]
 name = "fluxel-rendergraph"
-version = "0.8.2"
+version = "0.8.3"
 
 [[package]]
 name = "fluxel-rhi"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "ash",
  "fluxel-rendergraph",
@@ -164,8 +165,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluxel-windows-dx12-harness"
-version = "0.8.2"
+name = "fluxel-windows-presentation-harness"
+version = "0.8.3"
 dependencies = [
  "fluxel-host",
  "fluxel-renderer",
@@ -545,6 +546,12 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slot-graph"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fd0233ac976558de9d844ee03a449370ac37769f9d8a34b482a3d9362ba85d7"
 
 [[package]]
 name = "smallvec"

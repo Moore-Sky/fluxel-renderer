@@ -5,14 +5,20 @@
 //! owns no graph declaration and does not create native binding objects; those
 //! remain respectively in RenderGraph and the existing closed RHI provider.
 
+#[cfg(windows)]
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use fluxel_rendergraph::{
     BoundBuffer, BufferBindingId, DeviceIdentity, FrameBindingError, FrameBindingErrorKind,
     FrameResourceProvider, ResourceAccessState, TextureBindingId,
 };
+#[cfg(windows)]
+use fluxel_rendergraph::{BoundSurfaceTexture, SurfaceBindingId, SurfaceBindingResult};
 use fluxel_rhi::experimental::fixed_artifacts::RasterBackend;
 use fluxel_rhi::{Buffer, ResourceLease, UploadedBuffer};
+#[cfg(windows)]
+use fluxel_rhi::{Texture, presentation::PresentationToken};
 
 use super::{RenderPacket, graph::PacketGraph};
 
@@ -26,6 +32,8 @@ struct PacketBuffer {
 pub(in crate::fixed_frame) struct PacketResources {
     device: DeviceIdentity,
     buffers: HashMap<BufferBindingId, PacketBuffer>,
+    #[cfg(windows)]
+    surface: RefCell<Option<BoundSurfaceTexture<Texture, ResourceLease, PresentationToken>>>,
 }
 
 impl PacketResources {
@@ -34,6 +42,9 @@ impl PacketResources {
         packet: &RenderPacket,
         graph: &PacketGraph,
         uniforms: &[UploadedBuffer],
+        #[cfg(windows)] surface: Option<
+            BoundSurfaceTexture<Texture, ResourceLease, PresentationToken>,
+        >,
     ) -> Self {
         assert_eq!(
             uniforms.len(),
@@ -68,7 +79,16 @@ impl PacketResources {
         Self {
             device: packet.device(),
             buffers,
+            #[cfg(windows)]
+            surface: RefCell::new(surface),
         }
+    }
+
+    #[cfg(windows)]
+    pub(in crate::fixed_frame) fn take_surface(
+        &self,
+    ) -> Option<BoundSurfaceTexture<Texture, ResourceLease, PresentationToken>> {
+        self.surface.borrow_mut().take()
     }
 }
 
@@ -104,6 +124,22 @@ impl FrameResourceProvider<RasterBackend> for PacketResources {
             usage: buffer.physical.allowed_usage(),
             initial_state: buffer.initial_state,
             lease: buffer.physical.lease().into(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn surface(&self, id: SurfaceBindingId) -> SurfaceBindingResult<RasterBackend> {
+        if id != crate::fixed_frame::surface_binding() {
+            return Err(missing_binding(
+                FrameBindingErrorKind::MissingSurface,
+                "unknown packet presentation binding",
+            ));
+        }
+        self.surface.borrow_mut().take().ok_or_else(|| {
+            missing_binding(
+                FrameBindingErrorKind::MissingSurface,
+                "packet graph requested an unavailable acquired presentation image",
+            )
         })
     }
 }

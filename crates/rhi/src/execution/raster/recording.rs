@@ -589,7 +589,7 @@ impl ExecutionBackend for RasterBackend {
             ));
         }
         let token = presentations.pop().expect("checked one presentation").token;
-        #[cfg(all(windows, feature = "dx12"))]
+        #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
         {
             let presentation = token.into_native().ok_or_else(|| {
                 NativeExecutionError::SubmitRejected(
@@ -601,15 +601,15 @@ impl ExecutionBackend for RasterBackend {
                 device: _,
                 leases,
             } = command_buffer;
-            crate::imp::submit_dx12_presented(native, leases, presentation)
+            crate::imp::submit_presented(native, leases, presentation)
                 .map(NativeCompletion)
                 .map_err(NativeExecutionError::SubmitRejected)
         }
-        #[cfg(not(all(windows, feature = "dx12")))]
+        #[cfg(not(all(windows, any(feature = "dx12", feature = "vulkan"))))]
         {
             let _ = token;
             Err(NativeExecutionError::SubmitRejected(
-                "DX12 presentation is unavailable on this target/build".into(),
+                "presentation is unavailable on this target/build".into(),
             ))
         }
     }

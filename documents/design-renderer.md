@@ -13,8 +13,9 @@ The crate provides portable domain objects (`Camera`, `Geometry`, `Mesh`,
 that publish immutable mesh and texture snapshots after GPU completion; an
 owned `RenderPacket` for ordered legacy unlit indexed draws; and seven closed
 single-draw indexed contracts which yield opaque offscreen `FrameImage`
-metadata after completion. The DX12 visible slice reuses the legacy-unlit
-camera/material recipe for one acquired presentation image. The default crate has no graphics-backend dependency;
+metadata after completion. The visible slice reuses the legacy-unlit
+camera/material recipe for one acquired presentable image on DX12 or Vulkan;
+an ordered packet may contain the same deterministic multi-object scene. The default crate has no graphics-backend dependency;
 GPU coordination and fixed drawing require the `gpu-upload` feature.
 
 This document is a description of the current system, not a release history.
@@ -69,6 +70,13 @@ The current renderer intentionally has no:
   batching, instancing, PBR, animation, or scene-file loading;
 - surface acquisition, swapchain policy, resize, or lost-surface recovery; or
 - multi-queue scheduling, parallel recording, aliasing, or performance policy.
+
+`slot-graph` is a renderer-private CPU preparation implementation detail for
+the real per-object dependency DAG: shared scene input fans out to object
+preparation and fans back in to ordered assembly. It does not model GPU
+dependencies, submission, completion, or synchronization. `async-runtime` is
+not a renderer dependency; host-native scheduling and shutdown policy remain
+outside this crate.
 
 The fixed API is a correctness vertical slice, not an early general pipeline
 API. See [ADR-0006](adr/0006-no-general-pipeline-yet.md) and
@@ -133,6 +141,12 @@ per-draw uniforms. The packet holds no graph slot, RHI/native handle, or
 reservation, so construction and drop do not change snapshot gates. This is a
 narrow transition model, not a stable asset-handle renderer ABI; it does not
 sort, cull, or synthesize material policy.
+
+For packet construction, preparation validates each object, computes its
+`projection * view * model` uniform, and preserves insertion order. The private
+`slot-graph` DAG expresses these actual CPU dependencies rather than inventing
+tasks to demonstrate the dependency library; no node identity or graph API
+crosses the renderer boundary.
 
 With `gpu-upload`, the crate also exposes opaque-ready resource families:
 
@@ -387,11 +401,13 @@ boundary with explicit layout, binding, capability, lifetime, and cross-backend
 semantics.
 
 The fixed visible-frame path sits at the renderer/RHI boundary above private
-swapchain details: Renderer accepts one acquired opaque binding, RenderGraph
-plans its use and final presentation intent, and RHI owns acquire/submit/present
-and completion. This is not a general surface or window API. Scheduling, parallel
-recording, transient aliasing, and caches are lowering optimizations only when
-measurement proves they are needed; they do not alter declared frame semantics.
+swapchain details. Renderer accepts one acquired opaque binding for the entire
+ordered packet; RenderGraph imports it as a presentable resource and plans its
+use plus final presentation intent; RHI owns acquire/submit/present, generation
+retirement, and completion on DX12 or Vulkan. This is not a general surface or
+window API. Bounded frames-in-flight, slot reuse, and back pressure are private
+scheduler policy; scheduling, parallel recording, transient aliasing, and caches
+do not alter declared frame semantics.
 
 Until those contracts exist, the seven-recipe system is the supported renderer
 implementation and remains deliberately closed.

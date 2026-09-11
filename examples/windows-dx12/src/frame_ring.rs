@@ -7,7 +7,10 @@
 
 use std::fmt;
 
-use fluxel_renderer::{FixedFrameFailure, VisibleFrameStatus, VisibleFrameSubmission};
+use fluxel_renderer::{
+    FixedFrameFailure, RenderPacketFailure, RenderPacketStatus, RenderPacketSubmission,
+    VisibleFrameStatus, VisibleFrameSubmission,
+};
 
 /// One operation whose known completion permits its private slot to be reused.
 pub(crate) trait FrameWork {
@@ -34,11 +37,29 @@ impl FrameWork for VisibleFrameSubmission {
     }
 }
 
+impl FrameWork for RenderPacketSubmission {
+    type Error = VisibleWorkError;
+
+    fn poll_once(&mut self) -> WorkStatus<Self::Error> {
+        match self.poll() {
+            RenderPacketStatus::Pending | RenderPacketStatus::Busy => WorkStatus::Pending,
+            RenderPacketStatus::Submitted => WorkStatus::Submitted,
+            RenderPacketStatus::Presented => WorkStatus::Complete,
+            RenderPacketStatus::Failed(error) => {
+                WorkStatus::Failed(VisibleWorkError::PacketFailed(error))
+            }
+            status => WorkStatus::Failed(VisibleWorkError::Unsupported(format!("{status:?}"))),
+        }
+    }
+}
+
 /// Terminal visible-work error that stops the proof scheduler.
 #[derive(Debug)]
 pub(crate) enum VisibleWorkError {
     /// Renderer reported a structured fixed-frame failure.
     Failed(FixedFrameFailure),
+    /// Renderer reported a structured multi-draw packet failure.
+    PacketFailed(RenderPacketFailure),
     /// A future status was not assigned safe reuse semantics by this harness.
     Unsupported(String),
 }
@@ -47,6 +68,7 @@ impl fmt::Display for VisibleWorkError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Failed(error) => write!(formatter, "visible frame failed: {error}"),
+            Self::PacketFailed(error) => write!(formatter, "visible packet failed: {error}"),
             Self::Unsupported(status) => {
                 write!(
                     formatter,

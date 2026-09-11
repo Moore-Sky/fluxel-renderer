@@ -1,6 +1,6 @@
 [package]
-name = "fluxel-windows-dx12-harness"
-version = "0.8.2"
+name = "fluxel-windows-presentation-harness"
+version = "0.8.3"
 edition = "2024"
 publish = false
 
@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 fluxel-renderer = { path = "../../crates/renderer", features = ["gpu-upload"] }
-fluxel-rhi = { path = "../../crates/rhi", features = ["dx12", "test-support"] }
+fluxel-rhi = { path = "../../crates/rhi", features = ["dx12", "vulkan", "test-support"] }
 fluxel-host = { path = "../../../fluxel-host" }
 
 [patch.crates-io]

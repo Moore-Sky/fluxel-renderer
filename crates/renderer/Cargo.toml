@@ -14,11 +14,14 @@ categories = ["rendering", "graphics", "game-development"]
 default = []
 # Opt-in native upload coordination. The default crate remains the headless
 # domain model and does not link a graphics backend.
-gpu-upload = ["dep:fluxel-rendergraph", "dep:fluxel-rhi"]
+gpu-upload = ["dep:fluxel-rendergraph", "dep:fluxel-rhi", "dep:slot-graph"]
 
 [dependencies]
 fluxel-rendergraph = { path = "../rendergraph", version = "0.8.0", optional = true }
 fluxel-rhi = { path = "../rhi", version = "0.8.0", optional = true }
+# Renderer-private CPU preparation dependencies. This graph does not model GPU
+# hazards, submission, or retirement; those remain owned by RenderGraph/RHI.
+slot-graph = { version = "0.5.2", optional = true }
 
 [dev-dependencies]
 fluxel-rhi = { path = "../rhi", version = "0.8.0", default-features = false, features = ["dx12", "vulkan", "test-support"] }

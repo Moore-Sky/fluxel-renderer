@@ -135,13 +135,25 @@ pub(crate) fn transition_texture(
         },
         #[cfg(feature = "vulkan")]
         (NativeEncoder::Vulkan(encoder), NativeTexture::Vulkan(texture)) => unsafe {
-            // SAFETY: same validated subresource, tracked-state, same-device,
-            // and retained-lifetime proof as DX12.
+            // Vulkan permits an acquired swapchain image to enter from
+            // UNDEFINED when its previous contents are discarded. Surface
+            // imports are the only resources whose portable incoming state is
+            // Present, so lower that first boundary transition conservatively
+            // from UNINITIALIZED. This is valid both on first acquisition and
+            // after a prior present, and avoids asserting a stale native layout.
+            // SAFETY: same validated subresource, same-device, and retained-
+            // lifetime proof as DX12; UNINITIALIZED explicitly discards old
+            // swapchain contents before the color attachment clear.
             encoder.transition_textures(prepared.iter().map(|(_, from, range)| {
+                let from = if *from == wgt::TextureUses::PRESENT {
+                    wgt::TextureUses::UNINITIALIZED
+                } else {
+                    *from
+                };
                 wgpu_hal::TextureBarrier {
                     texture,
                     range: *range,
-                    usage: wgpu_hal::StateTransition { from: *from, to },
+                    usage: wgpu_hal::StateTransition { from, to },
                 }
             }));
         },

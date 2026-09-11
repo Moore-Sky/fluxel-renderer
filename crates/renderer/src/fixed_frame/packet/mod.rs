@@ -15,6 +15,7 @@ use crate::{Camera, IndexedMeshSnapshot, frame_uniform::FrameUniform};
 mod build;
 mod graph;
 mod ids;
+mod preparation;
 mod provider;
 mod submission;
 #[cfg(test)]
@@ -35,6 +36,7 @@ pub struct RenderPacket {
     draws: Vec<PacketDraw>,
 }
 
+#[derive(Clone)]
 pub(super) struct PacketDraw {
     snapshot: IndexedMeshSnapshot,
     uniform: FrameUniform,
@@ -90,6 +92,10 @@ pub enum RenderPacketBuildError {
     },
     /// The offscreen target width or height was zero.
     InvalidExtent,
+    /// The renderer-private CPU preparation graph could not complete. This is
+    /// intentionally distinct from GPU graph compilation and never exposes
+    /// slot-graph identities through the renderer API.
+    PreparationGraph,
     /// One draw failed validation.
     Draw {
         /// Insertion-order index of the invalid draw.
@@ -131,6 +137,17 @@ pub enum RenderPacketDrawBuildError {
 pub enum RenderPacketStartError {
     /// The packet belongs to another device.
     ForeignPacketDevice,
+    /// The acquired presentation image belongs to another device.
+    #[cfg(windows)]
+    ForeignSurfaceDevice,
+    /// The acquired presentation image does not match the packet extent.
+    #[cfg(windows)]
+    SurfaceExtentMismatch {
+        /// Extent validated while lowering the draw list.
+        packet: [u32; 2],
+        /// Extent supplied by the acquired presentation image.
+        surface: [u32; 2],
+    },
     /// A unique snapshot generation could not be reserved.
     Reservation {
         /// First draw which references the unavailable generation.
@@ -210,8 +227,18 @@ pub enum RenderPacketStatus {
     Pending,
     /// The shared executor is temporarily busy; polling may be retried.
     Busy,
+    /// Raster and presentation work was accepted, but completion has not yet
+    /// retired the packet's private resources.
+    #[cfg(windows)]
+    Submitted,
     /// The frame completed and owns its opaque image.
     Complete(super::FrameImage),
+    /// The packet completed through an acquired presentable image.
+    ///
+    /// The acquired image's token is consumed by the single graph execution;
+    /// completion is the point at which every draw reservation retires.
+    #[cfg(windows)]
+    Presented,
     /// The operation reached a terminal failure.
     Failed(RenderPacketFailure),
 }

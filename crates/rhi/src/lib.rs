@@ -4,7 +4,7 @@
 //! device, owns buffers and 2D textures, and executes deliberately fixed Copy,
 //! Compute, and Raster subsets of a portable RenderGraph plan through barriers,
 //! one submission, completion, and lease-backed retirement. On Windows with
-//! the DX12 feature, the narrow presentation façade owns a surface/swapchain
+//! either native graphics feature, the narrow presentation façade owns a surface/swapchain
 //! while retaining its window through acquired-image retirement. Narrow immutable buffer and
 //! whole RGBA8 texture uploads retain staging and destination storage through
 //! completion.
@@ -38,7 +38,7 @@ mod execution;
 /// contract. They may change or be removed in a future minor release.
 pub mod experimental;
 /// Rendering-owned Windows presentation boundary for the current vertical slice.
-#[cfg(all(windows, feature = "dx12"))]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 pub mod presentation;
 mod resource;
 
@@ -51,14 +51,14 @@ pub use execution::{
 pub use execution::{RasterTextureReadback, readback_exported_raster_texture_for_test};
 /// Opaque identity of one physical RenderGraph resource generation.
 pub use fluxel_rendergraph::PhysicalResourceIdentity;
-#[cfg(all(windows, feature = "dx12"))]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 pub use presentation::{
-    AcquiredSurfaceFrame, Dx12Surface, PresentationToken, SurfaceError, SurfaceExtent,
+    AcquiredSurfaceFrame, PresentationToken, Surface, SurfaceError, SurfaceExtent,
     SurfaceGeneration, SurfaceStatus,
 };
-/// Uninhabited presentation token used by non-DX12 builds to keep portable
+/// Uninhabited presentation token used by non-presentable builds to keep portable
 /// execution profiles structurally total while rejecting presentation.
-#[cfg(not(all(windows, feature = "dx12")))]
+#[cfg(not(all(windows, any(feature = "dx12", feature = "vulkan"))))]
 pub struct PresentationToken {
     _private: (),
 }

@@ -18,7 +18,7 @@ impl FixedFrameRenderer {
         }
     }
 
-    /// Creates the renderer form coupled to one DX12 presentation surface.
+    /// Creates the renderer form coupled to one presentation surface.
     ///
     /// Unlike [`Self::new`], this obtains the surface-compatible raster backend
     /// and its presentation capability snapshot from the surface. A caller
@@ -26,7 +26,7 @@ impl FixedFrameRenderer {
     /// headless device backend.
     #[must_use]
     #[cfg(windows)]
-    pub fn for_surface(surface: &Dx12Surface) -> Self {
+    pub fn for_surface(surface: &Surface) -> Self {
         let device = surface.device();
         let backend = surface.raster_backend();
         let capabilities = fluxel_rendergraph::ExecutionBackend::capabilities(&backend).clone();

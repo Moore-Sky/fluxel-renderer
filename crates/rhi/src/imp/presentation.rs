@@ -1,4 +1,4 @@
-//! Private DX12 surface creation, acquisition, and presentation lowering.
+//! Private surface creation, acquisition, and presentation lowering.
 //!
 //! Surface objects never cross this module boundary.  A graph sees only an
 //! owned texture wrapper and an opaque one-shot token; the token retains the
@@ -7,8 +7,8 @@
 
 use super::*;
 
-pub(crate) const DX12_MAXIMUM_FRAME_LATENCY: u32 = 2;
-pub(crate) const DX12_PRESENTABLE_IMAGE_COUNT: usize = DX12_MAXIMUM_FRAME_LATENCY as usize + 1;
+pub(crate) const MAXIMUM_FRAME_LATENCY: u32 = 2;
+pub(crate) const PRESENTABLE_IMAGE_COUNT: usize = MAXIMUM_FRAME_LATENCY as usize + 1;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use wgpu_hal::Surface as _;
 
@@ -38,14 +38,25 @@ impl Drop for NativePresentationToken {
                     // SAFETY: an unconsumed token owns the sole acquired image.
                     surface.discard_texture(texture);
                 },
+                #[cfg(feature = "vulkan")]
+                (NativeSurface::Vulkan(surface), NativeAcquiredSurfaceTexture::Vulkan(texture)) => unsafe {
+                    // SAFETY: an unconsumed token owns the sole acquired image.
+                    surface.discard_texture(texture);
+                },
+                _ => unreachable!("native surface/token backend mismatch"),
             }
         }
+        #[cfg(feature = "dx12")]
         if let Some(NativeSurfaceFence::Dx12(fence)) = self.fence.take() {
             if let NativeDevice::Dx12 { device, .. } = &self.owner.native {
                 // No submit can still reference this fence when its token drops.
                 unsafe { device.destroy_fence(fence) };
             }
         }
+        #[cfg(feature = "vulkan")]
+        // Vulkan surface acquisitions borrow their surface-scoped timeline
+        // fence. Dropping this token releases only the Arc; the final sync
+        // owner destroys the fence after known teardown or quarantines it.
         drop(self.presentation_ticket.take());
     }
 }
@@ -53,11 +64,44 @@ impl Drop for NativePresentationToken {
 pub(crate) enum NativeAcquiredSurfaceTexture {
     #[cfg(feature = "dx12")]
     Dx12(wgpu_hal::dx12::Texture),
+    #[cfg(feature = "vulkan")]
+    Vulkan(wgpu_hal::vulkan::SurfaceTexture),
 }
 
 pub(crate) enum NativeSurfaceFence {
     #[cfg(feature = "dx12")]
     Dx12(wgpu_hal::dx12::Fence),
+    #[cfg(feature = "vulkan")]
+    VulkanPresentation {
+        sync: Arc<VulkanPresentationSync>,
+        value: u64,
+    },
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) fn create_vulkan_presentation_sync(
+    owner: &Arc<OpenedDevice>,
+    surface: &Arc<Mutex<NativeSurface>>,
+) -> Result<Option<Arc<VulkanPresentationSync>>, String> {
+    let native = surface.lock().map_err(|_| "surface lock poisoned")?;
+    match (&owner.native, &*native) {
+        (NativeDevice::Vulkan { .. }, NativeSurface::Vulkan(_)) => {
+            VulkanPresentationSync::new(Arc::clone(owner)).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn open_surface(
+    backend: Backend,
+    options: DeviceOptions,
+    display: RawDisplayHandle,
+    window: RawWindowHandle,
+) -> Result<(OpenedDevice, NativeSurface), OpenError> {
+    match backend {
+        Backend::Dx12 => open_dx12_surface(options, display, window),
+        Backend::Vulkan => open_vulkan_surface(options, display, window),
+    }
 }
 
 pub(crate) fn open_dx12_surface(
@@ -147,7 +191,82 @@ pub(crate) fn open_dx12_surface(
     }
 }
 
-pub(crate) fn configure_dx12_surface(
+pub(crate) fn open_vulkan_surface(
+    options: DeviceOptions,
+    display: RawDisplayHandle,
+    window: RawWindowHandle,
+) -> Result<(OpenedDevice, NativeSurface), OpenError> {
+    #[cfg(feature = "vulkan")]
+    {
+        if options.validation == Validation::Required && !vulkan_validation_is_available() {
+            return Err(OpenError::ValidationUnavailable {
+                backend: Backend::Vulkan,
+            });
+        }
+        let descriptor = instance_descriptor(options.validation);
+        let instance = unsafe { wgpu_hal::vulkan::Instance::init(&descriptor) }
+            .map_err(|e| native_error(Backend::Vulkan, e))?;
+        let surface = unsafe { instance.create_surface(display, window) }
+            .map_err(|e| native_error(Backend::Vulkan, e))?;
+        let adapters = unsafe { instance.enumerate_adapters(Some(&surface)) };
+        let available_adapters = adapters.len();
+        let exposed = adapters.into_iter().nth(options.adapter_index).ok_or(
+            OpenError::AdapterUnavailable {
+                backend: Backend::Vulkan,
+                adapter_index: options.adapter_index,
+                available_adapters,
+            },
+        )?;
+        if unsafe { exposed.adapter.surface_capabilities(&surface) }.is_none() {
+            return Err(OpenError::NativeUnavailable {
+                backend: Backend::Vulkan,
+                reason: "selected adapter cannot present to the supplied window".into(),
+            });
+        }
+        let hardware = hardware(Backend::Vulkan, &exposed.info);
+        let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
+        let rgba8_unorm_srgb_filterable = rgba8_unorm_srgb_filterable(&exposed.adapter);
+        let capabilities = capabilities(
+            exposed.features,
+            &exposed.capabilities,
+            rgba8_unorm_filterable,
+            rgba8_unorm_srgb_filterable,
+        );
+        let requested_limits = required_limits(Backend::Vulkan, &exposed.capabilities)?;
+        let adapter = exposed.adapter;
+        let wgpu_hal::OpenDevice { device, queue } = unsafe {
+            adapter.open(
+                wgt::Features::empty(),
+                &requested_limits,
+                &wgt::MemoryHints::default(),
+            )
+        }
+        .map_err(|e| native_error(Backend::Vulkan, e))?;
+        Ok((
+            OpenedDevice {
+                native: NativeDevice::Vulkan {
+                    queue,
+                    device,
+                    adapter,
+                    instance,
+                },
+                queue_operations: Mutex::new(()),
+                hardware,
+                capabilities,
+            },
+            NativeSurface::Vulkan(surface),
+        ))
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (options, display, window);
+        Err(OpenError::BackendDisabled {
+            backend: Backend::Vulkan,
+        })
+    }
+}
+
+pub(crate) fn configure_surface(
     owner: &Arc<OpenedDevice>,
     surface: &Mutex<NativeSurface>,
     width: u32,
@@ -159,7 +278,7 @@ pub(crate) fn configure_dx12_surface(
         #[cfg(feature = "dx12")]
         (NativeDevice::Dx12 { device, .. }, NativeSurface::Dx12(surface)) => {
             let config = wgpu_hal::SurfaceConfiguration {
-                maximum_frame_latency: DX12_MAXIMUM_FRAME_LATENCY,
+                maximum_frame_latency: MAXIMUM_FRAME_LATENCY,
                 present_mode: wgt::PresentMode::Fifo,
                 composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
                 format: wgt::TextureFormat::Rgba8Unorm,
@@ -176,15 +295,34 @@ pub(crate) fn configure_dx12_surface(
             // and requires prior frame shutdown before reconfiguration.
             unsafe { surface.configure(device, &config) }.map_err(|e| e.to_string())
         }
+        #[cfg(feature = "vulkan")]
+        (NativeDevice::Vulkan { device, .. }, NativeSurface::Vulkan(surface)) => {
+            let config = wgpu_hal::SurfaceConfiguration {
+                maximum_frame_latency: MAXIMUM_FRAME_LATENCY,
+                present_mode: wgt::PresentMode::Fifo,
+                composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
+                format: wgt::TextureFormat::Rgba8Unorm,
+                color_space: wgt::SurfaceColorSpace::Srgb,
+                extent: wgt::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                usage: wgt::TextureUses::COLOR_TARGET,
+                view_formats: Vec::new(),
+            };
+            unsafe { surface.configure(device, &config) }.map_err(|e| e.to_string())
+        }
         _ => Err("surface and device backend mismatch".into()),
     }
 }
 
-pub(crate) fn acquire_dx12_surface(
+pub(crate) fn acquire_surface(
     owner: &Arc<OpenedDevice>,
     surface: Arc<Mutex<NativeSurface>>,
     window: Arc<dyn std::any::Any>,
     presentation_ticket: NativePresentationLease,
+    #[cfg(feature = "vulkan")] vulkan_presentation_sync: Option<Arc<VulkanPresentationSync>>,
     descriptor: TextureDesc,
     allowed_usage: TextureUsage,
 ) -> Result<(OwnedTexture, NativePresentationToken), String> {
@@ -249,6 +387,67 @@ pub(crate) fn acquire_dx12_surface(
                 },
             ))
         }
+        #[cfg(feature = "vulkan")]
+        (NativeDevice::Vulkan { device, .. }, NativeSurface::Vulkan(native_surface)) => {
+            let sync = vulkan_presentation_sync.ok_or_else(|| {
+                "Vulkan surface is missing its presentation synchronization".to_owned()
+            })?;
+            let value = sync.reserve_signal_value()?;
+            let fence = sync.fence()?;
+            let acquired = match unsafe { native_surface.acquire_texture(None, fence) } {
+                Ok(value) => value.texture,
+                Err(error) => return Err(error.to_string()),
+            };
+            let raw = unsafe {
+                <wgpu_hal::vulkan::SurfaceTexture as std::borrow::Borrow<
+                    wgpu_hal::vulkan::Texture,
+                >>::borrow(&acquired)
+                .raw_handle()
+            };
+            let hal_descriptor = wgpu_hal::TextureDescriptor {
+                label: None,
+                size: wgt::Extent3d {
+                    width: descriptor.extent.width,
+                    height: descriptor.extent.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgt::TextureDimension::D2,
+                format: wgt::TextureFormat::Rgba8Unorm,
+                usage: wgt::TextureUses::COLOR_TARGET,
+                memory_flags: wgpu_hal::MemoryFlags::empty(),
+                view_formats: Vec::new(),
+            };
+            let wrapper = unsafe {
+                device.texture_from_raw(
+                    raw,
+                    &hal_descriptor,
+                    // Swapchain images are owned and destroyed by the surface.
+                    // A present callback marks this HAL wrapper as borrowed so
+                    // `destroy_texture` releases only wrapper bookkeeping and
+                    // never calls `vkDestroyImage` on the swapchain image.
+                    Some(Box::new(|| {})),
+                    wgpu_hal::vulkan::TextureMemory::External,
+                )
+            };
+            Ok((
+                OwnedTexture {
+                    native: Some(NativeTexture::Vulkan(wrapper)),
+                    owner: Arc::clone(owner),
+                    descriptor,
+                    allowed_usage,
+                },
+                NativePresentationToken {
+                    owner: Arc::clone(owner),
+                    surface: Arc::clone(&surface),
+                    acquired: Some(NativeAcquiredSurfaceTexture::Vulkan(acquired)),
+                    fence: Some(NativeSurfaceFence::VulkanPresentation { sync, value }),
+                    presentation_ticket: Some(presentation_ticket),
+                    _window: window,
+                },
+            ))
+        }
         _ => Err("surface and device backend mismatch".into()),
     }
 }
@@ -266,11 +465,26 @@ impl NativePresentationToken {
     }
 }
 
-/// Submits a command buffer and consumes exactly one acquired DX12 image.
+/// Submits a command buffer and consumes exactly one acquired image.
 ///
 /// After a successful queue submission every subsequent failure is returned as
 /// completion state, never as a rejection, so graph leases remain quarantined.
-pub(crate) fn submit_dx12_presented(
+pub(crate) fn submit_presented(
+    buffer: CopyCommandBuffer,
+    leases: Vec<ResourceLease>,
+    token: NativePresentationToken,
+) -> Result<NativeCompletion, String> {
+    match buffer.native.as_ref() {
+        #[cfg(feature = "dx12")]
+        Some(NativeFinished::Dx12 { .. }) => submit_dx12_presented(buffer, leases, token),
+        #[cfg(feature = "vulkan")]
+        Some(NativeFinished::Vulkan { .. }) => submit_vulkan_presented(buffer, leases, token),
+        None => Err("presentation received an empty command buffer".into()),
+    }
+}
+
+#[cfg(feature = "dx12")]
+fn submit_dx12_presented(
     mut buffer: CopyCommandBuffer,
     leases: Vec<ResourceLease>,
     mut token: NativePresentationToken,
@@ -318,7 +532,9 @@ pub(crate) fn submit_dx12_presented(
                     .surface
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let NativeSurface::Dx12(surface) = &mut *surface;
+                let NativeSurface::Dx12(surface) = &mut *surface else {
+                    unreachable!()
+                };
                 // SAFETY: queue accepted the command buffer and this is the
                 // unique acquired texture for the configured surface.
                 unsafe { queue.present(surface, surface_texture) }.err()
@@ -390,7 +606,108 @@ pub(crate) fn submit_dx12_presented(
     }
 }
 
-pub(crate) fn unconfigure_dx12_surface(
+#[cfg(feature = "vulkan")]
+fn submit_vulkan_presented(
+    mut buffer: CopyCommandBuffer,
+    leases: Vec<ResourceLease>,
+    mut token: NativePresentationToken,
+) -> Result<NativeCompletion, String> {
+    let finished = buffer.native.take().expect("finished command buffer");
+    let NativeFinished::Vulkan {
+        owner,
+        mut encoder,
+        command_buffer,
+        render_views,
+    } = finished
+    else {
+        reset_finished(finished);
+        return Err("Vulkan presentation received a non-Vulkan command buffer".into());
+    };
+    let Some(NativeAcquiredSurfaceTexture::Vulkan(surface_texture)) = token.acquired.take() else {
+        reset_finished(NativeFinished::Vulkan {
+            owner,
+            encoder,
+            command_buffer,
+            render_views,
+        });
+        return Err("presentation token was already consumed".into());
+    };
+    let Some(NativeSurfaceFence::VulkanPresentation { sync, value }) = token.fence.take() else {
+        reset_finished(NativeFinished::Vulkan {
+            owner,
+            encoder,
+            command_buffer,
+            render_views,
+        });
+        return Err("presentation token has no Vulkan fence".into());
+    };
+    let queue_owner = Arc::clone(&owner);
+    let _queue_guard = lock_queue_operations(&queue_owner.queue_operations);
+    let NativeDevice::Vulkan { queue, .. } = &owner.native else {
+        unreachable!()
+    };
+    // SAFETY: the acquired surface texture is supplied to submit so HAL wires
+    // its acquire/present semaphores around this exact command buffer.
+    match unsafe {
+        queue.submit(
+            &[&command_buffer],
+            &[&surface_texture],
+            (sync.fence()?, value),
+        )
+    } {
+        Ok(()) => {
+            let present = {
+                let mut surface = token
+                    .surface
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let NativeSurface::Vulkan(surface) = &mut *surface else {
+                    unreachable!()
+                };
+                // SAFETY: queue submission consumed the acquire semaphore and this is the unique image.
+                unsafe { queue.present(surface, surface_texture) }.err()
+            };
+            let presentation_lease = token
+                .take_completion_lease()
+                .expect("an acquired surface token owns its live-frame gate");
+            drop(token);
+            Ok(NativeCompletion(Arc::new(Mutex::new(
+                NativeSubmission::Vulkan {
+                    owner,
+                    encoder: Some(encoder),
+                    command_buffer: Some(command_buffer),
+                    fence: Some(NativeVulkanFence::Presentation { sync, value }),
+                    leases,
+                    staging_buffers: Vec::new(),
+                    render_views,
+                    presentation_lease: Some(presentation_lease),
+                    failure: present.map(|_| CompletionFailure::ExecutionFailed),
+                },
+            ))))
+        }
+        Err(error) => {
+            if unsafe { queue.wait_for_idle() }.is_ok() {
+                unsafe {
+                    encoder.reset_all(core::iter::once(command_buffer));
+                }
+                destroy_render_views(&owner, render_views);
+                token.acquired = Some(NativeAcquiredSurfaceTexture::Vulkan(surface_texture));
+                token.fence = None;
+                discard_presentation(token);
+                Err(error.to_string())
+            } else {
+                token.acquired = Some(NativeAcquiredSurfaceTexture::Vulkan(surface_texture));
+                token.fence = Some(NativeSurfaceFence::VulkanPresentation { sync, value });
+                std::mem::forget((owner, encoder, command_buffer, leases, render_views, token));
+                Ok(NativeCompletion(Arc::new(Mutex::new(
+                    NativeSubmission::TerminalFailure(CompletionFailure::DeviceLost),
+                ))))
+            }
+        }
+    }
+}
+
+pub(crate) fn unconfigure_surface(
     owner: &Arc<OpenedDevice>,
     surface: &Mutex<NativeSurface>,
 ) -> Result<(), String> {
@@ -401,6 +718,12 @@ pub(crate) fn unconfigure_dx12_surface(
         (NativeDevice::Dx12 { device, queue, .. }, NativeSurface::Dx12(surface)) => {
             // SAFETY: shutdown has stopped acquisition and no frame token can
             // remain. Queue idle establishes the HAL unconfigure precondition.
+            unsafe { queue.wait_for_idle() }.map_err(|e| e.to_string())?;
+            unsafe { surface.unconfigure(device) };
+            Ok(())
+        }
+        #[cfg(feature = "vulkan")]
+        (NativeDevice::Vulkan { device, queue, .. }, NativeSurface::Vulkan(surface)) => {
             unsafe { queue.wait_for_idle() }.map_err(|e| e.to_string())?;
             unsafe { surface.unconfigure(device) };
             Ok(())

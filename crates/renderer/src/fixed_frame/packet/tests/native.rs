@@ -4,7 +4,7 @@
 //! Vulkan device.  Fault injection distinguishes pre-raster release from
 //! accepted-raster poison, while D01 and D02 compare one packet graph's exact
 //! target bytes with independent CPU triangle oracles. D03 additionally
-//! proves per-draw model placement while reusing one immutable mesh snapshot.
+//! proves three colored per-draw placements while reusing one immutable mesh snapshot.
 
 use std::{
     sync::Arc,
@@ -409,22 +409,24 @@ fn run_d03(backend: Backend) {
 
 struct D03Fixture {
     camera: Camera,
-    mesh: Mesh,
-    snapshots: [IndexedMeshSnapshot; 2],
-    transforms: [ModelTransform; 2],
+    meshes: [Mesh; 3],
+    snapshots: [IndexedMeshSnapshot; 3],
+    transforms: [ModelTransform; 3],
 }
 
 fn d03_fixture(device: &Device) -> D03Fixture {
     let oracle = d03_oracle_fixture();
-    let mesh = Mesh::new(
-        oracle.geometry.clone(),
-        BasicMaterial::new([1.0, 0.0, 0.0, 1.0]).unwrap(),
-    );
-    let snapshot = ready_snapshot(device, mesh.geometry());
+    let meshes = std::array::from_fn(|index| {
+        Mesh::new(
+            oracle.geometry.clone(),
+            BasicMaterial::new(oracle.colors[index]).unwrap(),
+        )
+    });
+    let snapshot = ready_snapshot(device, &oracle.geometry);
     D03Fixture {
         camera: oracle.camera,
-        mesh,
-        snapshots: [snapshot.clone(), snapshot],
+        meshes,
+        snapshots: [snapshot.clone(), snapshot.clone(), snapshot],
         transforms: oracle.transforms,
     }
 }
@@ -432,66 +434,60 @@ fn d03_fixture(device: &Device) -> D03Fixture {
 struct D03OracleFixture {
     camera: Camera,
     geometry: Geometry,
-    transforms: [ModelTransform; 2],
+    colors: [[f32; 4]; 3],
+    transforms: [ModelTransform; 3],
 }
 
 fn d03_oracle_fixture() -> D03OracleFixture {
-    let camera = Camera::new(
-        [
-            [1.0, 0.15, 0.0, 0.0],
-            [0.10, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.05, -0.04, 0.0, 1.0],
-        ],
-        [
-            [0.85, 0.0, 0.0, 0.0],
-            [0.0, 0.90, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-    );
-    let geometry =
-        Geometry::from_positions(vec![[-0.6, -0.5, 0.0], [0.6, -0.5, 0.0], [-0.6, 0.5, 0.0]])
-            .with_indices(vec![0, 1, 2])
-            .unwrap();
+    let camera = Camera::default();
+    let geometry = Geometry::from_positions(vec![
+        [-0.26, -0.24, 0.0],
+        [0.26, -0.24, 0.0],
+        [0.0, 0.28, 0.0],
+    ])
+    .with_indices(vec![0, 1, 2])
+    .unwrap();
+    let colors = [
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0],
+    ];
     let transforms = [
         ModelTransform::from_column_major([
-            [0.45, 0.0, 0.0, 0.0],
-            [0.0, 0.50, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
-            [-0.55, 0.15, 0.0, 1.0],
+            [-0.48, -0.24, 0.0, 1.0],
         ])
         .unwrap(),
         ModelTransform::from_column_major([
-            [0.50, 0.12, 0.0, 0.0],
-            [0.08, 0.42, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
-            [0.52, -0.18, 0.0, 1.0],
+            [0.48, -0.24, 0.0, 1.0],
+        ])
+        .unwrap(),
+        ModelTransform::from_column_major([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.42, 0.0, 1.0],
         ])
         .unwrap(),
     ];
-    assert_ne!(
-        multiply(
-            transforms[0].world_from_model(),
-            transforms[1].world_from_model()
-        ),
-        multiply(
-            transforms[1].world_from_model(),
-            transforms[0].world_from_model()
-        ),
-        "D03 placements must be noncommuting"
-    );
     D03OracleFixture {
         camera,
         geometry,
+        colors,
         transforms,
     }
 }
 
 fn d03_packet(renderer: &FixedFrameRenderer, fixture: &D03Fixture) -> RenderPacket {
     let mut list = DrawList::new(&fixture.camera);
-    list.push_transformed(&fixture.mesh, fixture.transforms[0]);
-    list.push_transformed(&fixture.mesh, fixture.transforms[1]);
+    for (mesh, transform) in fixture.meshes.iter().zip(fixture.transforms) {
+        list.push_transformed(mesh, transform);
+    }
     let packet = renderer
         .lower_draw_list(&list, &fixture.snapshots, [8, 8])
         .unwrap();
@@ -518,8 +514,8 @@ fn observe_d03(device: &Device, mut submission: RenderPacketSubmission) -> Oracl
     );
     assert_eq!(
         graph.draws.len(),
-        2,
-        "D03 retains two independent draw uniforms"
+        3,
+        "D03 retains three independent draw uniforms"
     );
     for snapshot in &graph.snapshots {
         assert_eq!(
@@ -565,6 +561,16 @@ fn observe_d03(device: &Device, mut submission: RenderPacketSubmission) -> Oracl
             .chunks_exact(4)
             .any(|pixel| pixel == [255, 0, 0, 255])
     );
+    assert!(
+        expected
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0, 255, 0, 255])
+    );
+    assert!(
+        expected
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0, 0, 255, 255])
+    );
     assert_eq!(
         readback.tight,
         expected,
@@ -595,7 +601,8 @@ fn d03_oracle(fixture: &D03OracleFixture) -> Vec<u8> {
     }
     let projection_view = multiply(fixture.camera.projection(), fixture.camera.view());
     let mut occupied = [false; 8 * 8];
-    for (draw_index, transform) in fixture.transforms.into_iter().enumerate() {
+    let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+    for (draw_index, (transform, color)) in fixture.transforms.into_iter().zip(colors).enumerate() {
         let clip_from_model = multiply(&projection_view, transform.world_from_model());
         let positions = fixture.geometry.positions();
         let points = [positions[0], positions[1], positions[2]].map(|position| {
@@ -609,10 +616,10 @@ fn d03_oracle(fixture: &D03OracleFixture) -> Vec<u8> {
             )
         });
         let mut draw = vec![0; 8 * 8 * 4];
-        fill_points(&mut draw, points, [255, 0, 0, 255]);
+        fill_points(&mut draw, points, color);
         let coverage = draw
             .chunks_exact(4)
-            .map(|pixel| pixel == [255, 0, 0, 255])
+            .map(|pixel| pixel == color)
             .collect::<Vec<_>>();
         assert!(
             coverage.iter().any(|covered| *covered),
@@ -628,7 +635,7 @@ fn d03_oracle(fixture: &D03OracleFixture) -> Vec<u8> {
         for (pixel_index, covered) in coverage.into_iter().enumerate() {
             if covered {
                 occupied[pixel_index] = true;
-                out[pixel_index * 4..pixel_index * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
+                out[pixel_index * 4..pixel_index * 4 + 4].copy_from_slice(&color);
             }
         }
     }
@@ -693,12 +700,13 @@ fn artifact_d03(
         .expect("D03 evidence requires FLUXEL_TEST_COMMIT at the exact tested SHA");
     assert!(commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()));
     println!(
-        "artifact schema=fluxel-draw-packet-d03-v1; commit={commit}; backend={:?}; hardware={:?}; driver={}; camera={:?}; transforms={:?}; positions={:?}; draw_order=[0,1]; snapshot_imports=1; draw_uniforms=2; execution_plan={plan:?}; expected={expected:?}; actual={actual:?}; first_difference={:?}; snapshot_outgoing=CopyDestination; target_outgoing=CopySource; completion=Complete; diagnostics={diagnostics:?}",
+        "artifact schema=fluxel-draw-packet-d03-v2; commit={commit}; backend={:?}; hardware={:?}; driver={}; camera={:?}; transforms={:?}; colors={:?}; positions={:?}; draw_order=[0,1,2]; snapshot_imports=1; draw_uniforms=3; execution_plan={plan:?}; expected={expected:?}; actual={actual:?}; first_difference={:?}; snapshot_outgoing=CopyDestination; target_outgoing=CopySource; completion=Complete; diagnostics={diagnostics:?}",
         device.hardware().backend,
         device.hardware(),
         device.hardware().driver,
         fixture.camera,
         fixture.transforms,
+        fixture.colors,
         fixture.geometry.positions(),
         first_difference(actual, expected),
     );
@@ -889,6 +897,9 @@ fn wait_terminal(submission: &mut RenderPacketSubmission) -> RenderPacketStatus 
             }
             RenderPacketStatus::Pending | RenderPacketStatus::Busy => {
                 assert!(Instant::now() < deadline)
+            }
+            RenderPacketStatus::Submitted | RenderPacketStatus::Presented => {
+                panic!("offscreen packet unexpectedly entered presentation lifecycle")
             }
         }
         thread::sleep(Duration::from_millis(1));

@@ -7,7 +7,7 @@ use super::*;
 /// This is intentionally separate from ordinary resource quarantine so the
 /// surface capacity gate cannot become free merely because completion Drop
 /// runs after a failed/unknown presentation.
-#[cfg(feature = "dx12")]
+#[cfg(any(feature = "dx12", feature = "vulkan"))]
 pub(crate) fn quarantine_presentation_lease(lease: Option<NativePresentationLease>) {
     std::mem::forget(lease);
 }
@@ -620,6 +620,7 @@ impl Drop for NativeSubmission {
                 leases,
                 staging_buffers,
                 render_views,
+                presentation_lease,
                 failure,
             } => {
                 let (
@@ -636,10 +637,33 @@ impl Drop for NativeSubmission {
                 else {
                     return;
                 };
+                let (fence_ref, target) = match &fence {
+                    NativeVulkanFence::Owned(fence) => (fence, 1),
+                    NativeVulkanFence::Presentation { sync, value } => match sync.fence() {
+                        Ok(fence) => (fence, *value),
+                        Err(_) => {
+                            let retained = std::mem::take(leases);
+                            let retained_staging = std::mem::take(staging_buffers);
+                            let retained_views = std::mem::take(render_views);
+                            quarantine_presentation_lease(presentation_lease.take());
+                            std::mem::forget((
+                                owner.clone(),
+                                encoder,
+                                command_buffer,
+                                fence,
+                                retained,
+                                retained_staging,
+                                retained_views,
+                            ));
+                            return;
+                        }
+                    },
+                };
                 if failure.is_some() {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
+                    quarantine_presentation_lease(presentation_lease.take());
                     std::mem::forget((
                         owner.clone(),
                         encoder,
@@ -649,17 +673,21 @@ impl Drop for NativeSubmission {
                         retained_staging,
                         retained_views,
                     ));
-                } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
+                } else if unsafe { device.wait(fence_ref, target, None) }.is_ok() {
                     // SAFETY: the sole command buffer completed at fence value 1.
                     unsafe {
                         encoder.reset_all(core::iter::once(command_buffer));
-                        device.destroy_fence(fence);
+                        if let NativeVulkanFence::Owned(fence) = fence {
+                            device.destroy_fence(fence);
+                        }
                     }
                     destroy_render_views(owner, std::mem::take(render_views));
+                    drop(presentation_lease.take());
                 } else {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
+                    quarantine_presentation_lease(presentation_lease.take());
                     std::mem::forget((
                         owner.clone(),
                         encoder,

@@ -1,4 +1,4 @@
-//! Stage 1 DX12 presentation proof using the host-owned Win32 window primitive.
+//! Stage 1 DX12/Vulkan presentation proof using the host-owned Win32 window primitive.
 //!
 //! This example owns orchestration only. `fluxel-host` owns the HWND and message
 //! pump; the renderer/RHI own the surface, swapchain, acquired image lifetime,
@@ -12,20 +12,21 @@ use std::{env, fmt, num::NonZeroIsize, sync::Arc, thread, time::Duration};
 
 use fluxel_host::{Window, WindowConfig, WindowError, WindowEvent};
 use fluxel_renderer::{
-    BasicMaterial, Camera, FixedFrameRenderer, Geometry, IndexedMeshSnapshot, IndexedMeshUpload,
-    IndexedMeshUploadStatus, VisibleFrameSubmission,
+    BasicMaterial, Camera, DrawList, FixedFrameRenderer, Geometry, IndexedMeshSnapshot,
+    IndexedMeshUpload, IndexedMeshUploadStatus, Mesh, ModelTransform, RenderPacket,
+    VisibleFrameSubmission,
 };
 use fluxel_rhi::{
-    Device, DeviceOptions, Dx12Surface, SurfaceExtent, SurfaceStatus, Validation,
+    Backend, Device, DeviceOptions, Surface, SurfaceExtent, SurfaceStatus, Validation,
     test_support::{
         NextDx12PresentationCompletionLatch, clear_validation_diagnostics,
         hold_next_dx12_presentation_completion, inject_dx12_presentation_accepted_unknown_once,
         validation_diagnostics,
     },
 };
-use frame_ring::{FrameIdentity, FrameRing, PollReport, StartError};
+use frame_ring::{FrameIdentity, FrameRing, FrameWork, PollReport, StartError};
 
-const TITLE: &str = "Fluxel Stage 1.3 — DX12 bounded frames in flight";
+const TITLE: &str = "Fluxel Stage 1 — Windows visible renderer";
 const CLIENT_WIDTH: u32 = 960;
 const CLIENT_HEIGHT: u32 = 540;
 const MAX_FRAMES_IN_FLIGHT: usize = 3;
@@ -33,6 +34,7 @@ const MAX_FRAMES_IN_FLIGHT: usize = 3;
 /// Parsed finite-run controls. Kept separate so parser coverage needs no GPU.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RunOptions {
+    backend: Backend,
     frames: Option<u64>,
     repeat: NonZeroIsize,
     induce_back_pressure: bool,
@@ -45,6 +47,7 @@ impl RunOptions {
     where
         I: IntoIterator<Item = String>,
     {
+        let mut backend = Backend::Dx12;
         let mut frames = None;
         let mut repeat = NonZeroIsize::new(1).expect("one is nonzero");
         let mut induce_back_pressure = false;
@@ -53,6 +56,18 @@ impl RunOptions {
         let mut args = args.into_iter();
         while let Some(argument) = args.next() {
             match argument.as_str() {
+                "--backend" => {
+                    backend = match args.next().as_deref() {
+                        Some("dx12") => Backend::Dx12,
+                        Some("vulkan") => Backend::Vulkan,
+                        Some(value) => {
+                            return Err(format!(
+                                "--backend requires `dx12` or `vulkan`, got `{value}`"
+                            ));
+                        }
+                        None => return Err("--backend requires `dx12` or `vulkan`".to_owned()),
+                    };
+                }
                 "--frames" => frames = Some(parse_positive(&argument, args.next())?),
                 "--repeat" => {
                     let count = parse_positive(&argument, args.next())?;
@@ -71,6 +86,7 @@ impl RunOptions {
             }
         }
         Ok(Self {
+            backend,
             frames,
             repeat,
             induce_back_pressure,
@@ -89,7 +105,7 @@ fn parse_positive(flag: &str, value: Option<String>) -> Result<u64, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: fluxel-windows-dx12-harness [--frames K] [--repeat R] [--induce-back-pressure] [--evidence-pause-ms K] [--verify-accepted-unknown]"
+    "usage: fluxel-windows-presentation-harness [--backend dx12|vulkan] [--frames K] [--repeat R] [--induce-back-pressure] [--evidence-pause-ms K] [--verify-accepted-unknown]"
 }
 
 fn run_accepted_unknown_oracle() -> Result<(), HarnessError> {
@@ -97,7 +113,8 @@ fn run_accepted_unknown_oracle() -> Result<(), HarnessError> {
         WindowConfig::new(TITLE, CLIENT_WIDTH, CLIENT_HEIGHT).map_err(HarnessError::Window)?;
     #[allow(clippy::arc_with_non_send_sync)]
     let window = Arc::new(Window::new(config).map_err(HarnessError::Window)?);
-    let mut surface = Dx12Surface::open(
+    let mut surface = Surface::open(
+        Backend::Dx12,
         Arc::clone(&window),
         DeviceOptions {
             validation: Validation::Required,
@@ -216,13 +233,14 @@ fn run_accepted_unknown_oracle() -> Result<(), HarnessError> {
 fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
     let config =
         WindowConfig::new(TITLE, CLIENT_WIDTH, CLIENT_HEIGHT).map_err(HarnessError::Window)?;
-    // The Arc is a same-thread lifetime lease retained by `Dx12Surface`, not a
+    // The Arc is a same-thread lifetime lease retained by `Surface`, not a
     // cross-thread handoff. `Window` deliberately remains !Send + !Sync.
     #[allow(clippy::arc_with_non_send_sync)]
     let window = Arc::new(Window::new(config).map_err(HarnessError::Window)?);
     eprintln!("created host Window with client extent {CLIENT_WIDTH}x{CLIENT_HEIGHT}");
 
-    let mut surface = Dx12Surface::open(
+    let mut surface = Surface::open(
+        options.backend,
         Arc::clone(&window),
         DeviceOptions {
             validation: Validation::Required,
@@ -245,15 +263,12 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
     );
 
     let mut counters = LifecycleCounters::default();
-    let mut snapshot = None;
+    let mut scene = None;
     let mut renderer = None;
     let mut ring = FrameRing::new(MAX_FRAMES_IN_FLIGHT).expect("frame capacity is nonzero");
     let work = (|| {
-        snapshot = Some(upload_fixed_triangle(&device)?);
+        scene = Some(upload_visible_scene(&device)?);
         renderer = Some(FixedFrameRenderer::for_surface(&surface));
-        let camera = Camera::default();
-        let material = BasicMaterial::new([0.15, 0.65, 1.0, 1.0])
-            .map_err(|error| HarnessError::Renderer(error.to_string()))?;
         run_frame_loop(
             &window,
             &mut surface,
@@ -261,21 +276,31 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
             &mut counters,
             &mut ring,
             |surface, presented| {
+                let extent = match surface.status() {
+                    SurfaceStatus::Active { extent, .. } => [extent.width(), extent.height()],
+                    status => {
+                        return Err(HarnessError::Renderer(format!(
+                            "frame {presented} cannot start from surface state {status:?}"
+                        )));
+                    }
+                };
+                let packet = scene
+                    .as_ref()
+                    .expect("scene is installed before the frame loop")
+                    .prepare(
+                        renderer
+                            .as_ref()
+                            .expect("renderer is installed before the frame loop"),
+                        extent,
+                    )?;
                 let acquired = surface.acquire().map_err(HarnessError::Surface)?;
                 renderer
                     .as_ref()
                     .expect("renderer is installed before the frame loop")
-                    .draw_to_surface(
-                        snapshot
-                            .as_ref()
-                            .expect("snapshot is installed before the frame loop"),
-                        &camera,
-                        &material,
-                        acquired,
-                    )
+                    .submit_packet_to_surface(packet, acquired)
                     .map_err(|error| {
                         HarnessError::Renderer(format!(
-                            "visible frame {presented} did not start: {error}"
+                            "visible packet {presented} did not start: {error}"
                         ))
                     })
             },
@@ -285,7 +310,7 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
     // No renderer resource or acquired image survives unconfigure. The surface
     // drains known accepted work before releasing its retained `Arc<Window>`.
     drop(renderer);
-    drop(snapshot);
+    drop(scene);
     eprintln!(
         "frame lifetime counters: capacity={} high_watermark={} started={} submitted={} retired={} back_pressure={} pending_observations={} controlled_releases={}",
         ring.capacity(),
@@ -332,6 +357,71 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
     Ok(())
 }
 
+struct VisibleScene {
+    camera: Camera,
+    meshes: Vec<Mesh>,
+    transforms: Vec<ModelTransform>,
+    snapshots: Vec<IndexedMeshSnapshot>,
+}
+
+impl VisibleScene {
+    fn prepare(
+        &self,
+        renderer: &FixedFrameRenderer,
+        extent: [u32; 2],
+    ) -> Result<RenderPacket, HarnessError> {
+        let mut draws = DrawList::new(&self.camera);
+        for (mesh, transform) in self.meshes.iter().zip(&self.transforms) {
+            draws.push_transformed(mesh, *transform);
+        }
+        renderer
+            .lower_draw_list(&draws, &self.snapshots, extent)
+            .map_err(|error| HarnessError::Renderer(error.to_string()))
+    }
+}
+
+fn upload_visible_scene(device: &Device) -> Result<VisibleScene, HarnessError> {
+    let geometry = Geometry::from_positions(vec![
+        [-0.26, -0.24, 0.0],
+        [0.26, -0.24, 0.0],
+        [0.0, 0.28, 0.0],
+    ])
+    .with_indices(vec![0, 1, 2])
+    .map_err(|error| HarnessError::Renderer(error.to_string()))?;
+    let snapshot = upload_geometry(device, &geometry)?;
+    let colors = [
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0],
+    ];
+    let meshes = colors
+        .into_iter()
+        .map(|color| {
+            BasicMaterial::new(color)
+                .map(|material| Mesh::new(geometry.clone(), material))
+                .map_err(|error| HarnessError::Renderer(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transforms = [[-0.48, -0.24], [0.48, -0.24], [0.0, 0.42]]
+        .into_iter()
+        .map(|[x, y]| {
+            ModelTransform::from_column_major([
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [x, y, 0.0, 1.0],
+            ])
+            .map_err(|error| HarnessError::Renderer(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(VisibleScene {
+        camera: Camera::default(),
+        meshes,
+        transforms,
+        snapshots: vec![snapshot; 3],
+    })
+}
+
 fn upload_fixed_triangle(device: &Device) -> Result<IndexedMeshSnapshot, HarnessError> {
     let geometry = Geometry::from_positions(vec![
         [-0.75, -0.75, 0.0],
@@ -340,7 +430,14 @@ fn upload_fixed_triangle(device: &Device) -> Result<IndexedMeshSnapshot, Harness
     ])
     .with_indices(vec![0, 1, 2])
     .map_err(|error| HarnessError::Renderer(error.to_string()))?;
-    let mut upload = IndexedMeshUpload::begin(device, &geometry)
+    upload_geometry(device, &geometry)
+}
+
+fn upload_geometry(
+    device: &Device,
+    geometry: &Geometry,
+) -> Result<IndexedMeshSnapshot, HarnessError> {
+    let mut upload = IndexedMeshUpload::begin(device, geometry)
         .map_err(|error| HarnessError::Renderer(error.to_string()))?;
     loop {
         match upload.poll() {
@@ -376,14 +473,18 @@ struct LifecycleCounters {
     controlled_releases: u64,
 }
 
-fn run_frame_loop(
+fn run_frame_loop<W>(
     window: &Window,
-    surface: &mut Dx12Surface,
+    surface: &mut Surface,
     options: RunOptions,
     counters: &mut LifecycleCounters,
-    ring: &mut FrameRing<VisibleFrameSubmission>,
-    mut start_frame: impl FnMut(&mut Dx12Surface, u64) -> Result<VisibleFrameSubmission, HarnessError>,
-) -> Result<(), HarnessError> {
+    ring: &mut FrameRing<W>,
+    mut start_frame: impl FnMut(&mut Surface, u64) -> Result<W, HarnessError>,
+) -> Result<(), HarnessError>
+where
+    W: FrameWork,
+    W::Error: fmt::Display,
+{
     let mut induced = false;
     let mut held_completions: Vec<Option<NextDx12PresentationCompletionLatch>> =
         (0..ring.capacity()).map(|_| None).collect();
@@ -566,11 +667,15 @@ fn release_controlled_completions(completions: &mut [Option<NextDx12Presentation
     }
 }
 
-fn advance_to_submitted(
-    ring: &mut FrameRing<VisibleFrameSubmission>,
+fn advance_to_submitted<W>(
+    ring: &mut FrameRing<W>,
     reservation: frame_ring::FrameReservation,
     counters: &mut LifecycleCounters,
-) -> Result<(), HarnessError> {
+) -> Result<(), HarnessError>
+where
+    W: FrameWork,
+    W::Error: fmt::Display,
+{
     loop {
         let report = ring
             .poll_reserved_once(reservation)
@@ -597,10 +702,14 @@ fn advance_to_submitted(
     }
 }
 
-fn wait_for_retirement(
-    ring: &mut FrameRing<VisibleFrameSubmission>,
+fn wait_for_retirement<W>(
+    ring: &mut FrameRing<W>,
     counters: &mut LifecycleCounters,
-) -> Result<FrameIdentity, HarnessError> {
+) -> Result<FrameIdentity, HarnessError>
+where
+    W: FrameWork,
+    W::Error: fmt::Display,
+{
     loop {
         let before = ring.live_count();
         let report = ring
@@ -617,10 +726,14 @@ fn wait_for_retirement(
     }
 }
 
-fn drain_frame_ring(
-    ring: &mut FrameRing<VisibleFrameSubmission>,
+fn drain_frame_ring<W>(
+    ring: &mut FrameRing<W>,
     counters: &mut LifecycleCounters,
-) -> Result<(), HarnessError> {
+) -> Result<(), HarnessError>
+where
+    W: FrameWork,
+    W::Error: fmt::Display,
+{
     while !ring.is_empty() {
         let report = ring
             .poll_once()
@@ -683,11 +796,11 @@ impl fmt::Display for HarnessError {
             Self::Window(error) => write!(formatter, "host Window failed: {error}"),
             Self::WindowLeaseOutstanding => formatter
                 .write_str("surface shutdown left an unexpected outstanding host Window lease"),
-            Self::Surface(error) => write!(formatter, "DX12 surface failed: {error}"),
+            Self::Surface(error) => write!(formatter, "presentation surface failed: {error}"),
             Self::Renderer(error) => write!(formatter, "fixed renderer failed: {error}"),
             Self::Validation(diagnostics) => write!(
                 formatter,
-                "DX12 validation emitted {} diagnostic(s)",
+                "graphics validation emitted {} diagnostic(s)",
                 diagnostics.len()
             ),
         }
@@ -702,6 +815,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if options.backend == Backend::Vulkan
+        && (options.induce_back_pressure || options.verify_accepted_unknown)
+    {
+        eprintln!("DX12-only fault injection cannot be combined with --backend vulkan");
+        std::process::exit(2);
+    }
     for cycle in 0..options.repeat.get() {
         let result = if options.verify_accepted_unknown {
             run_accepted_unknown_oracle()

@@ -20,8 +20,8 @@ The workspace is organised around three crates:
 | Crate | Responsibility |
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
-| `fluxel-rhi` | DX12/Vulkan native ownership and fixed RenderGraph execution, plus the narrow DX12 presentation boundary. |
-| `fluxel-renderer` | Scene/domain data, immutable GPU snapshots, owned render packets, fixed indexed draws, and the first visible-frame transaction. |
+| `fluxel-rhi` | DX12/Vulkan native ownership, fixed RenderGraph execution, and the narrow backend-neutral presentation boundary. |
+| `fluxel-renderer` | Scene/domain data, immutable GPU snapshots, ordered render packets, fixed indexed draws, and visible-frame transactions. |
 
 The optional `gpu-upload` slice publishes immutable GPU snapshot generations
 after native uploads complete. It can lower an insertion-ordered `DrawList`
@@ -46,12 +46,12 @@ The workspace releases its three crates together.  Git consumers must pin the
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.2" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.2" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.2" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.3" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.3" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.3" }
 ```
 
-`v0.8.2` and each package's `0.8.2` version identify the same workspace
+`v0.8.3` and each package's `0.8.3` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -124,37 +124,19 @@ change Cargo manifests, Rust sources, examples, CI, the conformance gate, or
 the released GPU behavior, so they do not create a second GPU certification
 target.
 
-### Completed — Stage 1.1 DX12 first visible image
+### Completed — Stage 1 presentation
 
 The kernel gained only the narrow presentation boundary needed for a host
 validation harness; it did not become a host-services runtime.
 
-- [x] Consume the minimal `fluxel-host` Win32 window and create the narrow DX12 surface/swapchain path
-  needed by the demo harness.
-- [x] Clear an acquired image, draw the existing fixed triangle, and present it.
-- [x] Handle close, wait for required GPU work, and release resources in a
-  valid order.
-- [x] Retain inspected multi-timepoint screenshots, backend and adapter diagnostics, and focused tests
-  for new platform-independent state.
-
-### Completed — Stage 1.2 DX12 surface lifecycle
-
-- [x] Consume ordered Host resize, minimize, restore, zero-size, and close
-  events without moving surface policy into Host.
-- [x] Give every non-zero configuration an opaque surface generation and stop
-  acquisition before retiring the old generation.
-- [x] Keep zero-sized/minimized targets suspended without drawable submission,
-  then configure a fresh generation after restore.
-- [x] Retain completion-owned derived views until known retirement; unknown
-  native outcomes and premature Surface drop quarantine the full ownership
-  bundle instead of guessing that teardown is safe.
-
-The proof remains deliberately narrow: DX12 and conservative queue-idle
-retirement for recreation. Vulkan presentation follows separately.
-
-### Stage 1.3 DX12 bounded frames-in-flight
-
-- [x] Keep the Windows proof scheduler at a private bounded capacity of three;
+- [x] Use a backend-neutral RHI `Surface` to acquire one imported presentable
+  resource, render the existing fixed recipe, and present it on DX12 or Vulkan.
+- [x] Keep native window, swapchain, image, queue, and synchronization details
+  inside RHI; RenderGraph sees only the imported resource and final present intent.
+- [x] Model resize/restore as a new opaque surface generation. The old generation
+  stops acquiring immediately but is destroyed only after known GPU retirement;
+  zero-size/minimize is suspended rather than drawable.
+- [x] Keep the Windows proof scheduler at a private bounded capacity (currently three);
   no slot, fence, image index, or triple-buffer policy enters public API.
 - [x] Reserve scheduler capacity before surface acquisition and apply explicit
   back pressure when all slots remain live.
@@ -164,6 +146,12 @@ retirement for recreation. Vulkan presentation follows separately.
   resize and shutdown refuse to touch the swapchain until all tickets retire.
 - [x] Expose only the policy-neutral `VisibleFrameStatus::Submitted` milestone
   needed to distinguish native submission from completion-driven slot reuse.
+- [x] Lower one deterministic ordered multi-object scene into one packet and one
+  acquired presentation image. Its real CPU preparation fan-out/fan-in uses
+  private `slot-graph`; it neither creates artificial work nor owns GPU synchronization.
+
+`async-runtime` remains outside renderer and this presentation slice: native
+host scheduling and shutdown policy are separate concerns.
 
 ### Unscheduled optimizations
 

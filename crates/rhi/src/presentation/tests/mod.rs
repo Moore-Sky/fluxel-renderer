@@ -145,11 +145,8 @@ fn multiple_live_tickets_keep_drop_quarantine_until_every_ticket_retires() {
 
 #[test]
 fn presentation_ticket_capacity_refuses_aliasing_and_recovers_one_exact_slot() {
-    let capacity = crate::imp::DX12_PRESENTABLE_IMAGE_COUNT;
-    assert_eq!(
-        capacity,
-        crate::imp::DX12_MAXIMUM_FRAME_LATENCY as usize + 1
-    );
+    let capacity = crate::imp::PRESENTABLE_IMAGE_COUNT;
+    assert_eq!(capacity, crate::imp::MAXIMUM_FRAME_LATENCY as usize + 1);
     let tickets = crate::imp::NativePresentationTickets::new(capacity);
     assert_eq!(tickets.capacity(), 3);
     let first = tickets.try_acquire().unwrap();

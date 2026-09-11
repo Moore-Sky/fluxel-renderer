@@ -29,11 +29,11 @@ It is not a general graphics API, a scene/asset database, a shader authoring
 framework, or a presentation runtime. In particular, there is currently no
 general pipeline or bind-group builder, general shader reflection API,
 cross-platform surface abstraction, multi-queue scheduler, transient aliasing
-implementation, or stable asset/resource handle and cache ABI. The one proven
-presentation slice is a DX12 surface-generation lifecycle used by a Windows
-proof harness; it handles resize/minimize/restore and independent acquired-frame
-tickets, while the harness privately proves bounded frames-in-flight. It is not
-a general platform API or public frame scheduler.
+implementation, or stable asset/resource handle and cache ABI. The proven
+Windows presentation slice supports DX12 and Vulkan through one narrow RHI
+surface façade. It handles resize/minimize/restore as generation changes and
+independent acquired-frame tickets, while the harness privately proves bounded
+frames-in-flight. It is not a general platform API or public frame scheduler.
 
 ## Layer model and dependency direction
 
@@ -78,12 +78,13 @@ The intended frame path has a stable conceptual shape:
 ```text
 application scene/domain data
   -> renderer resolves ready GPU snapshots and frame policy
-  -> owned render packet or closed fixed recipe
+  -> ordered render packet or closed fixed recipe
+  -> acquire one RHI presentable image when presentation is requested
   -> RenderGraph declarations
   -> compiled immutable ExecutionPlan
   -> RHI frame resolution and backend lowering
   -> one serial queue submission
-  -> completion, export state, and retirement
+  -> completion, export state, presentation, and retirement
 ```
 
 ### Renderer-side selection
@@ -114,12 +115,16 @@ generation or expose graph/native objects. The renderer computes column-major
 `projection * view * model` into the existing legacy-unlit uniform ABI, so
 placement is draw/packet policy rather than a mesh property or an RHI binding
 change. Submission deduplicates repeated snapshot generations for graph imports
-and reservations, but retains one ordered draw and uniform per list entry. It
-compiles one graph with one raster pass, advances uniform uploads serially
-without blocking, then submits the raster work once. This placement currently
+and reservations, but retains one ordered draw and uniform per list entry. The
+real CPU preparation dependencies (shared scene input, per-object work, and
+ordered assembly) are privately represented with `slot-graph`; it neither
+creates dummy work nor replaces RenderGraph's GPU semantics. It compiles one
+graph with one raster pass, advances uniform uploads serially without blocking,
+then submits the raster work once. This placement currently
 does not extend Lambert normal handling. General material/layout variation,
-PBR, scene loading, culling, batching, and a real static scene are not
-implemented.
+PBR, scene loading, culling, batching, and a general persistent scene system are
+not implemented; the current deterministic three-object scene is only a closed
+presentation and preparation proof.
 
 ### RenderGraph declaration and compilation
 
@@ -266,12 +271,12 @@ while internal implementation evolves.
 
 The portable graph and default renderer-domain model are not tied to a native
 API. Native execution is Windows-focused, with headless DX12/Vulkan feature
-selection and a separate DX12 surface-generation/ticket path. The Windows proof
-harness owns its bounded three-slot admission and back-pressure policy; RHI only
-guards native image availability and completion-driven teardown. Non-Windows native
-requests fail explicitly rather than silently emulating a backend. There is no
-Vulkan presentation, lost-surface/device recovery, general cross-platform
-surface API, or web renderer today.
+selection and a backend-neutral DX12/Vulkan surface-generation/ticket path. The
+Windows proof harness owns its bounded three-slot admission and back-pressure
+policy; RHI only guards native image availability and completion-driven teardown.
+Non-Windows native requests fail explicitly rather than silently emulating a
+backend. Lost-surface/device recovery, a general cross-platform surface API, and
+a web renderer remain absent.
 
 Windows MSVC is the primary Windows development/native test environment. Linux
 must be tested natively (for example in WSL2/Ubuntu), because it exercises

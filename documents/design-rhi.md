@@ -5,7 +5,7 @@
 `fluxel-rhi` is Fluxel's native execution boundary. It lowers a
 portable `fluxel-rendergraph::ExecutionPlan` into a deliberately small DX12 or
 Vulkan command subset and retains native objects until GPU work is terminal. It
-also owns the first fixed-size DX12 surface/acquire/present path. It is not a
+also owns the narrow backend-neutral surface/acquire/present path. It is not a
 renderer, host/window runtime, or general graphics API.
 
 ```text
@@ -30,7 +30,7 @@ frame scheduling remain above it. See [ADR-0001](adr/0001-assets-outside-renderg
 ## Public facade and module boundaries
 
 `src/lib.rs` is the small safe facade. It exports explicit device opening,
-driver facts, owned resources, execution backends, the narrow DX12 presentation
+driver facts, owned resources, execution backends, the narrow presentation
 facade, and structured errors.
 Renderer-shaped closed raster artifacts are isolated under the explicitly
 provisional `experimental::fixed_artifacts` path. It never exports `wgpu-hal`, native pointers, queues,
@@ -97,24 +97,24 @@ unsupported platform are intentionally different, tested outcomes.
 | non-Windows | any | `PlatformUnsupported` through the stub |
 | any target | `test-support` | doc-hidden conformance helpers, never a production native API |
 
-Support is currently fixed headless Raster/Compute/Copy execution on Windows
-DX12/Vulkan plus one DX12 presentation lifecycle slice. `Dx12Surface` selects
-a surface-compatible adapter, retains the supplied standard window/display
-handle owner, permits multiple independently ticketed acquired frames up to
-the private native image capacity, and keeps HWND/DXGI/HAL details in
-`imp`. Non-zero configurations receive opaque monotonic generations; resize
-retires the old generation before recreation, while zero-size/minimize becomes
-Suspended and restore configures a fresh generation. Each lightweight
-completion ticket remains live until its derived views are destroyed; any live
-ticket blocks lifecycle teardown, and unknown retirement quarantines native/
-window ownership. The ticket limit protects native swapchain image uniqueness;
-renderer-owned bounded frame scheduling remains a separate private policy.
-The current `Dx12Surface::open` entry point is a Stage 1 single-surface
-bootstrap that selects a present-compatible device; it does not freeze the
-eventual multi-surface Device/Surface topology.
-Vulkan presentation, loss recovery, and a general cross-platform surface API
-remain absent. Native platform paths must run on native environments rather
-than be inferred from cross-compilation; see
+Support is currently fixed headless Raster/Compute/Copy execution and one
+Windows presentation slice on both DX12 and Vulkan. `Surface::open` selects a
+present-compatible adapter for the requested backend and retains the supplied
+standard window/display-handle owner. It exposes only opaque acquired images
+and one-shot presentation tokens; HWND, DXGI/Vulkan swapchain objects, image
+views, queues, fences, and HAL details remain in `imp`.
+
+Every non-zero configuration has an opaque monotonic surface generation.
+Reconfiguration first stops acquire for the old generation; it is not permission
+to destroy old presentable resources. Their views, tokens, and native ownership
+remain until known GPU completion, while accepted-unknown work quarantines that
+ownership. Zero-size/minimize is `Suspended`; restore creates a fresh generation.
+Independent acquire tickets protect native image uniqueness. The renderer/harness
+separately owns its private bounded frames-in-flight policy and back pressure.
+This single-surface bootstrap does not freeze an eventual multi-surface topology
+or create a general cross-platform surface API. Loss recovery remains absent.
+Native platform paths must run on native environments rather than be inferred
+from cross-compilation; see
 [ADR-0008](adr/0008-native-platform-test-gates.md).
 
 `Validation::Required` is fail-closed. The private opening path requests and

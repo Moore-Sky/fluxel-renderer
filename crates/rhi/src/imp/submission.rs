@@ -133,10 +133,11 @@ pub(crate) fn submit_copy_with_staging(
                     owner,
                     encoder: Some(encoder),
                     command_buffer: Some(command_buffer),
-                    fence: Some(fence),
+                    fence: Some(NativeVulkanFence::Owned(fence)),
                     leases,
                     staging_buffers,
                     render_views,
+                    presentation_lease: None,
                     failure: inject_accepted_unknown.then_some(CompletionFailure::DeviceLost),
                 },
                 Err(error) => {
@@ -158,10 +159,11 @@ pub(crate) fn submit_copy_with_staging(
                             owner,
                             encoder: Some(encoder),
                             command_buffer: Some(command_buffer),
-                            fence: Some(fence),
+                            fence: Some(NativeVulkanFence::Owned(fence)),
                             leases,
                             staging_buffers,
                             render_views,
+                            presentation_lease: None,
                             failure: Some(CompletionFailure::DeviceLost),
                         }
                     }
@@ -233,10 +235,20 @@ pub(crate) fn completion_status(completion: &NativeCompletion) -> Result<Complet
             let NativeDevice::Vulkan { device, .. } = &owner.native else {
                 unreachable!()
             };
+            let (fence, target) = match fence {
+                NativeVulkanFence::Owned(fence) => (&*fence, 1),
+                NativeVulkanFence::Presentation { sync, value } => (sync.fence()?, *value),
+            };
             // SAFETY: the completion mutex gives exclusive access to this live
             // same-device fence, which remains owned by the submission.
             match unsafe { device.get_fence_value(fence) } {
-                Ok(value) => value,
+                Ok(observed) => {
+                    return Ok(if observed >= target {
+                        CompletionStatus::Complete
+                    } else {
+                        CompletionStatus::Pending
+                    });
+                }
                 Err(error) => {
                     let reason = completion_failure(&error);
                     *failure = Some(reason);
@@ -253,11 +265,20 @@ pub(crate) fn completion_status(completion: &NativeCompletion) -> Result<Complet
             ));
         }
     };
-    Ok(if value >= 1 {
+    #[cfg(feature = "dx12")]
+    return Ok(if value >= 1 {
         CompletionStatus::Complete
     } else {
         CompletionStatus::Pending
-    })
+    });
+    #[cfg(not(feature = "dx12"))]
+    #[allow(
+        unreachable_code,
+        reason = "the Vulkan-only match is structurally total and returns from every arm"
+    )]
+    {
+        unreachable!("Vulkan completion status returns from its match arm");
+    }
 }
 
 pub(crate) fn wait_completion(
@@ -310,9 +331,13 @@ pub(crate) fn wait_completion(
             let NativeDevice::Vulkan { device, .. } = &owner.native else {
                 unreachable!()
             };
+            let (fence, target) = match fence {
+                NativeVulkanFence::Owned(fence) => (&*fence, 1),
+                NativeVulkanFence::Presentation { sync, value } => (sync.fence()?, *value),
+            };
             // SAFETY: the completion mutex serializes waits and the live fence
             // belongs to this device/submission at the signaled value 1.
-            match unsafe { device.wait(fence, 1, Some(timeout)) } {
+            match unsafe { device.wait(fence, target, Some(timeout)) } {
                 Ok(complete) => complete,
                 Err(error) => {
                     let reason = completion_failure(&error);

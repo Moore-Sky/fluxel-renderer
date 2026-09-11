@@ -1,12 +1,14 @@
-# Windows DX12 presentation harness
+# Windows DX12/Vulkan presentation harness
 
 This is a deliberately narrow Stage 1 proof harness. `fluxel-host` owns the
 Win32 `Window` primitive and its ordered lifecycle events; this example joins it
-to the renderer-owned DX12 surface API. It introduces no input, clock, general
+to the renderer-owned backend-neutral surface API. It introduces no input, clock, general
 host runtime, or renderer → host dependency: both crates meet only at the
 standard raw window/display handle traits.
 
-The harness privately owns a three-slot bounded ring. It reserves a slot before
+The harness renders the same deterministic red/green/blue three-object scene
+through one ordered renderer packet and one acquired presentable image. It
+privately owns a three-slot bounded ring. It reserves a slot before
 acquiring a surface image, advances the new renderer transaction until raster
 submission is accepted and the image enters the native presentation path, then
 admits another frame. A slot remains unavailable until its own completion is
@@ -21,7 +23,8 @@ generation stops acquisition and reaches known completion before its native
 resources are released. Suspended intervals never acquire or submit a frame.
 
 ```powershell
-cargo run --manifest-path examples/windows-dx12/Cargo.toml -- --frames 120 --repeat 2 --induce-back-pressure
+cargo run --manifest-path examples/windows-dx12/Cargo.toml -- --backend dx12 --frames 120 --repeat 2 --induce-back-pressure
+cargo run --manifest-path examples/windows-dx12/Cargo.toml -- --backend vulkan --frames 120 --repeat 2
 ```
 
 `--frames K` makes a finite evidence run; omitting it runs until `WM_CLOSE`.
@@ -32,6 +35,8 @@ are live, the fourth start is rejected before native acquire/record; the harness
 then releases one exact latch, proves only that slot retires, and proves the next
 frame reuses that same slot. The other two completions remain held during that
 observation, so driver timing cannot accidentally satisfy the oracle.
+The deterministic latch is currently DX12-only; Vulkan still exercises the
+same natural bounded ring and completion-driven reuse without fault injection.
 `--evidence-pause-ms K` adds a finite pause at the one-live, capacity-full, and
 exact-reuse milestones so an external capture process can bind screenshots to
 those logged states. It does not change completion or admission decisions and
@@ -45,5 +50,5 @@ Shutdown is intentionally ordered: stop admission, drain every live submission,
 drop renderer-owned resources, unconfigure the surface (which drains accepted
 work), drop the surface's retained window reference, then explicitly close and
 drop the host window. The manifest enables RHI's conformance-only
-`test-support` feature solely to capture DX12 debug-layer diagnostics; any
-diagnostic makes a run fail.
+`test-support` feature solely to capture DX12 debug-layer or Vulkan validation
+diagnostics; any diagnostic makes a run fail.

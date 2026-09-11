@@ -33,9 +33,9 @@ impl RasterBackend {
         }
     }
 
-    /// Creates the fixed backend only for a surface-compatible DX12 device.
-    #[cfg(all(windows, feature = "dx12"))]
-    pub(crate) fn for_dx12_surface(device: Device) -> Self {
+    /// Creates the fixed backend only for a surface-compatible device.
+    #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
+    pub(crate) fn for_surface(device: Device) -> Self {
         Self {
             capabilities: raster_surface_capabilities(&device),
             device,
@@ -101,7 +101,7 @@ fn raster_capabilities(device: &Device) -> DeviceCapabilities {
     )
 }
 
-#[cfg(all(windows, feature = "dx12"))]
+#[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 fn raster_surface_capabilities(device: &Device) -> DeviceCapabilities {
     let facts = device.capabilities();
     let mut capabilities = raster_capabilities_from_limit_and_filterability(
