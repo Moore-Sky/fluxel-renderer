@@ -46,12 +46,12 @@ The workspace releases its three crates together.  Git consumers must pin the
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.0" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.0" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.0" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.1" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.1" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.1" }
 ```
 
-`v0.8.0` and each package's `0.8.0` version identify the same workspace
+`v0.8.1` and each package's `0.8.1` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -137,9 +137,21 @@ validation harness; it did not become a host-services runtime.
 - [x] Retain inspected multi-timepoint screenshots, backend and adapter diagnostics, and focused tests
   for new platform-independent state.
 
-The proof remains deliberately narrow: one fixed-size DX12 window and one live
-frame. Surface generations and resize/minimize lifecycle are the next closure;
-bounded frames-in-flight and Vulkan presentation follow separately.
+### Completed — Stage 1.2 DX12 surface lifecycle
+
+- [x] Consume ordered Host resize, minimize, restore, zero-size, and close
+  events without moving surface policy into Host.
+- [x] Give every non-zero configuration an opaque surface generation and stop
+  acquisition before retiring the old generation.
+- [x] Keep zero-sized/minimized targets suspended without drawable submission,
+  then configure a fresh generation after restore.
+- [x] Retain completion-owned derived views until known retirement; unknown
+  native outcomes and premature Surface drop quarantine the full ownership
+  bundle instead of guessing that teardown is safe.
+
+The proof remains deliberately narrow: DX12, one live frame, and conservative
+queue-idle retirement for recreation. Bounded frames-in-flight is the next
+closure; Vulkan presentation follows separately.
 
 ### Unscheduled optimizations
 

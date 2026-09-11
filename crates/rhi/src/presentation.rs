@@ -2,7 +2,9 @@
 //!
 //! This narrow Windows-only boundary binds a native window lifetime to one
 //! DX12 surface. It intentionally exposes neither HWND nor DXGI/HAL types.
-//! Explicit [`Dx12Surface::shutdown`] is the observable teardown operation.
+//! A surface has one portable generation/state façade: resize first retires a
+//! configured generation, then either suspends at zero extent or configures a
+//! fresh generation. Explicit [`Dx12Surface::shutdown`] is the observable teardown operation.
 //! Its `Drop` fallback only attempts the same idle-and-unconfigure sequence
 //! when no acquired frame remains; accepted-unknown quarantine deliberately
 //! keeps the token, native surface, and window lease alive instead.
@@ -47,6 +49,13 @@ pub enum SurfaceError {
     FrameStillAcquired,
     /// The surface was already shut down and cannot acquire another image.
     NotConfigured,
+    /// The surface is intentionally suspended for a zero-sized target.
+    Suspended,
+    /// Native retirement or configuration left ownership unknowable; this
+    /// surface has quarantined its native state and will never acquire again.
+    Poisoned(String),
+    /// The finite opaque generation namespace cannot advance safely.
+    GenerationExhausted,
     /// A native synchronization or teardown operation failed.
     Shutdown(String),
 }
@@ -63,12 +72,70 @@ impl fmt::Display for SurfaceError {
                 f.write_str("cannot shut down with an acquired surface frame")
             }
             Self::NotConfigured => f.write_str("surface is not configured"),
+            Self::Suspended => f.write_str("surface is suspended at zero extent"),
+            Self::Poisoned(reason) => write!(f, "surface is poisoned: {reason}"),
+            Self::GenerationExhausted => f.write_str("surface generation namespace exhausted"),
             Self::Shutdown(value) => write!(f, "DX12 surface shutdown failed: {value}"),
         }
     }
 }
 
 impl std::error::Error for SurfaceError {}
+
+/// Comparable identity for one configured presentable-resource generation.
+///
+/// Values are allocated only by [`Dx12Surface`]; callers can compare and log
+/// them but cannot construct or mutate one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct SurfaceGeneration(u64);
+
+/// Portable client-pixel extent for a presentation target.
+///
+/// Zero is deliberately valid and means a suspended, non-drawable surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct SurfaceExtent {
+    width: u32,
+    height: u32,
+}
+
+impl SurfaceExtent {
+    /// Creates a client-pixel extent; zero dimensions are valid suspension input.
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    /// Returns the width in client pixels.
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Returns the height in client pixels.
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+
+    fn drawable(self) -> bool {
+        self.width != 0 && self.height != 0
+    }
+}
+
+/// Observable portable lifecycle state of a DX12 presentation surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceStatus {
+    /// A configured generation can acquire images at this extent.
+    Active {
+        /// Identity allocated for the currently configured native resources.
+        generation: SurfaceGeneration,
+        /// Client-pixel size negotiated for that generation.
+        extent: SurfaceExtent,
+    },
+    /// No presentable image exists while the client extent is zero.
+    Suspended,
+    /// Native ownership became unknown and has been quarantined.
+    Poisoned,
+    /// Explicit shutdown completed; this façade cannot be configured again.
+    Closed,
+}
 
 /// A rendering-owned DX12 surface that keeps its native window alive.
 ///
@@ -81,16 +148,31 @@ pub struct Dx12Surface {
     // quarantine. Retain the concrete window object, not merely a borrow, so
     // HWND destruction cannot race that token's surface teardown.
     window: Arc<dyn Any>,
-    width: u32,
-    height: u32,
-    configured: bool,
+    status: SurfaceStatus,
+    next_generation: u64,
+    closed: bool,
     live_frame: Arc<AtomicBool>,
     _thread_affinity: Rc<()>,
 }
 
 impl Drop for Dx12Surface {
     fn drop(&mut self) {
-        if !may_best_effort_shutdown(self.configured, self.live_frame.load(Ordering::Acquire)) {
+        let frame_outstanding = self.live_frame.load(Ordering::Acquire);
+        let retained = (
+            Arc::clone(&self.device.inner),
+            Arc::clone(&self.native),
+            Arc::clone(&self.window),
+            Arc::clone(&self.live_frame),
+        );
+        // A successful present may have moved only a lightweight gate into a
+        // Send-capable completion. If callers drop Surface before that bundle
+        // retires, the completion can still own derived render views/queue
+        // state. Retain the full native/window ownership here; never rely on
+        // automatic field drop merely because no acquire token remains.
+        if quarantine_live_drop_ownership(frame_outstanding, retained) {
+            return;
+        }
+        if !may_best_effort_shutdown(matches!(self.status, SurfaceStatus::Active { .. }), false) {
             return;
         }
         // Drop must not turn an unwind/early-return cleanup path into a
@@ -108,13 +190,59 @@ impl Drop for Dx12Surface {
             imp::unconfigure_dx12_surface(&self.device.inner, &self.native),
             retained,
         ) {
-            self.configured = false;
+            self.status = SurfaceStatus::Suspended;
         }
     }
 }
 
 fn may_best_effort_shutdown(configured: bool, frame_outstanding: bool) -> bool {
     configured && !frame_outstanding
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceTransition {
+    Noop,
+    Suspend,
+    Configure,
+    RetireThenSuspend,
+    RetireThenConfigure,
+    RefusePoisoned,
+    RefuseClosed,
+}
+
+fn classify_transition(status: SurfaceStatus, extent: SurfaceExtent) -> SurfaceTransition {
+    match (status, extent.drawable()) {
+        (SurfaceStatus::Poisoned, _) => SurfaceTransition::RefusePoisoned,
+        (SurfaceStatus::Closed, _) => SurfaceTransition::RefuseClosed,
+        (SurfaceStatus::Active { extent: active, .. }, _) if active == extent => {
+            SurfaceTransition::Noop
+        }
+        (SurfaceStatus::Suspended, false) => SurfaceTransition::Suspend,
+        (SurfaceStatus::Suspended, true) => SurfaceTransition::Configure,
+        (SurfaceStatus::Active { .. }, false) => SurfaceTransition::RetireThenSuspend,
+        (SurfaceStatus::Active { .. }, true) => SurfaceTransition::RetireThenConfigure,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownTransition {
+    RetireThenClose,
+    Close,
+    RefusePoisoned,
+    RefuseClosed,
+}
+
+fn classify_shutdown(status: SurfaceStatus, closed: bool) -> ShutdownTransition {
+    if closed || matches!(status, SurfaceStatus::Closed) {
+        ShutdownTransition::RefuseClosed
+    } else {
+        match status {
+            SurfaceStatus::Active { .. } => ShutdownTransition::RetireThenClose,
+            SurfaceStatus::Suspended => ShutdownTransition::Close,
+            SurfaceStatus::Poisoned => ShutdownTransition::RefusePoisoned,
+            SurfaceStatus::Closed => unreachable!("handled above"),
+        }
+    }
 }
 
 /// Returns whether a failed best-effort teardown quarantined `ownership`.
@@ -131,9 +259,23 @@ fn quarantine_after_teardown_failure<T, E>(result: Result<(), E>, ownership: T) 
     }
 }
 
+/// Quarantines a Drop-time surface ownership bundle while a frame gate is live.
+///
+/// A normal successful completion owns only the gate, command bundle and
+/// derived views; retaining this separate bundle prevents premature surface or
+/// window destruction without making `NativeSubmission` thread-affine.
+fn quarantine_live_drop_ownership<T>(frame_outstanding: bool, ownership: T) -> bool {
+    if frame_outstanding {
+        std::mem::forget(ownership);
+        true
+    } else {
+        false
+    }
+}
+
 impl Dx12Surface {
-    /// Opens a DX12 device selected specifically for this window and installs
-    /// the fixed RGBA8 FIFO surface configuration.
+    /// Opens a DX12 device selected specifically for this window. A zero
+    /// initial extent is valid and starts suspended without configuring HAL.
     pub fn open<W>(
         window: Arc<W>,
         options: DeviceOptions,
@@ -143,11 +285,7 @@ impl Dx12Surface {
     where
         W: HasWindowHandle + HasDisplayHandle + 'static,
     {
-        if width == 0 || height == 0 {
-            return Err(SurfaceError::Configure(
-                "surface extent must be non-zero".into(),
-            ));
-        }
+        let extent = SurfaceExtent::new(width, height);
         let display = window
             .display_handle()
             .map_err(|e| SurfaceError::WindowHandle(e.to_string()))?
@@ -165,14 +303,29 @@ impl Dx12Surface {
             identity: fluxel_rendergraph::DeviceIdentity::new(next_identity()),
         };
         let native = Arc::new(Mutex::new(native_surface));
-        imp::configure_dx12_surface(&device.inner, &native, width, height)
-            .map_err(SurfaceError::Configure)?;
+        let (status, next_generation) = if extent.drawable() {
+            // This is initial configuration: no earlier generation, acquired
+            // image, or queue submission exists, and every native owner is
+            // still local to this constructor. A configure error can therefore
+            // return normally without releasing accepted/unknown GPU work.
+            imp::configure_dx12_surface(&device.inner, &native, width, height)
+                .map_err(SurfaceError::Configure)?;
+            (
+                SurfaceStatus::Active {
+                    generation: SurfaceGeneration(1),
+                    extent,
+                },
+                2,
+            )
+        } else {
+            (SurfaceStatus::Suspended, 1)
+        };
         Ok(Self {
             device,
             native,
-            width,
-            height,
-            configured: true,
+            status,
+            next_generation,
+            closed: false,
             window,
             live_frame: Arc::new(AtomicBool::new(false)),
             _thread_affinity: Rc::new(()),
@@ -191,19 +344,95 @@ impl Dx12Surface {
         crate::RasterBackend::for_dx12_surface(self.device())
     }
 
-    /// Acquires the sole frame that may be recorded for this surface now.
-    pub fn acquire(&mut self) -> Result<AcquiredSurfaceFrame, SurfaceError> {
-        if !self.configured {
+    /// Returns the current portable presentation lifecycle state.
+    pub fn status(&self) -> SurfaceStatus {
+        self.status
+    }
+
+    /// Retires any active generation then suspends or configures a fresh one.
+    ///
+    /// A live acquired token refuses the transition. The current serial queue
+    /// proves old-generation retirement with `wait_for_idle`; any failure to
+    /// establish that proof quarantines ownership and poisons this surface.
+    pub fn resize(&mut self, extent: SurfaceExtent) -> Result<SurfaceStatus, SurfaceError> {
+        if self.closed {
             return Err(SurfaceError::NotConfigured);
         }
+        let transition = classify_transition(self.status, extent);
+        if matches!(transition, SurfaceTransition::RefusePoisoned) {
+            return Err(SurfaceError::Poisoned(
+                "a prior native lifecycle failure was quarantined".into(),
+            ));
+        }
+        if matches!(transition, SurfaceTransition::RefuseClosed) {
+            return Err(SurfaceError::NotConfigured);
+        }
+        if matches!(transition, SurfaceTransition::Noop) {
+            return Ok(self.status);
+        }
+        if self.live_frame.load(Ordering::Acquire) {
+            return Err(SurfaceError::FrameOutstanding);
+        }
+        if matches!(
+            transition,
+            SurfaceTransition::RetireThenSuspend | SurfaceTransition::RetireThenConfigure
+        ) {
+            if let Err(error) = imp::unconfigure_dx12_surface(&self.device.inner, &self.native) {
+                self.poison_and_quarantine();
+                return Err(SurfaceError::Poisoned(format!(
+                    "old generation retirement failed: {error}"
+                )));
+            }
+            self.status = SurfaceStatus::Suspended;
+        }
+        if matches!(
+            transition,
+            SurfaceTransition::Suspend | SurfaceTransition::RetireThenSuspend
+        ) {
+            return Ok(self.status);
+        }
+        let generation = self.reserve_generation()?;
+        if let Err(error) = imp::configure_dx12_surface(
+            &self.device.inner,
+            &self.native,
+            extent.width,
+            extent.height,
+        ) {
+            // HAL's unsafe configure contract does not promise that an Err
+            // leaves a reusable unconfigured surface. Prefer terminal poison
+            // to falsely claiming a retry-safe Suspended state.
+            self.poison_and_quarantine();
+            return Err(SurfaceError::Poisoned(format!(
+                "new generation configuration failed: {error}"
+            )));
+        }
+        self.status = SurfaceStatus::Active { generation, extent };
+        Ok(self.status)
+    }
+
+    /// Acquires the sole frame that may be recorded for this surface now.
+    pub fn acquire(&mut self) -> Result<AcquiredSurfaceFrame, SurfaceError> {
+        if self.closed {
+            return Err(SurfaceError::NotConfigured);
+        }
+        let SurfaceStatus::Active { extent, .. } = self.status else {
+            return Err(match self.status {
+                SurfaceStatus::Suspended => SurfaceError::Suspended,
+                SurfaceStatus::Poisoned => SurfaceError::Poisoned(
+                    "a prior native lifecycle failure was quarantined".into(),
+                ),
+                SurfaceStatus::Closed => SurfaceError::NotConfigured,
+                SurfaceStatus::Active { .. } => unreachable!(),
+            });
+        };
         if self.live_frame.swap(true, Ordering::AcqRel) {
             return Err(SurfaceError::FrameOutstanding);
         }
         let descriptor = TextureDesc {
             dimension: TextureDimension::D2,
             extent: fluxel_rendergraph::Extent3d {
-                width: self.width,
-                height: self.height,
+                width: extent.width,
+                height: extent.height,
                 depth: 1,
             },
             mip_levels: 1,
@@ -257,16 +486,52 @@ impl Dx12Surface {
     /// A later `Drop` is a no-op after success; if callers skip this method,
     /// `Drop` makes the same best-effort attempt only when it is safe.
     pub fn shutdown(&mut self) -> Result<(), SurfaceError> {
-        if !self.configured {
-            return Err(SurfaceError::NotConfigured);
+        match classify_shutdown(self.status, self.closed) {
+            ShutdownTransition::RefuseClosed => return Err(SurfaceError::NotConfigured),
+            ShutdownTransition::RefusePoisoned => {
+                return Err(SurfaceError::Poisoned(
+                    "a prior native lifecycle failure was quarantined".into(),
+                ));
+            }
+            ShutdownTransition::RetireThenClose | ShutdownTransition::Close => {}
         }
         if self.live_frame.load(Ordering::Acquire) {
             return Err(SurfaceError::FrameStillAcquired);
         }
-        imp::unconfigure_dx12_surface(&self.device.inner, &self.native)
-            .map_err(SurfaceError::Shutdown)?;
-        self.configured = false;
+        if matches!(
+            classify_shutdown(self.status, self.closed),
+            ShutdownTransition::RetireThenClose
+        ) {
+            if let Err(error) = imp::unconfigure_dx12_surface(&self.device.inner, &self.native) {
+                self.poison_and_quarantine();
+                return Err(SurfaceError::Poisoned(format!(
+                    "shutdown retirement failed: {error}"
+                )));
+            }
+        }
+        self.status = SurfaceStatus::Closed;
+        self.closed = true;
         Ok(())
+    }
+
+    fn reserve_generation(&mut self) -> Result<SurfaceGeneration, SurfaceError> {
+        let value = self.next_generation;
+        self.next_generation = self.next_generation.checked_add(1).ok_or_else(|| {
+            self.poison_and_quarantine();
+            SurfaceError::GenerationExhausted
+        })?;
+        Ok(SurfaceGeneration(value))
+    }
+
+    fn poison_and_quarantine(&mut self) {
+        self.status = SurfaceStatus::Poisoned;
+        let retained = (
+            Arc::clone(&self.device.inner),
+            Arc::clone(&self.native),
+            Arc::clone(&self.window),
+            Arc::clone(&self.live_frame),
+        );
+        let _ = quarantine_live_drop_ownership(true, retained);
     }
 }
 

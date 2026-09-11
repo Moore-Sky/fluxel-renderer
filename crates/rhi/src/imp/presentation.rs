@@ -16,7 +16,7 @@ pub(crate) struct NativePresentationToken {
     pub(crate) fence: Option<NativeSurfaceFence>,
     /// Stays true from acquire until the native image has been discarded or
     /// the accepted submission's complete bundle has been retired.
-    pub(crate) live_frame: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) live_frame: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Type-erased `Arc<W>` from the public façade. It is intentionally held
     /// by the token because accepted-unknown quarantine can outlive Surface.
     pub(crate) _window: Arc<dyn std::any::Any>,
@@ -43,8 +43,9 @@ impl Drop for NativePresentationToken {
                 unsafe { device.destroy_fence(fence) };
             }
         }
-        self.live_frame
-            .store(false, std::sync::atomic::Ordering::Release);
+        if let Some(live_frame) = self.live_frame.take() {
+            live_frame.store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -241,7 +242,7 @@ pub(crate) fn acquire_dx12_surface(
                     surface: Arc::clone(&surface),
                     acquired: Some(NativeAcquiredSurfaceTexture::Dx12(acquired)),
                     fence: Some(NativeSurfaceFence::Dx12(fence)),
-                    live_frame,
+                    live_frame: Some(live_frame),
                     _window: window,
                 },
             ))
@@ -252,6 +253,21 @@ pub(crate) fn acquire_dx12_surface(
 
 pub(crate) fn discard_presentation(token: NativePresentationToken) {
     drop(token);
+}
+
+impl NativePresentationToken {
+    /// Moves the acquire gate into the accepted command bundle after present
+    /// has consumed the native image. Window/surface ownership stays here and
+    /// is released immediately; only derived render-view retirement remains.
+    fn take_completion_lease(&mut self) -> Option<NativePresentationLease> {
+        transfer_presentation_lease(&mut self.live_frame)
+    }
+}
+
+pub(crate) fn transfer_presentation_lease(
+    live_frame: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Option<NativePresentationLease> {
+    live_frame.take().map(NativePresentationLease::new)
 }
 
 /// Submits a command buffer and consumes exactly one acquired DX12 image.
@@ -311,6 +327,9 @@ pub(crate) fn submit_dx12_presented(
                 // unique acquired texture for the configured surface.
                 unsafe { queue.present(surface, surface_texture) }.err()
             };
+            let presentation_lease = token
+                .take_completion_lease()
+                .expect("an acquired surface token owns its live-frame gate");
             // `Queue::present` takes the acquired texture by value; successful
             // submit has therefore consumed the only surface-owned image.
             // The token now only carries the thread-affine window lease and
@@ -326,6 +345,7 @@ pub(crate) fn submit_dx12_presented(
                     leases,
                     staging_buffers: Vec::new(),
                     render_views,
+                    presentation_lease: Some(presentation_lease),
                     failure: present.map(|_| CompletionFailure::ExecutionFailed),
                 },
             ))))

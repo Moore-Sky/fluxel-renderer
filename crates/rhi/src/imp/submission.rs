@@ -63,6 +63,7 @@ pub(crate) fn submit_copy_with_staging(
                     leases,
                     staging_buffers,
                     render_views,
+                    presentation_lease: None,
                     failure: inject_accepted_unknown.then_some(CompletionFailure::DeviceLost),
                 },
                 Err(error) => {
@@ -91,6 +92,7 @@ pub(crate) fn submit_copy_with_staging(
                             leases,
                             staging_buffers,
                             render_views,
+                            presentation_lease: None,
                             failure: Some(CompletionFailure::DeviceLost),
                         }
                     }

@@ -37,7 +37,7 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.0"
+tag = "v0.8.1"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -47,7 +47,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.8.0"
+tag = "v0.8.1"
 default-features = false
 features = ["dx12"]
 ```
@@ -65,6 +65,13 @@ Both features are enabled by default. A build with a requested backend omitted
 returns `OpenError::BackendDisabled`; a non-Windows build returns
 `OpenError::PlatformUnsupported`. Adding the dependency opens no device. Rust
 1.87 and edition 2024 are required.
+
+The Windows DX12 presentation slice accepts only standard window/display
+handles. `Dx12Surface` exposes an opaque generation and Active, Suspended,
+Poisoned, or Closed lifecycle state; zero-sized targets suspend acquisition,
+and a later non-zero extent creates a fresh generation only after known
+retirement of the old one. Native swapchain objects and HWND remain private.
+This remains a serial one-live-frame proof, not a general surface API.
 
 ## Open a device
 

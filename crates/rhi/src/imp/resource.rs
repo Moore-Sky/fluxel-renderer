@@ -491,6 +491,7 @@ impl Drop for NativeSubmission {
                 leases,
                 staging_buffers,
                 render_views,
+                presentation_lease,
                 failure,
             } => {
                 // No fence means a submit failure may already have accepted
@@ -501,6 +502,7 @@ impl Drop for NativeSubmission {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
+                    let retained_presentation_lease = presentation_lease.take();
                     std::mem::forget((
                         owner.clone(),
                         encoder.take(),
@@ -508,6 +510,28 @@ impl Drop for NativeSubmission {
                         retained,
                         retained_staging,
                         retained_views,
+                        retained_presentation_lease,
+                    ));
+                    return;
+                }
+                // A malformed internal bundle is not proof that a prior
+                // queue operation was rejected. Retain all pieces (including
+                // the post-present gate) rather than allowing field Drop to
+                // make surface teardown appear safe.
+                if encoder.is_none() || command_buffer.is_none() {
+                    let retained = std::mem::take(leases);
+                    let retained_staging = std::mem::take(staging_buffers);
+                    let retained_views = std::mem::take(render_views);
+                    let retained_presentation_lease = presentation_lease.take();
+                    std::mem::forget((
+                        owner.clone(),
+                        encoder.take(),
+                        command_buffer.take(),
+                        fence.take(),
+                        retained,
+                        retained_staging,
+                        retained_views,
+                        retained_presentation_lease,
                     ));
                     return;
                 }
@@ -533,6 +557,7 @@ impl Drop for NativeSubmission {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
+                    let retained_presentation_lease = presentation_lease.take();
                     std::mem::forget((
                         owner.clone(),
                         encoder,
@@ -541,6 +566,7 @@ impl Drop for NativeSubmission {
                         retained,
                         retained_staging,
                         retained_views,
+                        retained_presentation_lease,
                     ));
                 } else if unsafe { device.wait(&fence, 1, None) }.is_ok() {
                     // SAFETY: the sole command buffer completed at fence value 1.
@@ -549,10 +575,14 @@ impl Drop for NativeSubmission {
                         device.destroy_fence(fence);
                     }
                     destroy_render_views(owner, std::mem::take(render_views));
+                    // Views are now destroyed and fence completion proved, so
+                    // a subsequent resize/unconfigure may retire this surface.
+                    drop(presentation_lease.take());
                 } else {
                     let retained = std::mem::take(leases);
                     let retained_staging = std::mem::take(staging_buffers);
                     let retained_views = std::mem::take(render_views);
+                    let retained_presentation_lease = presentation_lease.take();
                     std::mem::forget((
                         owner.clone(),
                         encoder,
@@ -561,6 +591,7 @@ impl Drop for NativeSubmission {
                         retained,
                         retained_staging,
                         retained_views,
+                        retained_presentation_lease,
                     ));
                 }
             }

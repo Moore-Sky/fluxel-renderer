@@ -1,7 +1,7 @@
 # Windows DX12 presentation harness
 
 This is a deliberately narrow Stage 1 proof harness. `fluxel-host` owns the
-fixed-size Win32 `Window` primitive and its message pump; this example joins it
+Win32 `Window` primitive and its ordered lifecycle events; this example joins it
 to the renderer-owned DX12 surface API. It introduces no input, clock, general
 host runtime, or renderer → host dependency: both crates meet only at the
 standard raw window/display handle traits.
@@ -10,6 +10,11 @@ Each frame follows exactly one path: acquire a surface image, call the existing
 fixed-frame renderer's `draw_to_surface`, poll its submission to completion,
 then acquire the next image. The harness never assembles a graph or pipeline,
 and it has no headless fallback: headless success is not presentation evidence.
+
+Resize, minimize, zero-size, and restore events drive the RHI-owned surface
+state. Each non-zero configuration has an opaque generation; the old
+generation stops acquisition and reaches known completion before its native
+resources are released. Suspended intervals never acquire or submit a frame.
 
 ```powershell
 cargo run --manifest-path examples/windows-dx12/Cargo.toml -- --frames 120 --repeat 2

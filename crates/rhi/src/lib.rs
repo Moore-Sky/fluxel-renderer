@@ -52,7 +52,10 @@ pub use execution::{RasterTextureReadback, readback_exported_raster_texture_for_
 /// Opaque identity of one physical RenderGraph resource generation.
 pub use fluxel_rendergraph::PhysicalResourceIdentity;
 #[cfg(all(windows, feature = "dx12"))]
-pub use presentation::{AcquiredSurfaceFrame, Dx12Surface, PresentationToken, SurfaceError};
+pub use presentation::{
+    AcquiredSurfaceFrame, Dx12Surface, PresentationToken, SurfaceError, SurfaceExtent,
+    SurfaceGeneration, SurfaceStatus,
+};
 /// Uninhabited presentation token used by non-DX12 builds to keep portable
 /// execution profiles structurally total while rejecting presentation.
 #[cfg(not(all(windows, feature = "dx12")))]

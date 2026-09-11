@@ -3,6 +3,33 @@
 #[cfg(test)]
 use super::*;
 
+#[cfg(feature = "dx12")]
+#[test]
+fn presentation_gate_handoff_and_retirement_follow_native_bundle_lifetime() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let gate = Arc::new(AtomicBool::new(true));
+    let mut token_gate = Some(Arc::clone(&gate));
+    let lease = transfer_presentation_lease(&mut token_gate)
+        .expect("an acquired token has a live-frame gate");
+    // Token handoff itself must not make resize/unconfigure legal.
+    assert!(token_gate.is_none());
+    assert!(gate.load(Ordering::Acquire));
+    // Known retirement drops the lightweight lease only after the submission
+    // has destroyed its derived views.
+    drop(lease);
+    assert!(!gate.load(Ordering::Acquire));
+
+    let unknown_gate = Arc::new(AtomicBool::new(true));
+    let unknown = NativePresentationLease::new(Arc::clone(&unknown_gate));
+    // Accepted-unknown quarantine intentionally retains the gate forever.
+    std::mem::forget(unknown);
+    assert!(unknown_gate.load(Ordering::Acquire));
+}
+
 #[cfg(test)]
 #[test]
 fn buffer_projection_exposes_storage_widening_exactly() {

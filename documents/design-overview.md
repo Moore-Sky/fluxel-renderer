@@ -28,9 +28,10 @@ accident of callback order or one backend's behavior. Its central goals are:
 It is not a general graphics API, a scene/asset database, a shader authoring
 framework, or a presentation runtime. In particular, there is currently no
 general pipeline or bind-group builder, general shader reflection API,
-cross-platform surface lifecycle, multi-queue scheduler, transient aliasing
+cross-platform surface abstraction, multi-queue scheduler, transient aliasing
 implementation, or stable asset/resource handle and cache ABI. The one proven
-presentation slice is a fixed-size DX12 surface used by a Windows proof harness.
+presentation slice is a DX12 surface-generation lifecycle used by a Windows
+proof harness; it handles resize/minimize/restore but is not a general platform API.
 
 ## Layer model and dependency direction
 
@@ -263,10 +264,10 @@ while internal implementation evolves.
 
 The portable graph and default renderer-domain model are not tied to a native
 API. Native execution is Windows-focused, with headless DX12/Vulkan feature
-selection and a separate fixed-size DX12 surface path. Non-Windows native
+selection and a separate DX12 surface-generation path. Non-Windows native
 requests fail explicitly rather than silently emulating a backend. There is no
-Vulkan presentation, surface-generation/resize contract, lost-surface recovery,
-or web renderer today.
+Vulkan presentation, lost-surface/device recovery, general cross-platform
+surface API, or web renderer today.
 
 Windows MSVC is the primary Windows development/native test environment. Linux
 must be tested natively (for example in WSL2/Ubuntu), because it exercises

@@ -372,6 +372,26 @@ pub(crate) enum NativeFinished {
 #[derive(Clone)]
 pub(crate) struct NativeCompletion(pub(crate) Arc<std::sync::Mutex<NativeSubmission>>);
 
+/// The post-present part of an acquired-frame gate. It deliberately contains
+/// no window or surface ownership, so ordinary completions remain Send/Sync.
+/// It is released only after the submission has destroyed derived views.
+pub(crate) struct NativePresentationLease {
+    live_frame: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NativePresentationLease {
+    pub(crate) fn new(live_frame: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { live_frame }
+    }
+}
+
+impl Drop for NativePresentationLease {
+    fn drop(&mut self) {
+        self.live_frame
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 #[allow(
     clippy::large_enum_variant,
     reason = "one native submission bundle must retain the concrete encoder and command buffer together"
@@ -386,6 +406,7 @@ pub(crate) enum NativeSubmission {
         leases: Vec<ResourceLease>,
         staging_buffers: Vec<OwnedBuffer>,
         render_views: Vec<NativeRenderView>,
+        presentation_lease: Option<NativePresentationLease>,
         failure: Option<CompletionFailure>,
     },
     #[cfg(feature = "vulkan")]

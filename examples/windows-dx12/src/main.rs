@@ -8,17 +8,17 @@
 
 use std::{env, fmt, num::NonZeroIsize, sync::Arc, thread, time::Duration};
 
-use fluxel_host::{Window, WindowConfig, WindowError};
+use fluxel_host::{Window, WindowConfig, WindowError, WindowEvent};
 use fluxel_renderer::{
     BasicMaterial, Camera, FixedFrameRenderer, Geometry, IndexedMeshSnapshot, IndexedMeshUpload,
     IndexedMeshUploadStatus, VisibleFrameStatus,
 };
 use fluxel_rhi::{
-    Device, DeviceOptions, Dx12Surface, Validation,
+    Device, DeviceOptions, Dx12Surface, SurfaceExtent, SurfaceStatus, Validation,
     test_support::{clear_validation_diagnostics, validation_diagnostics},
 };
 
-const TITLE: &str = "Fluxel Stage 1.1 — DX12 presentation";
+const TITLE: &str = "Fluxel Stage 1.2 — DX12 surface lifecycle";
 const CLIENT_WIDTH: u32 = 960;
 const CLIENT_HEIGHT: u32 = 540;
 
@@ -96,7 +96,7 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
         device.hardware().driver_info,
     );
 
-    let mut presented = 0;
+    let mut counters = LifecycleCounters::default();
     let mut snapshot = None;
     let mut renderer = None;
     let work = (|| {
@@ -105,41 +105,48 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
         let camera = Camera::default();
         let material = BasicMaterial::new([0.15, 0.65, 1.0, 1.0])
             .map_err(|error| HarnessError::Renderer(error.to_string()))?;
-        run_frame_loop(&window, options.frames, || {
-            let acquired = surface.acquire().map_err(HarnessError::Surface)?;
-            let mut submission = renderer
-                .as_ref()
-                .expect("renderer is installed before the frame loop")
-                .draw_to_surface(
-                    snapshot
-                        .as_ref()
-                        .expect("snapshot is installed before the frame loop"),
-                    &camera,
-                    &material,
-                    acquired,
-                )
-                .map_err(|error| HarnessError::Renderer(error.to_string()))?;
-            loop {
-                match submission.poll() {
-                    VisibleFrameStatus::Pending | VisibleFrameStatus::Busy => {
-                        thread::sleep(Duration::from_millis(1));
-                    }
-                    VisibleFrameStatus::Complete => break,
-                    VisibleFrameStatus::Failed(error) => {
-                        return Err(HarnessError::Renderer(format!(
-                            "visible frame {presented} failed: {error}"
-                        )));
-                    }
-                    status => {
-                        return Err(HarnessError::Renderer(format!(
-                            "visible frame {presented} returned unsupported status: {status:?}"
-                        )));
+        run_frame_loop(
+            &window,
+            &mut surface,
+            options.frames,
+            &mut counters,
+            |surface, presented| {
+                let acquired = surface.acquire().map_err(HarnessError::Surface)?;
+                let mut submission = renderer
+                    .as_ref()
+                    .expect("renderer is installed before the frame loop")
+                    .draw_to_surface(
+                        snapshot
+                            .as_ref()
+                            .expect("snapshot is installed before the frame loop"),
+                        &camera,
+                        &material,
+                        acquired,
+                    )
+                    .map_err(|error| HarnessError::Renderer(error.to_string()))?;
+                loop {
+                    match submission.poll() {
+                        VisibleFrameStatus::Pending | VisibleFrameStatus::Busy => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        VisibleFrameStatus::Complete => break,
+                        VisibleFrameStatus::Failed(error) => {
+                            return Err(HarnessError::Renderer(format!(
+                                "visible frame {} failed: {error}",
+                                presented
+                            )));
+                        }
+                        status => {
+                            return Err(HarnessError::Renderer(format!(
+                                "visible frame {} returned unsupported status: {status:?}",
+                                presented
+                            )));
+                        }
                     }
                 }
-            }
-            presented += 1;
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     })();
 
     // No renderer resource or acquired image survives unconfigure. The surface
@@ -150,13 +157,6 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
     let shutdown = surface.shutdown().map_err(HarnessError::Surface);
     let diagnostics = validation_diagnostics(&surface.device());
     drop(surface);
-    // `try_unwrap` proves that dropping the surface also dropped every native
-    // surface/token lease. A mutable Window is required to invalidate future
-    // raw-handle borrows before its HWND is destroyed.
-    let mut window = Arc::try_unwrap(window).map_err(|_| HarnessError::WindowLeaseOutstanding)?;
-    let close = window.close().map_err(HarnessError::Window);
-    drop(window);
-    eprintln!("frames presented: {presented}");
     if diagnostics.is_empty() {
         eprintln!("validation diagnostics: clean");
     } else {
@@ -165,7 +165,19 @@ fn run_one_lifecycle(options: RunOptions) -> Result<(), HarnessError> {
             eprintln!("  {diagnostic}");
         }
     }
+    // A poisoned shutdown deliberately retains the Window lease. Report that
+    // original lifecycle failure instead of masking it with `try_unwrap`.
     shutdown?;
+    // `try_unwrap` proves that dropping the surface also dropped every native
+    // surface/token lease. A mutable Window is required to invalidate future
+    // raw-handle borrows before its HWND is destroyed.
+    let mut window = Arc::try_unwrap(window).map_err(|_| HarnessError::WindowLeaseOutstanding)?;
+    let close = window.close().map_err(HarnessError::Window);
+    drop(window);
+    eprintln!(
+        "lifecycle counters: events={} transitions={} presented={} suspended_iterations={}",
+        counters.events, counters.transitions, counters.presented, counters.suspended_iterations,
+    );
     if !diagnostics.is_empty() {
         return Err(HarnessError::Validation(diagnostics));
     }
@@ -207,21 +219,96 @@ fn upload_fixed_triangle(device: &Device) -> Result<IndexedMeshSnapshot, Harness
     }
 }
 
+#[derive(Default)]
+struct LifecycleCounters {
+    events: u64,
+    transitions: u64,
+    presented: u64,
+    suspended_iterations: u64,
+}
+
 fn run_frame_loop(
     window: &Window,
+    surface: &mut Dx12Surface,
     frame_limit: Option<u64>,
-    mut render_and_present: impl FnMut() -> Result<(), HarnessError>,
+    counters: &mut LifecycleCounters,
+    mut render_and_present: impl FnMut(&mut Dx12Surface, u64) -> Result<(), HarnessError>,
 ) -> Result<(), HarnessError> {
-    let mut frames = 0;
-    while !window.close_requested() && frame_limit.is_none_or(|limit| frames < limit) {
-        window.poll_events().map_err(HarnessError::Window)?;
-        if window.close_requested() {
+    while !window.close_requested() && frame_limit.is_none_or(|limit| counters.presented < limit) {
+        let events = window.poll_events().map_err(HarnessError::Window)?;
+        let close = process_event_batch(events, |event| {
+            counters.events += 1;
+            match event {
+                WindowEvent::Resized { width, height }
+                | WindowEvent::Restored { width, height } => {
+                    let status = surface
+                        .resize(SurfaceExtent::new(width, height))
+                        .map_err(HarnessError::Surface)?;
+                    counters.transitions += 1;
+                    eprintln!(
+                        "surface event={event:?} status={status:?} transitions={}",
+                        counters.transitions
+                    );
+                }
+                WindowEvent::Minimized => {
+                    let status = surface
+                        .resize(SurfaceExtent::new(0, 0))
+                        .map_err(HarnessError::Surface)?;
+                    counters.transitions += 1;
+                    eprintln!(
+                        "surface event=Minimized status={status:?} transitions={}",
+                        counters.transitions
+                    );
+                }
+                WindowEvent::CloseRequested => unreachable!("batch reducer consumes close"),
+                _ => eprintln!("surface event={event:?} action=ignored-unknown-host-event"),
+            }
+            Ok(())
+        })?;
+        if close {
+            counters.events += 1;
+            eprintln!("surface event=CloseRequested action=stop-new-surface-work");
             break;
         }
-        render_and_present()?;
-        frames += 1;
+        match surface.status() {
+            SurfaceStatus::Active { .. } => {
+                render_and_present(surface, counters.presented)?;
+                counters.presented += 1;
+            }
+            SurfaceStatus::Suspended => {
+                counters.suspended_iterations += 1;
+                thread::sleep(Duration::from_millis(5));
+            }
+            SurfaceStatus::Poisoned => {
+                return Err(HarnessError::Renderer(
+                    "surface entered terminal poisoned state".into(),
+                ));
+            }
+            SurfaceStatus::Closed => {
+                return Err(HarnessError::Renderer(
+                    "surface closed before the frame loop ended".into(),
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+/// Applies ordered facts only until close, leaving all later queued events inert.
+fn process_event_batch(
+    events: Vec<WindowEvent>,
+    mut apply: impl FnMut(WindowEvent) -> Result<(), HarnessError>,
+) -> Result<bool, HarnessError> {
+    // `poll_events` dispatches the whole native batch before returning. If it
+    // contains terminal destruction, even an earlier queued size fact is no
+    // longer safe to apply to the now-invalid HWND.
+    if events.contains(&WindowEvent::CloseRequested) {
+        return Ok(true);
+    }
+    for event in events {
+        apply(event)?;
+    }
+    Ok(false)
 }
 
 #[derive(Debug)]
@@ -268,7 +355,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::RunOptions;
+    use fluxel_host::WindowEvent;
+
+    use super::{RunOptions, process_event_batch};
 
     #[test]
     fn finite_run_controls_parse_without_gpu() {
@@ -281,5 +370,29 @@ mod tests {
     #[test]
     fn zero_frames_is_rejected() {
         assert!(RunOptions::parse(["--frames", "0"].map(str::to_owned)).is_err());
+    }
+
+    #[test]
+    fn close_discards_surface_actions_from_the_entire_dispatched_batch() {
+        let events = vec![
+            WindowEvent::Resized {
+                width: 800,
+                height: 600,
+            },
+            WindowEvent::CloseRequested,
+            WindowEvent::Restored {
+                width: 960,
+                height: 540,
+            },
+        ];
+        let mut applied = Vec::new();
+        let close = process_event_batch(events, |event| {
+            applied.push(event);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(close);
+        assert!(applied.is_empty());
     }
 }
