@@ -142,8 +142,10 @@ validation harness; it did not become a host-services runtime.
   back pressure when all slots remain live.
 - [x] Let immutable renderer snapshots retain independent concurrent read
   leases while each visible submission owns its completion lifetime.
-- [x] Track every acquired/presented image with an independent RHI ticket;
-  resize and shutdown refuse to touch the swapchain until all tickets retire.
+- [x] Enforce one not-yet-presented HAL acquire separately from bounded
+  completion tickets; resize and shutdown refuse until all tickets retire, and
+  an unpresented Vulkan drop quarantines the surface rather than reusing an
+  unproven acquire semaphore.
 - [x] Expose only the policy-neutral `VisibleFrameStatus::Submitted` milestone
   needed to distinguish native submission from completion-driven slot reuse.
 - [x] Lower one deterministic ordered multi-object scene into one packet and one

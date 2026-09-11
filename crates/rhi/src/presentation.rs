@@ -319,12 +319,12 @@ impl Surface {
             // image, or queue submission exists, and every native owner is
             // still local to this constructor. A configure error can therefore
             // return normally without releasing accepted/unknown GPU work.
-            imp::configure_surface(&device.inner, &native, width, height)
+            let actual_extent = imp::configure_surface(&device.inner, &native, width, height)
                 .map_err(SurfaceError::Configure)?;
             (
                 SurfaceStatus::Active {
                     generation: SurfaceGeneration(1),
-                    extent,
+                    extent: SurfaceExtent::new(actual_extent.0, actual_extent.1),
                 },
                 2,
             )
@@ -359,7 +359,11 @@ impl Surface {
 
     /// Returns the current portable presentation lifecycle state.
     pub fn status(&self) -> SurfaceStatus {
-        self.status
+        if self.presentation_tickets.poisoned() {
+            SurfaceStatus::Poisoned
+        } else {
+            self.status
+        }
     }
 
     /// Retires any active generation then suspends or configures a fresh one.
@@ -368,6 +372,12 @@ impl Surface {
     /// proves old-generation retirement with `wait_for_idle`; any failure to
     /// establish that proof quarantines ownership and poisons this surface.
     pub fn resize(&mut self, extent: SurfaceExtent) -> Result<SurfaceStatus, SurfaceError> {
+        if self.presentation_tickets.poisoned() {
+            self.status = SurfaceStatus::Poisoned;
+            return Err(SurfaceError::Poisoned(
+                "an unpresented native surface image was quarantined".into(),
+            ));
+        }
         if self.closed {
             return Err(SurfaceError::NotConfigured);
         }
@@ -405,27 +415,39 @@ impl Surface {
             return Ok(self.status);
         }
         let generation = self.reserve_generation()?;
-        if let Err(error) = imp::configure_surface(
+        let actual_extent = match imp::configure_surface(
             &self.device.inner,
             &self.native,
             extent.width,
             extent.height,
         ) {
-            // HAL's unsafe configure contract does not promise that an Err
-            // leaves a reusable unconfigured surface. Prefer terminal poison
-            // to falsely claiming a retry-safe Suspended state.
-            self.poison_and_quarantine();
-            return Err(SurfaceError::Poisoned(format!(
-                "new generation configuration failed: {error}"
-            )));
-        }
-        self.status = SurfaceStatus::Active { generation, extent };
+            Ok(actual_extent) => actual_extent,
+            Err(error) => {
+                // HAL's unsafe configure contract does not promise that an Err
+                // leaves a reusable unconfigured surface. Prefer terminal poison
+                // to falsely claiming a retry-safe Suspended state.
+                self.poison_and_quarantine();
+                return Err(SurfaceError::Poisoned(format!(
+                    "new generation configuration failed: {error}"
+                )));
+            }
+        };
+        self.status = SurfaceStatus::Active {
+            generation,
+            extent: SurfaceExtent::new(actual_extent.0, actual_extent.1),
+        };
         Ok(self.status)
     }
 
     /// Acquires one presentable image. Each acquisition owns an independent
     /// private ticket until discard or known completion retirement.
     pub fn acquire(&mut self) -> Result<AcquiredSurfaceFrame, SurfaceError> {
+        if self.presentation_tickets.poisoned() {
+            self.status = SurfaceStatus::Poisoned;
+            return Err(SurfaceError::Poisoned(
+                "an unpresented native surface image was quarantined".into(),
+            ));
+        }
         if self.closed {
             return Err(SurfaceError::NotConfigured);
         }
@@ -439,7 +461,7 @@ impl Surface {
                 SurfaceStatus::Active { .. } => unreachable!(),
             });
         };
-        let ticket = self
+        let (acquire_lease, ticket) = self
             .presentation_tickets
             .try_acquire()
             .ok_or(SurfaceError::FrameOutstanding)?;
@@ -462,12 +484,15 @@ impl Surface {
         let (native, token) = match imp::acquire_surface(
             &self.device.inner,
             Arc::clone(&self.native),
-            Arc::clone(&self.window),
-            ticket,
-            #[cfg(feature = "vulkan")]
-            self.vulkan_presentation_sync.clone(),
-            descriptor,
-            usage,
+            imp::NativeSurfaceAcquireRequest {
+                window: Arc::clone(&self.window),
+                acquire_lease,
+                presentation_ticket: ticket,
+                #[cfg(feature = "vulkan")]
+                vulkan_presentation_sync: self.vulkan_presentation_sync.clone(),
+                descriptor,
+                allowed_usage: usage,
+            },
         ) {
             Ok(value) => value,
             Err(error) => {
@@ -502,6 +527,12 @@ impl Surface {
     /// A later `Drop` is a no-op after success; if callers skip this method,
     /// `Drop` makes the same best-effort attempt only when it is safe.
     pub fn shutdown(&mut self) -> Result<(), SurfaceError> {
+        if self.presentation_tickets.poisoned() {
+            self.status = SurfaceStatus::Poisoned;
+            return Err(SurfaceError::Poisoned(
+                "an unpresented native surface image was quarantined".into(),
+            ));
+        }
         match classify_shutdown(self.status, self.closed) {
             ShutdownTransition::RefuseClosed => return Err(SurfaceError::NotConfigured),
             ShutdownTransition::RefusePoisoned => {

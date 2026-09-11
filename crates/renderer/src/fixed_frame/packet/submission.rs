@@ -469,7 +469,8 @@ impl RenderPacketSubmission {
                 RenderPacketStatus::Pending
             }
             Ok(CompletionStatus::Complete) => {
-                let Some(target_export) = self.target_export else {
+                #[cfg(windows)]
+                if self.target_export.is_none() {
                     release_reservations_complete(&mut self.reservations);
                     self.graph.take();
                     self.objects.take();
@@ -477,6 +478,11 @@ impl RenderPacketSubmission {
                     self.presented = true;
                     self.phase = PacketPhase::Terminal;
                     return RenderPacketStatus::Presented;
+                }
+                let Some(target_export) = self.target_export else {
+                    return self.finish_accepted(RenderPacketFailure::RasterObservation {
+                        cause: FixedFrameRasterObservationError::MissingTargetExport,
+                    });
                 };
                 let Some(exported) = frame.exports.texture(target_export) else {
                     return self.finish_accepted(RenderPacketFailure::RasterObservation {

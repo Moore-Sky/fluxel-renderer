@@ -9,7 +9,10 @@ use super::*;
 /// runs after a failed/unknown presentation.
 #[cfg(any(feature = "dx12", feature = "vulkan"))]
 pub(crate) fn quarantine_presentation_lease(lease: Option<NativePresentationLease>) {
-    std::mem::forget(lease);
+    if let Some(lease) = lease {
+        lease.quarantine_surface();
+        std::mem::forget(lease);
+    }
 }
 
 impl Drop for OwnedBuffer {

@@ -6,12 +6,38 @@ use super::*;
 #[cfg(feature = "dx12")]
 static PRESENTATION_HOLD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn fixed_surface_contract_uses_current_extent_and_rejects_missing_usage() {
+    let mut capabilities = wgpu_hal::SurfaceCapabilities {
+        formats: vec![wgt::SurfaceFormatCapabilities {
+            format: wgt::TextureFormat::Rgba8Unorm,
+            color_spaces: wgt::SurfaceColorSpaces::SRGB,
+        }],
+        maximum_frame_latency: 1..=3,
+        current_extent: Some(wgt::Extent3d {
+            width: 960,
+            height: 540,
+            depth_or_array_layers: 1,
+        }),
+        usage: wgt::TextureUses::COLOR_TARGET,
+        present_modes: vec![wgt::PresentMode::Fifo],
+        composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
+    };
+    let actual = fixed_surface_extent(&capabilities, 640, 360, "test").unwrap();
+    assert_eq!((actual.width, actual.height), (960, 540));
+
+    capabilities.usage = wgt::TextureUses::empty();
+    assert!(fixed_surface_extent(&capabilities, 640, 360, "test").is_err());
+}
+
 #[cfg(feature = "dx12")]
 #[test]
 fn presentation_tickets_retire_independently_with_native_bundle_lifetime() {
     let tickets = NativePresentationTickets::new(3);
-    let first = tickets.try_acquire().unwrap();
-    let second = tickets.try_acquire().unwrap();
+    let (first_acquire, first) = tickets.try_acquire().unwrap();
+    drop(first_acquire);
+    let (second_acquire, second) = tickets.try_acquire().unwrap();
+    drop(second_acquire);
     // Independent acquired frames both prevent teardown; retiring one cannot
     // accidentally release the other.
     assert_eq!(tickets.live_count(), 2);
@@ -21,9 +47,9 @@ fn presentation_tickets_retire_independently_with_native_bundle_lifetime() {
     drop(second);
     assert_eq!(tickets.live_count(), 0);
 
-    let unknown = tickets.try_acquire().unwrap();
+    let (unknown_acquire, unknown) = tickets.try_acquire().unwrap();
     // Accepted-unknown quarantine intentionally retains its own ticket.
-    std::mem::forget(unknown);
+    std::mem::forget((unknown_acquire, unknown));
     assert!(tickets.any_live());
 }
 
@@ -31,11 +57,16 @@ fn presentation_tickets_retire_independently_with_native_bundle_lifetime() {
 #[test]
 fn unknown_presentation_completion_drop_quarantines_its_ticket() {
     let tickets = NativePresentationTickets::new(1);
-    let lease = tickets.try_acquire().expect("one ticket");
+    let (acquire, lease) = tickets.try_acquire().expect("one ticket");
+    drop(acquire);
     quarantine_presentation_lease(Some(lease));
     assert!(
         tickets.any_live(),
         "failure completion Drop must not make the presentable image reusable"
+    );
+    assert!(
+        tickets.poisoned(),
+        "accepted-unknown retirement must make the surface refuse later work"
     );
 }
 

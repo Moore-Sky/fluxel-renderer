@@ -353,6 +353,28 @@ def artifact(path: Path) -> dict[str, str]:
     return {"file": path.name, "sha256": sha256(path)}
 
 
+def require_clean_validation(backend: str, stdout_path: Path, stderr_path: Path) -> str:
+    """Fail closed on validation output from either redirected harness stream."""
+    stdout = stdout_path.read_text("utf-8", "replace")
+    stderr = stderr_path.read_text("utf-8", "replace")
+    diagnostics = f"[stdout]\n{stdout}\n[stderr]\n{stderr}"
+    clean_summary = re.compile(r"^\s*validation diagnostics:\s*clean\s*$", re.IGNORECASE | re.MULTILINE)
+    non_clean_summary = re.compile(
+        r"^\s*validation diagnostics(?!:\s*clean\s*$).*?$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    forbidden = (
+        ("Validation Error", re.compile(r"\bvalidation\s+error\b", re.IGNORECASE)),
+        ("VUID", re.compile(r"\bVUID(?:[-_][A-Za-z0-9_-]+)?\b", re.IGNORECASE)),
+        ("non-clean validation diagnostics", non_clean_summary),
+    )
+    failures = [label for label, pattern in forbidden if pattern.search(diagnostics)]
+    if not clean_summary.search(diagnostics) or failures:
+        detail = ", ".join(failures) if failures else "missing clean validation diagnostics summary"
+        raise EvidenceError(f"{backend} validation gate failed: {detail}.")
+    return diagnostics
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("dx12", "vulkan"), action="append", dest="backends")
@@ -433,9 +455,7 @@ def main() -> int:
                 if process.returncode:
                     raise EvidenceError(f"harness exited {process.returncode} after WM_CLOSE.")
                 active_process, active_hwnd = None, 0
-            diagnostics = stderr_path.read_text("utf-8", "replace")
-            if "validation diagnostics: clean" not in diagnostics or re.search(r"validation diagnostics \([1-9]", diagnostics):
-                raise EvidenceError(f"{backend} did not report clean validation diagnostics.")
+            diagnostics = require_clean_validation(backend, stdout_path, stderr_path)
             adapter = re.search(r"adapter: backend=(?P<backend>[^,]+), name=(?P<name>.*?), vendor=(?P<vendor>[^,]+), device=(?P<device>[^,]+), driver=(?P<driver>.*)", diagnostics)
             if not adapter:
                 raise EvidenceError(f"{backend} adapter/driver diagnostic is missing.")

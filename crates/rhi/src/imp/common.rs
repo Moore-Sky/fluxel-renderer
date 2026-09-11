@@ -382,6 +382,8 @@ pub(crate) struct NativeCompletion(pub(crate) Arc<std::sync::Mutex<NativeSubmiss
 /// whether teardown may touch the swapchain at all.
 pub(crate) struct NativePresentationTickets {
     live: std::sync::atomic::AtomicUsize,
+    acquired: std::sync::atomic::AtomicBool,
+    quarantined: std::sync::atomic::AtomicBool,
     capacity: usize,
 }
 
@@ -390,12 +392,33 @@ impl NativePresentationTickets {
         assert!(capacity > 0, "presentation ticket capacity must be nonzero");
         std::sync::Arc::new(Self {
             live: std::sync::atomic::AtomicUsize::new(0),
+            acquired: std::sync::atomic::AtomicBool::new(false),
+            quarantined: std::sync::atomic::AtomicBool::new(false),
             capacity,
         })
     }
 
-    pub(crate) fn try_acquire(self: &std::sync::Arc<Self>) -> Option<NativePresentationLease> {
-        self.live
+    /// Reserves both the single HAL acquisition and one in-flight retirement
+    /// slot. The acquisition lease is dropped at present/discard; the frame
+    /// lease survives in the completion bundle until retirement.
+    pub(crate) fn try_acquire(
+        self: &std::sync::Arc<Self>,
+    ) -> Option<(NativeAcquireLease, NativePresentationLease)> {
+        if self.quarantined.load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .acquired
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+        {
+            return None;
+        }
+        let frame = self
+            .live
             .fetch_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
@@ -404,11 +427,33 @@ impl NativePresentationTickets {
             .ok()
             .map(|_| NativePresentationLease {
                 tickets: std::sync::Arc::clone(self),
-            })
+            });
+        match frame {
+            Some(frame) => Some((
+                NativeAcquireLease {
+                    tickets: std::sync::Arc::clone(self),
+                },
+                frame,
+            )),
+            None => {
+                self.acquired
+                    .store(false, std::sync::atomic::Ordering::Release);
+                None
+            }
+        }
     }
 
     pub(crate) fn any_live(&self) -> bool {
         self.live.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn poisoned(&self) -> bool {
+        self.quarantined.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn quarantine(&self) {
+        self.quarantined
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     #[cfg(test)]
@@ -419,6 +464,19 @@ impl NativePresentationTickets {
     #[cfg(test)]
     pub(crate) const fn capacity(&self) -> usize {
         self.capacity
+    }
+}
+
+/// Proves that exactly one HAL surface texture is currently acquired.
+pub(crate) struct NativeAcquireLease {
+    tickets: std::sync::Arc<NativePresentationTickets>,
+}
+
+impl Drop for NativeAcquireLease {
+    fn drop(&mut self) {
+        self.tickets
+            .acquired
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -499,6 +557,12 @@ impl Drop for NativePresentationLease {
             .live
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         debug_assert!(prior > 0, "presentation ticket accounting underflow");
+    }
+}
+
+impl NativePresentationLease {
+    pub(crate) fn quarantine_surface(&self) {
+        self.tickets.quarantine();
     }
 }
 

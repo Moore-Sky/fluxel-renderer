@@ -123,8 +123,10 @@ fn live_frame_drop_quarantines_surface_ownership() {
 #[test]
 fn multiple_live_tickets_keep_drop_quarantine_until_every_ticket_retires() {
     let tickets = crate::imp::NativePresentationTickets::new(2);
-    let first = tickets.try_acquire().unwrap();
-    let second = tickets.try_acquire().unwrap();
+    let (first_acquire, first) = tickets.try_acquire().unwrap();
+    drop(first_acquire);
+    let (second_acquire, second) = tickets.try_acquire().unwrap();
+    drop(second_acquire);
     assert!(tickets.any_live());
     drop(first);
     assert!(
@@ -149,16 +151,51 @@ fn presentation_ticket_capacity_refuses_aliasing_and_recovers_one_exact_slot() {
     assert_eq!(capacity, crate::imp::MAXIMUM_FRAME_LATENCY as usize + 1);
     let tickets = crate::imp::NativePresentationTickets::new(capacity);
     assert_eq!(tickets.capacity(), 3);
-    let first = tickets.try_acquire().unwrap();
-    let second = tickets.try_acquire().unwrap();
-    let third = tickets.try_acquire().unwrap();
+    let (first_acquire, first) = tickets.try_acquire().unwrap();
+    drop(first_acquire);
+    let (second_acquire, second) = tickets.try_acquire().unwrap();
+    drop(second_acquire);
+    let (third_acquire, third) = tickets.try_acquire().unwrap();
+    drop(third_acquire);
     assert!(tickets.try_acquire().is_none());
 
     drop(second);
-    let replacement = tickets.try_acquire().unwrap();
+    let (replacement_acquire, replacement) = tickets.try_acquire().unwrap();
+    drop(replacement_acquire);
     assert!(tickets.try_acquire().is_none());
     assert_eq!(tickets.live_count(), 3);
 
     drop((first, third, replacement));
     assert_eq!(tickets.live_count(), 0);
+}
+
+#[test]
+fn one_hal_acquisition_is_distinct_from_three_in_flight_retirements() {
+    let tickets = crate::imp::NativePresentationTickets::new(3);
+    let (acquire, first) = tickets.try_acquire().expect("first frame");
+    assert!(
+        tickets.try_acquire().is_none(),
+        "a second HAL acquire is forbidden before present/discard"
+    );
+    drop(acquire); // successful present transfers only `first` to completion.
+    let (second_acquire, second) = tickets.try_acquire().expect("second frame");
+    drop(second_acquire);
+    let (third_acquire, third) = tickets.try_acquire().expect("third frame");
+    drop(third_acquire);
+    assert!(
+        tickets.try_acquire().is_none(),
+        "three pending completions fill capacity"
+    );
+    drop((first, second, third));
+    assert!(tickets.try_acquire().is_some());
+}
+
+#[test]
+fn quarantined_unsubmitted_acquisition_never_reopens_the_surface() {
+    let tickets = crate::imp::NativePresentationTickets::new(3);
+    let (acquire, frame) = tickets.try_acquire().expect("frame");
+    frame.quarantine_surface();
+    assert!(tickets.poisoned());
+    assert!(tickets.try_acquire().is_none());
+    std::mem::forget((acquire, frame));
 }

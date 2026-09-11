@@ -71,10 +71,13 @@ Backend-neutral `presentation::Surface` opens a fixed RGBA8 FIFO target on
 DX12 or Vulkan and exposes an opaque generation plus Active, Suspended,
 Poisoned, or Closed lifecycle state. Zero-sized targets suspend acquisition;
 a later non-zero extent creates a fresh generation only after known retirement
-of the old one. Each acquired image owns a private capacity-bounded ticket
-until discard or completion-driven destruction of derived views. Resize and
-shutdown refuse while any ticket remains live; native swapchain objects, ticket
-capacity, image indices, synchronization, and HWND remain private. Renderer
+of the old one. A single private acquire lease protects the HAL's one-unpresented-
+image contract; after present, a separate capacity-bounded ticket remains until
+completion-driven destruction of derived views. Vulkan uses the surface's
+required current extent and quarantines an unpresented dropped image because
+wgpu-hal 30 cannot safely recycle that acquire semaphore. Resize and shutdown
+refuse while any ticket remains live; native swapchain objects, ticket capacity,
+image indices, synchronization, and HWND remain private. Renderer
 bounded frames-in-flight and back pressure are separate private scheduler policy.
 `Surface::open` is a single-surface bootstrap, not a general surface API or a
 commitment to an eventual multi-surface topology.

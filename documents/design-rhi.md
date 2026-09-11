@@ -109,8 +109,14 @@ Reconfiguration first stops acquire for the old generation; it is not permission
 to destroy old presentable resources. Their views, tokens, and native ownership
 remain until known GPU completion, while accepted-unknown work quarantines that
 ownership. Zero-size/minimize is `Suspended`; restore creates a fresh generation.
-Independent acquire tickets protect native image uniqueness. The renderer/harness
-separately owns its private bounded frames-in-flight policy and back pressure.
+One private acquire lease enforces HAL's rule that a surface has at most one
+image not yet presented or discarded. A separate capacity-bounded retirement
+ticket survives present until known completion, allowing the renderer/harness
+to own its private bounded frames-in-flight policy and back pressure. Because
+wgpu-hal 30 cannot recycle an unpresented Vulkan acquire semaphore, dropping
+such an image poisons and quarantines that surface rather than guessing it can
+be reused. Vulkan configuration uses the surface's required current extent and
+fails closed when the fixed RGBA8/sRGB/FIFO/opaque contract is unsupported.
 This single-surface bootstrap does not freeze an eventual multi-surface topology
 or create a general cross-platform surface API. Loss recovery remains absent.
 Native platform paths must run on native environments rather than be inferred
