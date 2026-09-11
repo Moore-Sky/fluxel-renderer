@@ -98,9 +98,9 @@ specific than distant direction; no item is a version or schedule commitment.
 For ownership outside the renderer workspace, see the
 [Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/ROADMAP.md).
 
-### Current — Stage 0 baseline closure
+### Completed — Stage 0 baseline
 
-**Status:** In progress.
+**Status:** Complete.
 
 **Latest retained evidence:** [v0.7.0](https://github.com/fluxel-project/fluxel-rendering/releases/tag/v0.7.0),
 tag commit `6bd3a25`, with 83/83 ignored real-GPU cases passing on AMD Radeon
@@ -116,10 +116,15 @@ tag commit `6bd3a25`, with 83/83 ignored real-GPU cases passing on AMD Radeon
   portable contract.
 - [x] Freeze fixed-recipe growth; do not add another `draw_*` family member or
   public upload-state type.
-- [ ] Re-run the complete baseline on the final fixed Stage 0 commit and retain
-  the verified Release artifacts.
+- [x] Retain the complete baseline on the final fixed Stage 0 source commit.
 
-### Next — Stage 1.1 DX12 first visible image
+`v0.7.0` is the fixed Stage 0 source and evidence commit. The commits after
+that tag only realigned repository and ecosystem documentation; they did not
+change Cargo manifests, Rust sources, examples, CI, the conformance gate, or
+the released GPU behavior, so they do not create a second GPU certification
+target.
+
+### Current — Stage 1.1 DX12 first visible image
 
 The kernel will gain only the narrow presentation boundary needed for a host
 validation harness; it will not become a host-services runtime.
