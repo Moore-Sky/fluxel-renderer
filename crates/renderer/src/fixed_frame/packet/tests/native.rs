@@ -303,20 +303,17 @@ fn packet_fault_boundaries_release_before_raster_and_poison_after_acceptance() {
     let renderer = FixedFrameRenderer::new(device.clone());
     let (camera, meshes, snapshots) = fixture(&device, Case::Overlap);
 
-    // One duplicate generation produces one reservation transaction. A second
-    // packet must observe it as busy, while dropping before raster acceptance
-    // releases it for the next packet.
+    // Immutable generations admit concurrent readers. Dropping both packets
+    // before raster acceptance releases their independent leases for a later
+    // packet instead of poisoning the shared generation.
     let first = renderer
         .submit_packet(packet(&renderer, &camera, &meshes, &snapshots))
         .unwrap();
-    assert!(matches!(
-        renderer.submit_packet(packet(&renderer, &camera, &meshes, &snapshots)),
-        Err(RenderPacketStartError::Reservation {
-            draw_index: 0,
-            cause: RenderPacketReservationError::Busy,
-        })
-    ));
+    let second = renderer
+        .submit_packet(packet(&renderer, &camera, &meshes, &snapshots))
+        .unwrap();
     drop(first);
+    drop(second);
     drop(
         renderer
             .submit_packet(packet(&renderer, &camera, &meshes, &snapshots))
