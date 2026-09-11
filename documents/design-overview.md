@@ -1,6 +1,6 @@
-# Fluxel Renderer workspace architecture
+# Fluxel Rendering workspace architecture
 
-Fluxel Renderer is a layered Rust workspace for turning renderer-selected
+Fluxel Rendering is a layered Rust workspace for turning renderer-selected
 scene data into portable GPU work, then executing that work through a small,
 safe native boundary. The layers are deliberately separate: the renderer
 chooses *what a frame means*, RenderGraph derives *what work and ordering that
@@ -53,13 +53,16 @@ never become graph concepts.
 | `fluxel-rendergraph` | Logical resources and versions, declared accesses, validation, dependencies, culling, transitions, and immutable execution plans | Scenes, asset handles, shader/pipeline policy, allocation, native handles, queue submission, or readback implementation |
 | `fluxel-rhi` | Device-affine native resources, opaque artifacts/bindings, backend lowering, command recording, submission, completion, and native diagnostics | Scene selection, asset policy, general renderer lowering, or a public general graphics API |
 
-Assets are a sibling concern: `fluxel-assets` owns durable identity, caching,
-reuse, and CPU/GPU residency, while `fluxel-loader` owns file/URL/format
-loading into CPU resources. The renderer resolves an appropriate GPU-ready
-snapshot for a frame. RenderGraph receives only the resulting physical binding
-and its contract. The reason for this boundary is recorded in
-[ADR-0001](adr/0001-assets-outside-rendergraph.md). The native containment
-boundary is recorded in [ADR-0002](adr/0002-rhi-unsafe-containment.md).
+Assets cross a repository boundary without moving platform or GPU policy into
+one shared crate. `fluxel-bases` owns durable identity, typed handles,
+generations, loading state, caching, and reuse contracts. Platform readers live
+in `fluxel-host` or `fluxel-jsbridge`; rendering-side adapters own GPU upload,
+residency, recreation, and frame-safe retirement. The renderer resolves an
+appropriate GPU-ready snapshot for a frame. RenderGraph receives only the
+resulting physical binding and its contract. The reason for this boundary is
+recorded in [ADR-0001](adr/0001-assets-outside-rendergraph.md). The native
+containment boundary is recorded in
+[ADR-0002](adr/0002-rhi-unsafe-containment.md).
 
 For layer-specific contracts, see [Renderer design](design-renderer.md),
 [RenderGraph design](design-rendergraph.md), and [RHI design](design-rhi.md).
@@ -295,6 +298,7 @@ contract.
   implementation; keep current behavior in a design document and release
   investigation in local plan/review material.
 
-This separation lets the renderer grow from fixed headless evidence-backed
-slices toward a general runtime without retroactively making application code
-depend on backend accidents or transient implementation policy.
+This separation lets the rendering kernel grow from fixed headless
+evidence-backed slices toward a general embeddable renderer without making
+application code depend on backend accidents or transient implementation
+policy.

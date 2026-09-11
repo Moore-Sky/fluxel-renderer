@@ -36,7 +36,7 @@ padded to the native 256-byte requirement.
 
 ```toml
 [dependencies.fluxel-rhi]
-git = "https://github.com/fluxel-project/fluxel-renderer"
+git = "https://github.com/fluxel-project/fluxel-rendering"
 tag = "v0.7.0"
 ```
 
@@ -46,7 +46,7 @@ To select one explicitly:
 
 ```toml
 [dependencies.fluxel-rhi]
-git = "https://github.com/fluxel-project/fluxel-renderer"
+git = "https://github.com/fluxel-project/fluxel-rendering"
 tag = "v0.7.0"
 default-features = false
 features = ["dx12"]
@@ -269,9 +269,9 @@ validation-features extension. CI compiling the crate is not evidence that a
 GitHub-hosted runner opened a real GPU device.
 
 See the
-[RHI architecture design](https://github.com/fluxel-project/fluxel-renderer/blob/main/documents/design-rhi.md)
+[RHI architecture design](https://github.com/fluxel-project/fluxel-rendering/blob/main/documents/design-rhi.md)
 for ownership, validation, and evolution decisions. See the
-[`fluxel-rendergraph` user guide](https://github.com/fluxel-project/fluxel-renderer/tree/main/crates/rendergraph)
+[`fluxel-rendergraph` user guide](https://github.com/fluxel-project/fluxel-rendering/tree/main/crates/rendergraph)
 for graph authoring and its numbered examples.
 
 ## License
