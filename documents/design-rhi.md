@@ -109,6 +109,9 @@ completion ticket remains live until its derived views are destroyed; any live
 ticket blocks lifecycle teardown, and unknown retirement quarantines native/
 window ownership. The ticket limit protects native swapchain image uniqueness;
 renderer-owned bounded frame scheduling remains a separate private policy.
+The current `Dx12Surface::open` entry point is a Stage 1 single-surface
+bootstrap that selects a present-compatible device; it does not freeze the
+eventual multi-surface Device/Surface topology.
 Vulkan presentation, loss recovery, and a general cross-platform surface API
 remain absent. Native platform paths must run on native environments rather
 than be inferred from cross-compilation; see

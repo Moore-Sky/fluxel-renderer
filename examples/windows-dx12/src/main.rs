@@ -56,7 +56,9 @@ impl RunOptions {
                 "--frames" => frames = Some(parse_positive(&argument, args.next())?),
                 "--repeat" => {
                     let count = parse_positive(&argument, args.next())?;
-                    repeat = NonZeroIsize::new(count as isize)
+                    let count = isize::try_from(count)
+                        .map_err(|_| "--repeat is too large for this platform".to_owned())?;
+                    repeat = NonZeroIsize::new(count)
                         .ok_or_else(|| "--repeat is too large for this platform".to_owned())?;
                 }
                 "--induce-back-pressure" => induce_back_pressure = true,

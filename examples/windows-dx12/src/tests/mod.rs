@@ -33,6 +33,13 @@ fn zero_frames_is_rejected() {
 }
 
 #[test]
+fn repeat_rejects_values_larger_than_platform_isize() {
+    let error = RunOptions::parse(["--repeat", &u64::MAX.to_string()].map(str::to_owned))
+        .unwrap_err();
+    assert_eq!(error, "--repeat is too large for this platform");
+}
+
+#[test]
 fn close_discards_surface_actions_from_the_entire_dispatched_batch() {
     let events = vec![
         WindowEvent::Resized {

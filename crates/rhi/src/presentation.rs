@@ -278,6 +278,11 @@ fn quarantine_live_drop_ownership<T>(frame_outstanding: bool, ownership: T) -> b
 impl Dx12Surface {
     /// Opens a DX12 device selected specifically for this window. A zero
     /// initial extent is valid and starts suspended without configuring HAL.
+    ///
+    /// This is the Stage 1 single-surface bootstrap entry point, not a promise
+    /// that the eventual multi-surface model makes a surface own device
+    /// selection. Callers must not infer future Device/Surface topology from
+    /// this proof API.
     pub fn open<W>(
         window: Arc<W>,
         options: DeviceOptions,

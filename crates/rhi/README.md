@@ -75,7 +75,10 @@ ticket until discard or completion-driven destruction of its derived views;
 resize and shutdown refuse while any ticket remains live. Native swapchain
 objects, ticket capacity, image indices, synchronization, and HWND remain
 private. Renderer frames-in-flight policy is separate from this native image
-availability guard; this is still not a general surface API.
+availability guard. `Dx12Surface::open` is the Stage 1 single-surface
+bootstrap and selects its present-compatible device as part of that proof; it
+does not freeze the eventual multi-surface Device/Surface topology. This is
+still not a general surface API.
 
 ## Open a device
 
