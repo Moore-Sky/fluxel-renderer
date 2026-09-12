@@ -47,12 +47,12 @@ The workspace releases its three publishable crates together. Git consumers must
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.0" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.0" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.0" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.1" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.1" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.1" }
 ```
 
-`v0.11.0` and each publishable package's `0.11.0` version identify the same workspace
+`v0.11.1` and each publishable package's `0.11.1` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -109,9 +109,9 @@ Current retained closures are:
 
 The corresponding exact commits, supported-target limits, evidence hashes, and
 next authorized work are maintained in the ecosystem roadmap and GitHub
-Releases. The next rendering series consolidates internal/public contracts and
-cross-repository CI before expanding GPU resource capabilities; it does not add
-another backend or renderer feature.
+Releases. The next authorized rendering work is 0.12 Minimum GPU Resource
+Closure: separate the common resource floor from modern capabilities and prove
+completion-safe physical reuse without widening the closed 0.11 adapter seam.
 
 ### Unscheduled optimizations
 

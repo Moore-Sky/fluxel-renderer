@@ -87,8 +87,16 @@ jobs:
       - run: python3 -c "from pathlib import Path; stage = Path('target/wasm-bindgen-smoke'); assert any(stage.glob('*.js')); assert any(stage.glob('*_bg.wasm'))"
 
   cross-repo-browser-smoke:
-    name: Exact-revision WASM to JSBridge Chrome smoke
+    name: Exact-revision ${{ matrix.backend }} WASM to JSBridge Chrome smoke
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: webgl2
+            entry: demo/index.html
+          - backend: webgpu
+            entry: demo/webgpu.html
     steps:
       - uses: actions/checkout@v4
         with:
@@ -96,10 +104,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: fluxel-project/fluxel-jsbridge
-          ref: c34dd92e69c4505fb1c08bb8868ca3c447c608cd
+          ref: c010016701f566123040d2735de1c2b9549bdca2
           path: jsbridge
       - name: Verify pinned JSBridge revision
-        run: test "$(git -C jsbridge rev-parse HEAD)" = "c34dd92e69c4505fb1c08bb8868ca3c447c608cd"
+        run: test "$(git -C jsbridge rev-parse HEAD)" = "c010016701f566123040d2735de1c2b9549bdca2"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -123,11 +131,11 @@ jobs:
         run: >-
           python3 rendering/scripts/stage2_evidence.py
           --site-root jsbridge/packages/browser
-          --entry demo/index.html
-          --backend webgl2
+          --entry ${{ matrix.entry }}
+          --backend ${{ matrix.backend }}
           --wasm rendering/target/wasm32-unknown-unknown/release/fluxel_rendering_wasm.wasm
           --bindgen-out jsbridge/packages/browser/demo/wasm
-          --output rendering/target/ci-evidence/webgl2
+          --output rendering/target/ci-evidence/${{ matrix.backend }}
           --chrome "${{ steps.chrome.outputs.chrome-path }}"
           --headless
           --frames 2
@@ -135,11 +143,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: exact-revision-browser-smoke
+          name: exact-revision-${{ matrix.backend }}-browser-smoke
           path: |
-            rendering/target/ci-evidence/webgl2/*.json
-            rendering/target/ci-evidence/webgl2/*.png
-            rendering/target/ci-evidence/webgl2/*.log
+            rendering/target/ci-evidence/${{ matrix.backend }}/*.json
+            rendering/target/ci-evidence/${{ matrix.backend }}/*.png
+            rendering/target/ci-evidence/${{ matrix.backend }}/*.log
           if-no-files-found: warn
 
   rhi-native-compile-link:

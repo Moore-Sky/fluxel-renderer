@@ -885,6 +885,12 @@ def main() -> int:
             chrome_command.insert(-1, "--no-sandbox")
             chrome_command.insert(-1, "--disable-dev-shm-usage")
             chrome_command.insert(-1, "--enable-unsafe-swiftshader")
+            if args.backend == "webgpu":
+                # Linux hosted runners use bundled software Vulkan only as an
+                # ABI/lifecycle smoke; this does not establish a support target.
+                chrome_command.insert(-1, "--enable-unsafe-webgpu")
+                chrome_command.insert(-1, "--enable-features=Vulkan")
+                chrome_command.insert(-1, "--use-angle=swiftshader")
     command_log.append(chrome_command)
     process: subprocess.Popen[str] | None = None
     cdp: Cdp | None = None
