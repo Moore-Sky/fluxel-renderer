@@ -136,7 +136,10 @@ jobs:
         if: always()
         with:
           name: exact-revision-browser-smoke
-          path: rendering/target/ci-evidence/webgl2
+          path: |
+            rendering/target/ci-evidence/webgl2/*.json
+            rendering/target/ci-evidence/webgl2/*.png
+            rendering/target/ci-evidence/webgl2/*.log
           if-no-files-found: warn
 
   rhi-native-compile-link:

@@ -554,7 +554,15 @@ def reject_diagnostics(cdp: Cdp, observation: dict[str, object]) -> None:
             bad.append(event)
         elif method == "Log.entryAdded":
             entry = params.get("entry", {}) if isinstance(params, dict) else {}
-            if isinstance(entry, dict) and entry.get("level") in {"error", "warning"}:
+            text = entry.get("text", "") if isinstance(entry, dict) else ""
+            harness_readback_warning = (
+                isinstance(text, str) and "GPU stall due to ReadPixels" in text
+            )
+            if (
+                isinstance(entry, dict)
+                and entry.get("level") in {"error", "warning"}
+                and not harness_readback_warning
+            ):
                 bad.append(event)
         elif method == "Runtime.consoleAPICalled":
             if isinstance(params, dict) and params.get("type") in {"error", "assert"}:
@@ -867,6 +875,7 @@ def main() -> int:
             # without a usable setuid sandbox and with a small /dev/shm.
             chrome_command.insert(-1, "--no-sandbox")
             chrome_command.insert(-1, "--disable-dev-shm-usage")
+            chrome_command.insert(-1, "--enable-unsafe-swiftshader")
     command_log.append(chrome_command)
     process: subprocess.Popen[str] | None = None
     cdp: Cdp | None = None
