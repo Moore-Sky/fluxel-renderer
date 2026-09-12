@@ -862,6 +862,11 @@ def main() -> int:
     ]
     if args.headless:
         chrome_command.insert(-1, "--headless=new")
+        if sys.platform.startswith("linux"):
+            # Hosted Linux runners commonly execute Chrome in a container
+            # without a usable setuid sandbox and with a small /dev/shm.
+            chrome_command.insert(-1, "--no-sandbox")
+            chrome_command.insert(-1, "--disable-dev-shm-usage")
     command_log.append(chrome_command)
     process: subprocess.Popen[str] | None = None
     cdp: Cdp | None = None
