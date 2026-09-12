@@ -5,14 +5,15 @@ edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Narrow wasm-bindgen binding for Fluxel's retained WebGL2 scene"
+description = "Narrow wasm-bindgen bindings for Fluxel's retained browser scene"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 fluxel-renderer = { path = "../renderer", features = ["gpu-upload"] }
-fluxel-rhi = { path = "../rhi", default-features = false, features = ["webgl2"] }
+fluxel-rhi = { path = "../rhi", default-features = false, features = ["webgl2", "webgpu"] }
 js-sys = "0.3.77"
 wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
 web-sys = { version = "0.3.77", features = ["HtmlCanvasElement"] }

@@ -313,6 +313,27 @@ reused—while submitted fences remain live. Context loss invalidates the whole
 old browser generation; restore rebuilds objects for the same canvas. Normal
 dispose uses `finish` before deleting live sync and resource objects.
 
+The Stage 2.2 executor is a separate `wasm32 + webgpu` experimental
+implementation. It validates that same compiled graph and physical draw ABI,
+then owns the adapter, device, queue, configured canvas context, pipeline,
+buffers, current texture/view, error observers, and Promise continuations.
+Only the closed `rgba8unorm` and `bgra8unorm` canvas formats are accepted; none
+of these browser objects enter RenderGraph, renderer, or JavaScript bridge
+contracts.
+
+A configured canvas epoch changes on nonzero reconfiguration but does not end
+the device generation or retire submitted work. Each accepted frame carries a
+generation-tagged completion ticket and its private resources until
+`queue.onSubmittedWorkDone()` settles; capacity is privately bounded at three
+and exhaustion reports backpressure before acquiring the next texture.
+`GPUDevice.lost` ends the old generation, detaches still-settling tickets, and
+prevents stale callbacks from writing a replacement generation. Recovery
+rebuilds every device-affine object before configuring the latest desired
+extent. Normal disposal is an idempotent asynchronous terminal operation;
+lifecycle tokens prevent in-flight recovery from reinstalling objects after
+disposal. Error scopes, uncaptured errors, device loss, rejected Promises, and
+partial creation use structured diagnostics and symmetric observer cleanup.
+
 Readback is doc-hidden `test-support` for conformance fixtures, never a public
 mapping API. It consumes an exported resource's reported outgoing state and
 lease as its actual incoming contract, then transitions to `CopySource`, copies,

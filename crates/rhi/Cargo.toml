@@ -9,7 +9,7 @@ repository = "https://github.com/fluxel-project/fluxel-rendering"
 readme = "README.md"
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.9.0" }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.10.0" }
 raw-window-handle = "0.6.2"
 
 [features]
@@ -19,6 +19,10 @@ vulkan = ["wgpu-hal/vulkan", "dep:ash"]
 # The browser executor is deliberately separate from the Windows HAL path.
 # It is meaningful only for wasm32 and keeps WebGL objects private to RHI.
 webgl2 = ["dep:js-sys", "dep:web-sys"]
+# The WebGPU executor is a wasm-only, closed browser seam.  It intentionally
+# uses the browser WebGPU bindings rather than introducing wgpu as a second
+# public RHI. Browser objects are kept behind the private wasm executor.
+webgpu = ["dep:js-sys", "dep:web-sys", "dep:wasm-bindgen-futures"]
 # Enables doc-hidden native conformance observation helpers for sibling-crate
 # hardware fixtures. It does not expose mapping, command, or HAL APIs.
 test-support = []
@@ -37,6 +41,7 @@ ordered-float = "=5.1.0"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.77", optional = true }
 wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = { version = "0.4.50", optional = true }
 web-sys = { version = "0.3.77", optional = true, features = [
     "HtmlCanvasElement", "WebGl2RenderingContext", "WebGlBuffer",
     "WebGlProgram", "WebGlShader", "WebGlSync", "WebGlUniformLocation",

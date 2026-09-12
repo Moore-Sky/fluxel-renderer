@@ -87,7 +87,7 @@ pub use upload::{
 pub mod experimental {
     pub use crate::prepared_scene::{
         PreparedBasicDraw, PreparedBasicGraph, PreparedBasicGraphError, PreparedBasicScene,
-        PreparedBasicSceneError,
+        PreparedBasicSceneError, PresentableFormat, PresentationProfile,
     };
 }
 

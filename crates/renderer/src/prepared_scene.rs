@@ -44,11 +44,50 @@ pub struct PreparedBasicDraw {
     uniform: FrameUniform,
 }
 
+/// The two canvas formats accepted by the closed retained presentation recipe.
+///
+/// This is deliberately not a render-graph format escape hatch: both variants
+/// carry the same opaque-alpha, color-attachment-and-present-only contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresentableFormat {
+    /// Eight-bit linear RGBA, used by the WebGL2 drawing buffer.
+    Rgba8Unorm,
+    /// Eight-bit linear BGRA, commonly selected by a WebGPU canvas.
+    Bgra8Unorm,
+}
+
+/// Closed presentation facts for the retained fixed-unlit recipe.
+///
+/// A profile has no caller-configurable capabilities. It always requires an
+/// opaque-alpha presentable image, color-attachment rendering, final present,
+/// one raster-capable queue, and the fixed buffer/copy limits used below.
+/// Backends report a [`PresentableFormat`] and the binding selects this value;
+/// arbitrary [`DeviceCapabilities`] never cross this renderer boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentationProfile {
+    format: PresentableFormat,
+}
+
+impl PresentationProfile {
+    /// Creates the one fixed profile for a backend-reported canvas format.
+    #[must_use]
+    pub const fn for_format(format: PresentableFormat) -> Self {
+        Self { format }
+    }
+
+    /// Returns the format selected by the backend's closed canvas-format map.
+    #[must_use]
+    pub const fn format(self) -> PresentableFormat {
+        self.format
+    }
+}
+
 /// A compiled portable presentation declaration for one prepared basic scene.
 pub struct PreparedBasicGraph {
     compiled: CompiledGraph<()>,
     draw_count: usize,
     extent: [u32; 2],
+    format: PresentableFormat,
 }
 
 /// Why the closed WebGL presentation graph could not be compiled.
@@ -261,9 +300,30 @@ impl PreparedBasicScene {
         &self.draws
     }
 
-    /// Compiles the same imported-presentable declaration used by native packets.
+    /// Compiles the fixed imported-presentable declaration for the WebGL2
+    /// RGBA8 drawing-buffer profile.
+    ///
+    /// This compatibility entry point keeps the published WebGL caller on its
+    /// fixed format. New backend bindings must select their closed profile via
+    /// [`Self::compile_presentable_graph_for_profile`].
     pub fn compile_presentable_graph(
         &self,
+        extent: [u32; 2],
+    ) -> Result<PreparedBasicGraph, PreparedBasicGraphError> {
+        self.compile_presentable_graph_for_profile(
+            PresentationProfile::for_format(PresentableFormat::Rgba8Unorm),
+            extent,
+        )
+    }
+
+    /// Compiles the fixed imported-presentable declaration for `profile`.
+    ///
+    /// The selected format changes only the imported presentable descriptor and
+    /// its closed compiler facts; pass, draw, usage, clear, store, and present
+    /// topology remain identical.
+    pub fn compile_presentable_graph_for_profile(
+        &self,
+        profile: PresentationProfile,
         extent: [u32; 2],
     ) -> Result<PreparedBasicGraph, PreparedBasicGraphError> {
         if extent[0] == 0 || extent[1] == 0 {
@@ -296,7 +356,7 @@ impl PreparedBasicScene {
             mip_levels: 1,
             array_layers: 1,
             sample_count: 1,
-            format: TextureFormat::Rgba8Unorm,
+            format: profile.texture_format(),
         };
         let surface = graph.import_surface_texture_slot(
             "web-presentable-target",
@@ -323,14 +383,61 @@ impl PreparedBasicScene {
         );
         graph.present(pass.output, PresentContract::new());
         let compiled = graph
-            .compile(&webgl2_capabilities())
+            .compile(&profile.capabilities())
             .map_err(PreparedBasicGraphError::Compile)?
             .graph;
         Ok(PreparedBasicGraph {
             compiled,
             draw_count: self.draws.len(),
             extent,
+            format: profile.format(),
         })
+    }
+}
+
+impl PresentableFormat {
+    const fn texture_format(self) -> TextureFormat {
+        match self {
+            Self::Rgba8Unorm => TextureFormat::Rgba8Unorm,
+            Self::Bgra8Unorm => TextureFormat::Bgra8Unorm,
+        }
+    }
+}
+
+impl PresentationProfile {
+    fn texture_format(self) -> TextureFormat {
+        self.format.texture_format()
+    }
+
+    fn capabilities(self) -> DeviceCapabilities {
+        let presentable = TextureFormatCapabilities::builder(self.texture_format())
+            .sampled(true, true)
+            .storage(false, false)
+            .attachments(true, false, vec![1])
+            .copies(true, true)
+            .build();
+        DeviceCapabilities::builder()
+            .queue(QueueDescriptor::new(
+                QueueId::new(0),
+                QueueCapabilities::new(true, false, true, true),
+            ))
+            .recording(RecordingCapabilities::new(
+                RecordingModel::ImmediateContext,
+                false,
+            ))
+            .transitions(TransitionCapabilities::BackendManaged)
+            .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
+            .timestamps(TimestampCapabilities::Unsupported)
+            .transient_resources(TransientResourceCapabilities::new(true, false, false))
+            .limits(DeviceLimits::new(4, 256))
+            .buffers(BufferCapabilities::new(false, false, false))
+            .texture_format(presentable)
+            .surface(SurfaceCapabilities::new(
+                vec![self.texture_format()],
+                true,
+                false,
+            ))
+            .build()
     }
 }
 
@@ -346,6 +453,10 @@ impl PreparedBasicGraph {
     /// Returns the declared drawing-buffer pixel extent.
     pub const fn extent(&self) -> [u32; 2] {
         self.extent
+    }
+    /// Returns the closed format used by the imported presentable image.
+    pub const fn format(&self) -> PresentableFormat {
+        self.format
     }
 }
 
@@ -478,37 +589,6 @@ const fn imported_buffer(size: u64) -> ImportBufferContract {
     }
 }
 
-fn webgl2_capabilities() -> DeviceCapabilities {
-    let rgba8 = TextureFormatCapabilities::builder(TextureFormat::Rgba8Unorm)
-        .sampled(true, true)
-        .storage(false, false)
-        .attachments(true, false, vec![1])
-        .copies(true, true)
-        .build();
-    DeviceCapabilities::builder()
-        .queue(QueueDescriptor::new(
-            QueueId::new(0),
-            QueueCapabilities::new(true, false, true, true),
-        ))
-        .recording(RecordingCapabilities::new(
-            RecordingModel::ImmediateContext,
-            false,
-        ))
-        .transitions(TransitionCapabilities::BackendManaged)
-        .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
-        .timestamps(TimestampCapabilities::Unsupported)
-        .transient_resources(TransientResourceCapabilities::new(true, false, false))
-        .limits(DeviceLimits::new(4, 256))
-        .buffers(BufferCapabilities::new(false, false, false))
-        .texture_format(rgba8)
-        .surface(SurfaceCapabilities::new(
-            vec![TextureFormat::Rgba8Unorm],
-            true,
-            false,
-        ))
-        .build()
-}
-
 fn poll_ready<F: Future>(future: F) -> Result<F::Output, ()> {
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
@@ -614,5 +694,85 @@ mod tests {
                 .iter()
                 .any(|transition| transition.after == ResourceAccessState::Present)
         );
+    }
+
+    #[test]
+    fn closed_presentable_profiles_change_only_the_imported_format() {
+        let mesh = triangle([1.0, 0.0, 0.0, 1.0]);
+        let camera = Camera::default();
+        let mut list = DrawList::new(&camera);
+        list.push(&mesh);
+        let prepared = PreparedBasicScene::prepare(&list).expect("scene prepares");
+
+        let rgba = prepared
+            .compile_presentable_graph_for_profile(
+                PresentationProfile::for_format(PresentableFormat::Rgba8Unorm),
+                [800, 600],
+            )
+            .expect("rgba graph compiles");
+        let bgra = prepared
+            .compile_presentable_graph_for_profile(
+                PresentationProfile::for_format(PresentableFormat::Bgra8Unorm),
+                [800, 600],
+            )
+            .expect("bgra graph compiles");
+
+        assert_eq!(rgba.format(), PresentableFormat::Rgba8Unorm);
+        assert_eq!(bgra.format(), PresentableFormat::Bgra8Unorm);
+        assert_eq!(rgba.draw_count(), bgra.draw_count());
+        assert_eq!(rgba.extent(), bgra.extent());
+        let topology = |graph: &PreparedBasicGraph| {
+            let plan = graph.compiled().execution_plan();
+            (
+                plan.passes()
+                    .iter()
+                    .map(|pass| {
+                        (
+                            pass.kind,
+                            pass.transitions
+                                .iter()
+                                .map(|transition| (transition.before, transition.after))
+                                .collect::<Vec<_>>(),
+                            pass.raster
+                                .as_ref()
+                                .map(|raster| raster.colors.len())
+                                .unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                plan.final_transitions()
+                    .iter()
+                    .map(|transition| (transition.before, transition.after))
+                    .collect::<Vec<_>>(),
+                plan.resource_requirements()
+                    .iter()
+                    .map(|requirement| requirement.usage)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            topology(&rgba),
+            topology(&bgra),
+            "format selection must not change fixed-pass topology"
+        );
+    }
+
+    #[test]
+    fn closed_presentable_profiles_reject_zero_sized_targets() {
+        let mesh = triangle([1.0, 0.0, 0.0, 1.0]);
+        let camera = Camera::default();
+        let mut list = DrawList::new(&camera);
+        list.push(&mesh);
+        let prepared = PreparedBasicScene::prepare(&list).expect("scene prepares");
+
+        for profile in [
+            PresentationProfile::for_format(PresentableFormat::Rgba8Unorm),
+            PresentationProfile::for_format(PresentableFormat::Bgra8Unorm),
+        ] {
+            assert!(matches!(
+                prepared.compile_presentable_graph_for_profile(profile, [0, 600]),
+                Err(PreparedBasicGraphError::InvalidExtent)
+            ));
+        }
     }
 }

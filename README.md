@@ -22,7 +22,7 @@ The workspace is organised around four crates:
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | DX12/Vulkan native ownership, fixed RenderGraph execution, and the narrow backend-neutral presentation boundary. |
 | `fluxel-renderer` | Scene/domain data, immutable GPU snapshots, ordered render packets, fixed indexed draws, and visible-frame transactions. |
-| `fluxel-rendering-wasm` | Non-published wasm-bindgen capsule for the named WebGL2 browser proof; JavaScript remains the RAF and DOM lifecycle owner. |
+| `fluxel-rendering-wasm` | Non-published wasm-bindgen capsule for the named WebGL2 and WebGPU browser proofs; JavaScript remains the RAF and DOM lifecycle owner. |
 
 The optional `gpu-upload` slice publishes immutable GPU snapshot generations
 after native uploads complete. It can lower an insertion-ordered `DrawList`
@@ -47,12 +47,12 @@ The workspace releases its three publishable crates together. Git consumers must
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.9.0" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.9.0" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.9.0" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.0" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.0" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.0" }
 ```
 
-`v0.9.0` and each publishable package's `0.9.0` version identify the same workspace
+`v0.10.0` and each publishable package's `0.10.0` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -172,6 +172,30 @@ portable raster declaration on WebGL2 in Windows 11 x64 Google Chrome Stable
 
 `async-runtime` remains outside renderer and this presentation slice: native
 host scheduling and shutdown policy are separate concerns.
+
+### Completed — Stage 2.2 WebGPU browser slice
+
+The same retained scene and renderer-owned compiled raster declaration now run
+through WebGPU on the named Windows 11 x64 Chrome Stable target. This is a
+closed browser proof, not a general WebGPU API or a claim about other browsers.
+
+- [x] Select only the closed `rgba8unorm`/`bgra8unorm` presentation profile;
+  WebGPU devices, queues, contexts, pipelines, resources, and continuations
+  stay inside the wasm-private RHI implementation.
+- [x] Bound submitted frames at three and retire frame-private resources only
+  after the matching `queue.onSubmittedWorkDone()` settlement.
+- [x] Treat canvas reconfiguration as an epoch within a device generation;
+  zero-size suspends acquire without fabricating completion.
+- [x] Observe `GPUDevice.lost`, isolate stale generations, and rebuild all
+  device-affine objects before resuming. The demo-only controlled
+  `device.destroy()` seam proves the standard `destroyed` loss path.
+- [x] Keep one RAF and DOM lifecycle owner in `fluxel-jsbridge`; recovery and
+  terminal disposal are asynchronous, token-fenced operations.
+- [x] Verify lifecycle, exact compositor pixels, marker progression,
+  diagnostics, CPU submission time, and WASM memory in real Chrome.
+
+WebGL2 remains independently supported by its 0.9 contract. Stage 2 as a whole
+still requires a separately named mini-game host closure.
 
 ### Unscheduled optimizations
 

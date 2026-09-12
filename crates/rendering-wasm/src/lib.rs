@@ -6,6 +6,10 @@
 
 #![cfg(target_arch = "wasm32")]
 
+mod webgpu;
+
+pub use webgpu::WebGpuSession;
+
 use fluxel_renderer::experimental::{PreparedBasicGraph, PreparedBasicScene};
 use fluxel_renderer::{BasicMaterial, Camera, DrawList, Geometry, Mesh, ModelTransform};
 use fluxel_rhi::experimental::webgl2::{
@@ -193,7 +197,7 @@ fn frame_report(
     report.into()
 }
 
-fn retained_scene()
+pub(crate) fn retained_scene()
 -> Result<PreparedBasicScene, fluxel_renderer::experimental::PreparedBasicSceneError> {
     let triangle = |color| {
         Mesh::new(
@@ -268,7 +272,12 @@ impl IntoBrowserError for fluxel_renderer::experimental::PreparedBasicGraphError
     }
 }
 
-fn structured_error(code: &str, operation: &str, generation: u64, message: &str) -> JsValue {
+pub(crate) fn structured_error(
+    code: &str,
+    operation: &str,
+    generation: u64,
+    message: &str,
+) -> JsValue {
     let object = Object::new();
     let _ = Reflect::set(&object, &"code".into(), &code.into());
     let _ = Reflect::set(&object, &"severity".into(), &"error".into());
@@ -283,7 +292,7 @@ fn structured_error(code: &str, operation: &str, generation: u64, message: &str)
     object.into()
 }
 
-fn wasm_memory_bytes() -> JsValue {
+pub(crate) fn wasm_memory_bytes() -> JsValue {
     let memory = wasm_bindgen::memory();
     let buffer = js_sys::Reflect::get(&memory, &"buffer".into()).unwrap_or(JsValue::UNDEFINED);
     js_sys::Reflect::get(&buffer, &"byteLength".into()).unwrap_or(JsValue::from_f64(0.0))

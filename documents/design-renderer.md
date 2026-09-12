@@ -372,17 +372,20 @@ never repairs a poisoned snapshot by guessing state.
 
 ## Validation and evidence
 
-Stage 2.1 extracts the legacy-unlit CPU work into `PreparedBasicScene`. A real
+Stage 2 extracts the legacy-unlit CPU work into `PreparedBasicScene`. A real
 `slot-graph` DAG fans one owned scene into per-draw validation/uniform work and
 then assembles results by insertion index. Native packet lowering reuses that
 result and only associates device-local snapshots; the WASM binding performs a
-field-preserving borrow into the RHI-owned WebGL fixed ABI. Neither path
+field-preserving borrow into the RHI-owned browser fixed ABI. Neither path
 recomputes P*V*M, clip acceptance, material color, or ordering.
 
 The native and browser paths also call the same private fixed raster-pass
-declaration. The browser compiles it against an explicitly limited WebGL2
-capability set with imported buffers and one imported presentable resource;
-RHI validates that compiled topology before lowering the closed WebGL recipe.
+declaration. Browser compilation selects a renderer-owned closed
+`PresentationProfile` for only `Rgba8Unorm` or `Bgra8Unorm`, with fixed usage
+and capability facts. WebGL2 uses the former; the WebGPU binding exhaustively
+maps the RHI-reported canvas format to one of the two. Both use imported buffers
+and one imported presentable resource; RHI validates the identical compiled
+topology before lowering its closed browser recipe.
 These experimental types prove one retained scene and are not a configurable
 pipeline, material, or browser host API.
 

@@ -20,6 +20,12 @@ pub mod fixed_artifacts {
     };
 }
 
+// Browser-independent lifecycle reducer. Keeping this tiny state machine
+// portable lets host tests cover the ownership rules without pretending a host
+// build has a WebGPU implementation.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "webgpu")))]
+mod webgpu_state;
+
 /// Closed browser WebGL2 execution for the retained Stage 1 unlit scene.
 ///
 /// This module exists only in the browser build.  It deliberately exposes no
@@ -28,3 +34,10 @@ pub mod fixed_artifacts {
 /// small session façade.
 #[cfg(all(target_arch = "wasm32", feature = "webgl2"))]
 pub mod webgl2;
+
+/// Closed browser WebGPU execution for the retained fixed unlit scene.
+///
+/// This is deliberately a wasm-private RHI seam: all browser GPU objects and
+/// Promise continuations stay behind [`WebGpuSession`](webgpu::WebGpuSession).
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+pub mod webgpu;

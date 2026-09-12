@@ -27,3 +27,10 @@ annotated tag, push the branch and tag, then verify that `origin/main` and the
 remote tag resolve to the same release commit. Create the GitHub Release and
 attach that commit's `manifest.json` and `cargo.log`. Do not create or push a
 release tag when the hardware gate has failed or could not run.
+
+When a release changes the browser executor, also build the release WASM for
+the exact candidate commit and run the named-browser evidence harness against
+the matching `fluxel-jsbridge` candidate. Archive its manifest, representative
+screenshots, and browser diagnostics with an explicit SHA-256 checksum; record
+both repository SHAs. Browser evidence is additional to, never a replacement
+for, the native DX12/Vulkan gate above.
