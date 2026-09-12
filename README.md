@@ -94,108 +94,24 @@ are retained on the matching [GitHub Release](https://github.com/fluxel-project/
 
 ## Roadmap
 
-This roadmap covers this workspace only. Near-term work is deliberately more
-specific than distant direction; no item is a version or schedule commitment.
-For ownership outside the renderer workspace, see the
-[Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/ROADMAP.md).
+The organization
+[roadmap](https://github.com/fluxel-project/.github/blob/main/ROADMAP.md) is the
+only stage/status authority. This README records only the workspace's current
+supported paths and recommended entry points.
 
-### Completed — Stage 0 baseline
+Current retained closures are:
 
-**Status:** Complete.
+- headless DX12/Vulkan execution and real-GPU conformance;
+- visible Windows DX12/Vulkan surface lifecycle and bounded completion;
+- the retained RGB scene on the named Chrome/WebGL2 target; and
+- the same scene on the named Chrome/WebGPU target, including canvas epochs,
+  bounded completion, device-generation recovery, and async disposal.
 
-**Latest retained evidence:** [v0.7.0](https://github.com/fluxel-project/fluxel-rendering/releases/tag/v0.7.0),
-tag commit `6bd3a25`, with 83/83 ignored real-GPU cases passing on AMD Radeon
-780M Graphics across DX12 and Vulkan.
-
-- [x] Use one release version and tag rule for workspace crates that ship
-  together, and pin every documented Git dependency example to a tag or
-  revision.
-- [x] Preserve structured renderer errors through the public boundary.
-- [x] Provide one repeatable CPU, CI, and real-GPU conformance entry point that
-  records the commit, environment, diagnostics, and partial failure evidence.
-- [x] Audit and reduce the RenderGraph public export surface to the current
-  portable contract.
-- [x] Freeze fixed-recipe growth; do not add another `draw_*` family member or
-  public upload-state type.
-- [x] Retain the complete baseline on the final fixed Stage 0 source commit.
-
-`v0.7.0` is the fixed Stage 0 source and evidence commit. The commits after
-that tag only realigned repository and ecosystem documentation; they did not
-change Cargo manifests, Rust sources, examples, CI, the conformance gate, or
-the released GPU behavior, so they do not create a second GPU certification
-target.
-
-### Completed — Stage 1 presentation
-
-The kernel gained only the narrow presentation boundary needed for a host
-validation harness; it did not become a host-services runtime.
-
-- [x] Use a backend-neutral RHI `Surface` to acquire one imported presentable
-  resource, render the existing fixed recipe, and present it on DX12 or Vulkan.
-- [x] Keep native window, swapchain, image, queue, and synchronization details
-  inside RHI; RenderGraph sees only the imported resource and final present intent.
-- [x] Model resize/restore as a new opaque surface generation. The old generation
-  stops acquiring immediately but is destroyed only after known GPU retirement;
-  zero-size/minimize is suspended rather than drawable.
-- [x] Keep the Windows proof scheduler at a private bounded capacity (currently three);
-  no slot, fence, image index, or triple-buffer policy enters public API.
-- [x] Reserve scheduler capacity before surface acquisition and apply explicit
-  back pressure when all slots remain live.
-- [x] Let immutable renderer snapshots retain independent concurrent read
-  leases while each visible submission owns its completion lifetime.
-- [x] Enforce one not-yet-presented HAL acquire separately from bounded
-  completion tickets; resize and shutdown refuse until all tickets retire, and
-  an unpresented Vulkan drop quarantines the surface rather than reusing an
-  unproven acquire semaphore.
-- [x] Expose only the policy-neutral `VisibleFrameStatus::Submitted` milestone
-  needed to distinguish native submission from completion-driven slot reuse.
-
-### Completed — Stage 2.1 WebGL2 browser slice
-
-The retained Stage 1 scene now runs through the shared renderer preparation and
-portable raster declaration on WebGL2 in Windows 11 x64 Google Chrome Stable
-`153.0.8010.36`. The browser adapter remains owned by `fluxel-jsbridge`.
-
-- [x] Keep DOM canvas selection, ResizeObserver, visibility/context events, and
-  the sole RAF loop outside this repository's renderer and RHI contracts.
-- [x] Keep WebGL context, program, buffers, vertex array, fences, and resource
-  generations inside the wasm-private RHI implementation.
-- [x] Bound pending WebGL frames at three with `fenceSync`, `flush`, and
-  zero-timeout `clientWaitSync` backpressure; no browser event implies completion.
-- [x] Rebuild one same-canvas resource generation after real
-  `WEBGL_lose_context` loss/restore and explicitly finish/delete normal teardown.
-- [x] Verify stable, resize, zero-size, visibility, loss, and restore with three
-  screenshots per state plus dense frame-marker and exact RGBA readback sampling.
-- [x] Lower one deterministic ordered multi-object scene into one packet and one
-  acquired presentation image. Its real CPU preparation fan-out/fan-in uses
-  private `slot-graph`; it neither creates artificial work nor owns GPU synchronization.
-
-`async-runtime` remains outside renderer and this presentation slice: native
-host scheduling and shutdown policy are separate concerns.
-
-### Completed — Stage 2.2 WebGPU browser slice
-
-The same retained scene and renderer-owned compiled raster declaration now run
-through WebGPU on the named Windows 11 x64 Chrome Stable target. This is a
-closed browser proof, not a general WebGPU API or a claim about other browsers.
-
-- [x] Select only the closed `rgba8unorm`/`bgra8unorm` presentation profile;
-  WebGPU devices, queues, contexts, pipelines, resources, and continuations
-  stay inside the wasm-private RHI implementation.
-- [x] Bound submitted frames at three and retire frame-private resources only
-  after the matching `queue.onSubmittedWorkDone()` settlement.
-- [x] Treat canvas reconfiguration as an epoch within a device generation;
-  zero-size suspends acquire without fabricating completion.
-- [x] Observe `GPUDevice.lost`, isolate stale generations, and rebuild all
-  device-affine objects before resuming. The demo-only controlled
-  `device.destroy()` seam proves the standard `destroyed` loss path.
-- [x] Keep one RAF and DOM lifecycle owner in `fluxel-jsbridge`; recovery and
-  terminal disposal are asynchronous, token-fenced operations.
-- [x] Verify lifecycle, exact compositor pixels, marker progression,
-  diagnostics, CPU submission time, and WASM memory in real Chrome.
-
-WebGL2 remains independently supported by its 0.9 contract. Stage 2 as a whole
-still requires a separately named mini-game host closure.
+The corresponding exact commits, supported-target limits, evidence hashes, and
+next authorized work are maintained in the ecosystem roadmap and GitHub
+Releases. The next rendering series consolidates internal/public contracts and
+cross-repository CI before expanding GPU resource capabilities; it does not add
+another backend or renderer feature.
 
 ### Unscheduled optimizations
 
