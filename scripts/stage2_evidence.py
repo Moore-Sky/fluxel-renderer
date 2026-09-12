@@ -891,6 +891,7 @@ def main() -> int:
                 chrome_command.insert(-1, "--enable-unsafe-webgpu")
                 chrome_command.insert(-1, "--enable-features=Vulkan")
                 chrome_command.insert(-1, "--use-angle=swiftshader")
+                chrome_command.insert(-1, "--use-vulkan=swiftshader")
     command_log.append(chrome_command)
     process: subprocess.Popen[str] | None = None
     cdp: Cdp | None = None
