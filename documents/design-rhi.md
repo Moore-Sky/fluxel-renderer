@@ -326,10 +326,11 @@ the device generation or retire submitted work. Each accepted frame carries a
 generation-tagged completion ticket and its private resources until
 `queue.onSubmittedWorkDone()` settles; capacity is privately bounded at three
 and exhaustion reports backpressure before acquiring the next texture.
-`GPUDevice.lost` ends the old generation, detaches still-settling tickets, and
-prevents stale callbacks from writing a replacement generation. Recovery
-rebuilds every device-affine object before configuring the latest desired
-extent. Normal disposal is an idempotent asynchronous terminal operation;
+The controlled `GPUDevice.destroy()` loss path ends the old generation, detaches
+still-settling tickets, and prevents stale callbacks from writing a replacement
+generation. Its recovery rebuilds every device-affine object before configuring
+the latest desired extent; other loss reasons are observed diagnostically rather
+than promised as a general recovery contract. Normal disposal is an idempotent asynchronous terminal operation;
 lifecycle tokens prevent in-flight recovery from reinstalling objects after
 disposal. Error scopes, uncaptured errors, device loss, rejected Promises, and
 partial creation use structured diagnostics and symmetric observer cleanup.

@@ -47,12 +47,12 @@ The workspace releases its three publishable crates together. Git consumers must
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.0" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.0" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.0" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.1" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.1" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.1" }
 ```
 
-`v0.10.0` and each publishable package's `0.10.0` version identify the same workspace
+`v0.10.1` and each publishable package's `0.10.1` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -105,7 +105,7 @@ Current retained closures are:
 - visible Windows DX12/Vulkan surface lifecycle and bounded completion;
 - the retained RGB scene on the named Chrome/WebGL2 target; and
 - the same scene on the named Chrome/WebGPU target, including canvas epochs,
-  bounded completion, device-generation recovery, and async disposal.
+  bounded completion, controlled destroyed-device recovery, and async disposal.
 
 The corresponding exact commits, supported-target limits, evidence hashes, and
 next authorized work are maintained in the ecosystem roadmap and GitHub

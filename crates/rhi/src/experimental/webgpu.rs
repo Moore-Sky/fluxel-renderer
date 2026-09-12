@@ -165,6 +165,21 @@ struct Shared {
     lost: bool,
     loss_reason: Option<WebGpuLossReason>,
 }
+/// The sole recovery publication guard. Candidate browser objects and facts
+/// may exist privately before this returns true, but never become session
+/// state after a dispose/recovery token invalidates the attempt.
+fn recovery_can_commit(shared: &Shared, token: u64) -> bool {
+    shared.token == token && shared.state == WebGpuSessionState::Recovering
+}
+
+#[derive(Clone, Copy)]
+struct InstallAttempt {
+    format: WebGpuCanvasFormat,
+    generation: u64,
+    token: u64,
+    expected_state: WebGpuSessionState,
+}
+
 impl Default for Shared {
     fn default() -> Self {
         Self {
@@ -248,19 +263,27 @@ impl WebGpuSession {
             dispose_promise: Rc::new(RefCell::new(None)),
             adapter_info: Rc::new(RefCell::new(info)),
         };
-        if let Err(error) = value
+        let objects = match value
             .install(
                 device.clone(),
                 queue,
                 context,
-                0,
-                WebGpuSessionState::Suspended,
+                InstallAttempt {
+                    format,
+                    generation: 1,
+                    token: 0,
+                    expected_state: WebGpuSessionState::Suspended,
+                },
             )
             .await
         {
-            let _ = call0(&device, "destroy");
-            return Err(error);
-        }
+            Ok(objects) => objects,
+            Err(error) => {
+                let _ = call0(&device, "destroy");
+                return Err(error);
+            }
+        };
+        *value.objects.borrow_mut() = Some(objects);
         if value.desired_extent.get()[0] != 0 && value.desired_extent.get()[1] != 0 {
             if let Err(error) = value.configure() {
                 let objects = value.objects.borrow_mut().take();
@@ -494,7 +517,7 @@ impl WebGpuSession {
         }
         self.collect_retired_objects();
         let token = self.shared.borrow().token;
-        let mut session = self.shared_clone();
+        let session = self.shared_clone();
         let promise = future_to_promise(async move {
             let (format, info, device, queue, context) =
                 match request_browser(&session.canvas).await {
@@ -514,68 +537,111 @@ impl WebGpuSession {
                         return Err(to_js(error));
                     }
                 };
-            if session.shared.borrow().token != token
-                || session.state() != WebGpuSessionState::Recovering
-            {
+            if !recovery_can_commit(&session.shared.borrow(), token) {
                 let _ = call0(&device, "destroy");
+                session.recovery_promise.borrow_mut().take();
+                return Ok(JsValue::UNDEFINED);
+            }
+            // Candidate facts remain local until its pipeline, listeners and
+            // canvas configuration have all succeeded. A stale/failed attempt
+            // must not alter the observable generation, format or adapter.
+            let generation = match session.generation().checked_add(1) {
+                Some(generation) => generation,
+                None => {
+                    let error = WebGpuSessionError::Browser {
+                        code: "device-generation-exhausted",
+                        operation: "recover-generation",
+                        generation: session.generation(),
+                        message: "device generation exhausted".into(),
+                    };
+                    // The browser candidate already exists, but no generation
+                    // can represent it. It must never escape this attempt.
+                    let _ = call0(&device, "destroy");
+                    session.recovery_promise.borrow_mut().take();
+                    return Err(to_js(session.recover_failure(error)));
+                }
+            };
+            let objects = match session
+                .install(
+                    device.clone(),
+                    queue,
+                    context,
+                    InstallAttempt {
+                        format,
+                        generation,
+                        token,
+                        expected_state: WebGpuSessionState::Recovering,
+                    },
+                )
+                .await
+            {
+                Ok(objects) => objects,
+                Err(error) => {
+                    let _ = call0(&device, "destroy");
+                    session.recovery_promise.borrow_mut().take();
+                    if session.shared.borrow().token == token
+                        && !matches!(
+                            session.state(),
+                            WebGpuSessionState::Disposing | WebGpuSessionState::Disposed
+                        )
+                    {
+                        return Err(to_js(session.recover_failure(error)));
+                    }
+                    return Err(to_js(error));
+                }
+            };
+            // `install` awaited validation before committing objects. A
+            // concurrent dispose/recovery may have changed this state while
+            // it was suspended, so do not configure or publish a stale device.
+            if !recovery_can_commit(&session.shared.borrow(), token) {
+                Self::destroy_objects(objects).await;
+                session.recovery_promise.borrow_mut().take();
+                return Ok(JsValue::UNDEFINED);
+            }
+            let configured = if !session.desired_extent.get().contains(&0) {
+                match session.configure_candidate(&objects, format) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        Self::destroy_objects(objects).await;
+                        if session.shared.borrow().token == token
+                            && !matches!(
+                                session.state(),
+                                WebGpuSessionState::Disposing | WebGpuSessionState::Disposed
+                            )
+                        {
+                            let error = session.recover_failure(error);
+                            session.recovery_promise.borrow_mut().take();
+                            return Err(to_js(error));
+                        }
+                        session.recovery_promise.borrow_mut().take();
+                        return Ok(JsValue::UNDEFINED);
+                    }
+                }
+            } else {
+                false
+            };
+            // `configure_candidate` is synchronous, but browser calls can be
+            // re-entrant. Recheck immediately before this single publication
+            // point; only this branch makes candidate facts observable.
+            if !recovery_can_commit(&session.shared.borrow(), token) {
+                Self::destroy_objects(objects).await;
                 session.recovery_promise.borrow_mut().take();
                 return Ok(JsValue::UNDEFINED);
             }
             session.format.set(format);
             *session.adapter_info.borrow_mut() = info;
+            *session.objects.borrow_mut() = Some(objects);
             {
                 let mut state = session.shared.borrow_mut();
-                state.generation = state
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| JsValue::from_str("device generation exhausted"))?;
+                state.generation = generation;
+                state.state = if configured {
+                    WebGpuSessionState::Active
+                } else {
+                    WebGpuSessionState::Suspended
+                };
             }
-            if let Err(error) = session
-                .install(
-                    device.clone(),
-                    queue,
-                    context,
-                    token,
-                    WebGpuSessionState::Recovering,
-                )
-                .await
-            {
-                let _ = call0(&device, "destroy");
-                session.recovery_promise.borrow_mut().take();
-                if session.shared.borrow().token == token
-                    && !matches!(
-                        session.state(),
-                        WebGpuSessionState::Disposing | WebGpuSessionState::Disposed
-                    )
-                {
-                    return Err(to_js(session.recover_failure(error)));
-                }
-                return Err(to_js(error));
-            }
-            // `install` awaited validation before committing objects. A
-            // concurrent dispose/recovery may have changed this state while
-            // it was suspended, so do not configure or publish a stale device.
-            if session.shared.borrow().token != token
-                || session.state() != WebGpuSessionState::Recovering
-            {
-                let objects = session.objects.borrow_mut().take();
-                if let Some(objects) = objects {
-                    Self::destroy_objects(objects).await;
-                }
-                session.recovery_promise.borrow_mut().take();
-                return Ok(JsValue::UNDEFINED);
-            }
-            session.shared.borrow_mut().state = WebGpuSessionState::Suspended;
-            if !session.desired_extent.get().contains(&0) {
-                if let Err(error) = session.configure() {
-                    let objects = session.objects.borrow_mut().take();
-                    if let Some(objects) = objects {
-                        Self::destroy_objects(objects).await;
-                    }
-                    session.shared.borrow_mut().state = WebGpuSessionState::Poisoned;
-                    session.recovery_promise.borrow_mut().take();
-                    return Err(to_js(error));
-                }
+            if configured {
+                session.canvas_epoch.set(session.canvas_epoch.get() + 1);
             }
             session.collect_retired_objects();
             session.recovery_promise.borrow_mut().take();
@@ -610,9 +676,16 @@ impl WebGpuSession {
             state.state = WebGpuSessionState::Disposing;
             state.token += 1;
         }
+        // Token invalidation makes a pending recovery stale, but its Promise
+        // may still own candidate browser objects and continuations. Terminal
+        // cleanup must join that exact operation before it publishes Disposed.
+        let recovery = self.recovery_promise.borrow().clone();
         let objects = self.objects.borrow_mut().take();
         let session = self.shared_clone();
         let promise = future_to_promise(async move {
+            if let Some(recovery) = recovery {
+                let _ = JsFuture::from(recovery).await;
+            }
             if let Some(objects) = objects {
                 // The lost continuations are owned for exactly the device lifetime.
                 // Dropping them here makes a post-dispose browser callback inert.
@@ -657,25 +730,26 @@ impl WebGpuSession {
     }
 
     async fn install(
-        &mut self,
+        &self,
         device: JsValue,
         queue: JsValue,
         context: JsValue,
-        token: u64,
-        expected_state: WebGpuSessionState,
-    ) -> Result<(), WebGpuSessionError> {
+        attempt: InstallAttempt,
+    ) -> Result<Objects, WebGpuSessionError> {
         call1(&device, "pushErrorScope", &"validation".into())
             .map_err(|e| self.fail("push-error-scope", e))?;
         // Always pop the scope, including a synchronous construction failure.
         // Otherwise a failed first install leaves an unowned browser scope.
-        let construction = pipeline(&device, self.format.get());
+        let construction = pipeline(&device, attempt.format);
         let scope = Promise::from(
             call0(&device, "popErrorScope").map_err(|e| self.fail("pop-error-scope", e))?,
         );
         let scope_result = match JsFuture::from(scope).await {
             Ok(value) => value,
             Err(error) => {
-                if self.shared.borrow().token != token || self.state() != expected_state {
+                if self.shared.borrow().token != attempt.token
+                    || self.state() != attempt.expected_state
+                {
                     let _ = call0(&device, "destroy");
                     return Err(WebGpuSessionError::State(self.state()));
                 }
@@ -685,7 +759,7 @@ impl WebGpuSession {
         // Nothing beyond this point may install browser callbacks or Objects
         // unless the operation which started this await still owns the session.
         // In particular, dispose increments `token` before it observes objects.
-        if self.shared.borrow().token != token || self.state() != expected_state {
+        if self.shared.borrow().token != attempt.token || self.state() != attempt.expected_state {
             let _ = call0(&device, "destroy");
             return Err(WebGpuSessionError::State(self.state()));
         }
@@ -694,21 +768,19 @@ impl WebGpuSession {
         if !scope_result.is_null() && !scope_result.is_undefined() {
             return Err(self.fail("validation-scope", scope_result));
         }
-        let generation = self.generation();
-        let token = self.shared.borrow().token;
         // Install the removable listener before registering `device.lost`.
         // There are no fallible operations after the non-cancellable Promise
         // continuations are attached.
         let shared = Rc::clone(&self.shared);
         let uncaptured = Closure::wrap(Box::new(move |value: JsValue| {
             let mut s = shared.borrow_mut();
-            if s.generation != generation || s.token != token {
+            if s.generation != attempt.generation || s.token != attempt.token {
                 return;
             }
             s.diagnostics.push(WebGpuDiagnostic {
                 code: "uncaptured-error",
                 operation: "uncaptured-error",
-                generation,
+                generation: attempt.generation,
                 message: js_message(&value),
             });
             s.state = WebGpuSessionState::Poisoned;
@@ -738,8 +810,8 @@ impl WebGpuSession {
         let lost_ok = Closure::wrap(Box::new(move |value: JsValue| {
             settled.set(true);
             let mut s = shared.borrow_mut();
-            if s.generation == generation
-                && s.token == token
+            if s.generation == attempt.generation
+                && s.token == attempt.token
                 && matches!(
                     s.state,
                     WebGpuSessionState::Active | WebGpuSessionState::Suspended
@@ -760,7 +832,7 @@ impl WebGpuSession {
                     s.diagnostics.push(WebGpuDiagnostic {
                         code: "device-lost",
                         operation: "device-lost",
-                        generation,
+                        generation: attempt.generation,
                         message: js_message(&value),
                     });
                     s.state = WebGpuSessionState::Poisoned;
@@ -772,8 +844,8 @@ impl WebGpuSession {
         let lost_err = Closure::wrap(Box::new(move |value: JsValue| {
             settled.set(true);
             let mut s = shared.borrow_mut();
-            if s.generation == generation
-                && s.token == token
+            if s.generation == attempt.generation
+                && s.token == attempt.token
                 && matches!(
                     s.state,
                     WebGpuSessionState::Active | WebGpuSessionState::Suspended
@@ -782,14 +854,14 @@ impl WebGpuSession {
                 s.diagnostics.push(WebGpuDiagnostic {
                     code: "device-lost-promise-rejected",
                     operation: "device-lost",
-                    generation,
+                    generation: attempt.generation,
                     message: js_message(&value),
                 });
                 s.state = WebGpuSessionState::Poisoned;
             }
         }) as Box<dyn FnMut(JsValue)>);
         let _ = lost_promise.then2(&lost_ok, &lost_err);
-        *self.objects.borrow_mut() = Some(Objects {
+        Ok(Objects {
             device,
             queue,
             context,
@@ -800,7 +872,23 @@ impl WebGpuSession {
             lost_ok,
             lost_err,
             uncaptured,
-        });
+        })
+    }
+    /// Configures a fully-built recovery candidate without publishing it as
+    /// the session device. The caller owns its state transition and commit.
+    fn configure_candidate(
+        &self,
+        objects: &Objects,
+        format: WebGpuCanvasFormat,
+    ) -> Result<(), WebGpuSessionError> {
+        let config = Object::new();
+        set(&config, "device", &objects.device)
+            .map_err(|e| self.fail("configure-descriptor", e))?;
+        set(&config, "format", &format.as_str().into())
+            .map_err(|e| self.fail("configure-descriptor", e))?;
+        set(&config, "alphaMode", &"opaque".into())
+            .map_err(|e| self.fail("configure-descriptor", e))?;
+        call1(&objects.context, "configure", &config).map_err(|e| self.fail("configure", e))?;
         Ok(())
     }
     fn configure(&mut self) -> Result<(), WebGpuSessionError> {
@@ -810,13 +898,7 @@ impl WebGpuSession {
         }
         let objects = self.objects.borrow();
         let o = objects.as_ref().ok_or(WebGpuSessionError::Unavailable)?;
-        let config = Object::new();
-        set(&config, "device", &o.device).map_err(|e| self.fail("configure-descriptor", e))?;
-        set(&config, "format", &self.format.get().as_str().into())
-            .map_err(|e| self.fail("configure-descriptor", e))?;
-        set(&config, "alphaMode", &"opaque".into())
-            .map_err(|e| self.fail("configure-descriptor", e))?;
-        call1(&o.context, "configure", &config).map_err(|e| self.fail("configure", e))?;
+        self.configure_candidate(o, self.format.get())?;
         self.canvas_epoch.set(self.canvas_epoch.get() + 1);
         self.shared.borrow_mut().state = WebGpuSessionState::Active;
         Ok(())
@@ -847,7 +929,6 @@ impl WebGpuSession {
     }
     fn collect(&self) {
         self.collect_retired_objects();
-        let mut s = self.shared.borrow_mut();
         loop {
             let Some(ticket) = ({
                 let mut tickets = self.tickets.borrow_mut();
@@ -865,25 +946,29 @@ impl WebGpuSession {
             // These closures are deliberately retained until settlement; this
             // read also documents that their drop is the ticket retirement.
             let _continuations = (&ticket.ok, &ticket.err, ticket.marker);
-            if ticket.generation == s.generation
-                && ticket.settled.borrow().as_ref().is_some_and(Result::is_err)
             {
-                s.state = WebGpuSessionState::Poisoned;
-                s.diagnostics.push(WebGpuDiagnostic {
-                    code: "completion-rejected",
-                    operation: "completion",
-                    generation: ticket.generation,
-                    message: ticket
-                        .settled
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .as_ref()
-                        .err()
-                        .unwrap()
-                        .clone(),
-                });
+                let mut state = self.shared.borrow_mut();
+                if ticket.generation == state.generation
+                    && ticket.settled.borrow().as_ref().is_some_and(Result::is_err)
+                {
+                    state.state = WebGpuSessionState::Poisoned;
+                    state.diagnostics.push(WebGpuDiagnostic {
+                        code: "completion-rejected",
+                        operation: "completion",
+                        generation: ticket.generation,
+                        message: ticket
+                            .settled
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .as_ref()
+                            .err()
+                            .unwrap()
+                            .clone(),
+                    });
+                }
             }
+            // No `Shared` borrow crosses the JS FFI destroys below.
             destroy_frame_resources(ticket.resources);
         }
         loop {
