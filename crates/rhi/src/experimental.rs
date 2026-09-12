@@ -19,3 +19,12 @@ pub mod fixed_artifacts {
         RasterVertexLayout,
     };
 }
+
+/// Closed browser WebGL2 execution for the retained Stage 1 unlit scene.
+///
+/// This module exists only in the browser build.  It deliberately exposes no
+/// WebGL objects: the binding crate owns the JavaScript canvas value and RHI
+/// owns the context, program, buffers, fences, and generations behind this
+/// small session façade.
+#[cfg(all(target_arch = "wasm32", feature = "webgl2"))]
+pub mod webgl2;

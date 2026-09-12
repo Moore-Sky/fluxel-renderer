@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/rendergraph", "crates/renderer", "crates/rhi"]
+members = ["crates/rendergraph", "crates/renderer", "crates/rhi", "crates/rendering-wasm"]
 
 [workspace.package]
-version = "0.8.3"
+version = "0.9.0"
 
 [profile.profiling]
 inherits = "release"

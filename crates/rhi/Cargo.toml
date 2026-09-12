@@ -9,13 +9,16 @@ repository = "https://github.com/fluxel-project/fluxel-rendering"
 readme = "README.md"
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.8.0" }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.9.0" }
 raw-window-handle = "0.6.2"
 
 [features]
 default = ["dx12", "vulkan"]
 dx12 = ["wgpu-hal/dx12", "dep:windows"]
 vulkan = ["wgpu-hal/vulkan", "dep:ash"]
+# The browser executor is deliberately separate from the Windows HAL path.
+# It is meaningful only for wasm32 and keeps WebGL objects private to RHI.
+webgl2 = ["dep:js-sys", "dep:web-sys"]
 # Enables doc-hidden native conformance observation helpers for sibling-crate
 # hardware fixtures. It does not expose mapping, command, or HAL APIs.
 test-support = []
@@ -30,3 +33,12 @@ naga = { version = "=30.0.1", features = ["wgsl-in"] }
 # wgpu-hal 30 permits ordered-float 5.x, but 5.5 raised its MSRV to 1.90.
 # Keep the workspace's declared 1.87 contract until upstream narrows that range.
 ordered-float = "=5.1.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3.77", optional = true }
+wasm-bindgen = "0.2.100"
+web-sys = { version = "0.3.77", optional = true, features = [
+    "HtmlCanvasElement", "WebGl2RenderingContext", "WebGlBuffer",
+    "WebGlProgram", "WebGlShader", "WebGlSync", "WebGlUniformLocation",
+    "WebGlVertexArrayObject", "WebGlContextEvent", "console",
+] }

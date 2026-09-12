@@ -50,7 +50,7 @@ pub(in crate::fixed_frame) fn reserve_pair<A, B, E>(
     }
 }
 
-pub(in crate::fixed_frame) fn validate_clip(
+pub(crate) fn validate_clip(
     positions: &[[f32; 3]],
     indices: &[u32],
     matrix: &[[f32; 4]; 4],

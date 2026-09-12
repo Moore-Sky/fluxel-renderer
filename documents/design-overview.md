@@ -275,8 +275,10 @@ selection and a backend-neutral DX12/Vulkan surface-generation/ticket path. The
 Windows proof harness owns its bounded three-slot admission and back-pressure
 policy; RHI only guards native image availability and completion-driven teardown.
 Non-Windows native requests fail explicitly rather than silently emulating a
-backend. Lost-surface/device recovery, a general cross-platform surface API, and
-a web renderer remain absent.
+backend. Lost-surface/device recovery and a general cross-platform surface API
+remain absent. The Stage 2.1 WebGL2 path is a wasm-private fixed-scene proof,
+not a general web renderer; DOM lifecycle and RAF ownership remain in
+`fluxel-jsbridge`.
 
 Windows MSVC is the primary Windows development/native test environment. Linux
 must be tested natively (for example in WSL2/Ubuntu), because it exercises

@@ -15,13 +15,14 @@ mini-game adapters drive its WASM form; native hosts drive its library form.
 
 ## Workspace
 
-The workspace is organised around three crates:
+The workspace is organised around four crates:
 
 | Crate | Responsibility |
 | --- | --- |
 | `fluxel-rendergraph` | Typed resource declarations, dependency compilation, validation, immutable execution plans, and the CPU-only `TestRhi` protocol. |
 | `fluxel-rhi` | DX12/Vulkan native ownership, fixed RenderGraph execution, and the narrow backend-neutral presentation boundary. |
 | `fluxel-renderer` | Scene/domain data, immutable GPU snapshots, ordered render packets, fixed indexed draws, and visible-frame transactions. |
+| `fluxel-rendering-wasm` | Non-published wasm-bindgen capsule for the named WebGL2 browser proof; JavaScript remains the RAF and DOM lifecycle owner. |
 
 The optional `gpu-upload` slice publishes immutable GPU snapshot generations
 after native uploads complete. It can lower an insertion-ordered `DrawList`
@@ -42,16 +43,16 @@ this file is only the workspace entry point.
 
 ## Released source dependency
 
-The workspace releases its three crates together.  Git consumers must pin the
+The workspace releases its three publishable crates together. Git consumers must pin the
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.3" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.3" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.8.3" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.9.0" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.9.0" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.9.0" }
 ```
 
-`v0.8.3` and each package's `0.8.3` version identify the same workspace
+`v0.9.0` and each publishable package's `0.9.0` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -148,6 +149,23 @@ validation harness; it did not become a host-services runtime.
   unproven acquire semaphore.
 - [x] Expose only the policy-neutral `VisibleFrameStatus::Submitted` milestone
   needed to distinguish native submission from completion-driven slot reuse.
+
+### Completed — Stage 2.1 WebGL2 browser slice
+
+The retained Stage 1 scene now runs through the shared renderer preparation and
+portable raster declaration on WebGL2 in Windows 11 x64 Google Chrome Stable
+`153.0.8010.36`. The browser adapter remains owned by `fluxel-jsbridge`.
+
+- [x] Keep DOM canvas selection, ResizeObserver, visibility/context events, and
+  the sole RAF loop outside this repository's renderer and RHI contracts.
+- [x] Keep WebGL context, program, buffers, vertex array, fences, and resource
+  generations inside the wasm-private RHI implementation.
+- [x] Bound pending WebGL frames at three with `fenceSync`, `flush`, and
+  zero-timeout `clientWaitSync` backpressure; no browser event implies completion.
+- [x] Rebuild one same-canvas resource generation after real
+  `WEBGL_lose_context` loss/restore and explicitly finish/delete normal teardown.
+- [x] Verify stable, resize, zero-size, visibility, loss, and restore with three
+  screenshots per state plus dense frame-marker and exact RGBA readback sampling.
 - [x] Lower one deterministic ordered multi-object scene into one packet and one
   acquired presentation image. Its real CPU preparation fan-out/fan-in uses
   private `slot-graph`; it neither creates artificial work nor owns GPU synchronization.

@@ -297,6 +297,22 @@ rule in [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
 
 ## Readback, diagnostics, and evidence
 
+The Stage 2.1 browser executor is a separate `wasm32 + webgl2` experimental
+implementation. It owns the explicit canvas context, fixed shader/program,
+vertex array, reusable position/index buffers, and generation-tagged sync
+objects. Before issuing WebGL calls it validates the shared compiled plan as
+one black-clear/store raster pass with exactly one presentable target and the
+fixed per-draw vertex/index/uniform usage topology. It never exposes WebGL
+objects to RenderGraph or renderer code.
+
+At most three fences may remain pending. A zero-timeout `clientWaitSync` either
+retires the oldest fence or reports normal backpressure; visibility, resize,
+RAF, and DOM events are never completion. Resizing replaces only the
+browser-owned default drawing buffer—no retained framebuffer identity is
+reused—while submitted fences remain live. Context loss invalidates the whole
+old browser generation; restore rebuilds objects for the same canvas. Normal
+dispose uses `finish` before deleting live sync and resource objects.
+
 Readback is doc-hidden `test-support` for conformance fixtures, never a public
 mapping API. It consumes an exported resource's reported outgoing state and
 lease as its actual incoming contract, then transitions to `CopySource`, copies,

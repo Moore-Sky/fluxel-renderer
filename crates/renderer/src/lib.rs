@@ -30,9 +30,11 @@
 #![deny(missing_docs)]
 
 #[cfg(feature = "gpu-upload")]
-mod fixed_frame;
+pub(crate) mod fixed_frame;
 #[cfg(feature = "gpu-upload")]
-mod frame_uniform;
+pub(crate) mod frame_uniform;
+#[cfg(feature = "gpu-upload")]
+mod prepared_scene;
 mod shader;
 #[cfg(feature = "gpu-upload")]
 mod upload;
@@ -79,6 +81,15 @@ pub use upload::{
     VertexColorIndexedMeshUploadStartError, VertexColorIndexedMeshUploadStatus,
     VertexColorMaterial, VertexColorMaterialError,
 };
+#[cfg(feature = "gpu-upload")]
+#[doc(hidden)]
+/// Deliberately closed preparation output shared by retained renderer paths.
+pub mod experimental {
+    pub use crate::prepared_scene::{
+        PreparedBasicDraw, PreparedBasicGraph, PreparedBasicGraphError, PreparedBasicScene,
+        PreparedBasicSceneError,
+    };
+}
 
 /// A camera described by view and projection matrices.
 #[derive(Clone, Debug, PartialEq)]

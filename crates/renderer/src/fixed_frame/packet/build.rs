@@ -28,7 +28,10 @@ impl super::super::FixedFrameRenderer {
         }
 
         let camera = list.camera().clone();
-        let draws = super::preparation::prepare_draws(self.device.identity(), list, snapshots)?;
+        let prepared = crate::prepared_scene::PreparedBasicScene::prepare(list)
+            .map_err(map_preparation_error)?;
+        let draws =
+            super::preparation::prepare_draws(self.device.identity(), &prepared, snapshots)?;
 
         Ok(RenderPacket {
             device: self.device.identity(),
@@ -39,13 +42,38 @@ impl super::super::FixedFrameRenderer {
     }
 }
 
-pub(super) fn map_clip_error(error: super::super::DrawStartError) -> RenderPacketDrawBuildError {
-    use super::super::DrawStartError;
+fn map_preparation_error(
+    error: crate::prepared_scene::PreparedBasicSceneError,
+) -> RenderPacketBuildError {
+    use crate::prepared_scene::{PreparedBasicDrawError, PreparedBasicSceneError};
     match error {
-        DrawStartError::NonFinitePosition => RenderPacketDrawBuildError::NonFinitePosition,
-        DrawStartError::NonFiniteClipPosition => RenderPacketDrawBuildError::NonFiniteClipPosition,
-        DrawStartError::ClipWNonPositive => RenderPacketDrawBuildError::ClipWNonPositive,
-        DrawStartError::ClipOutOfBounds => RenderPacketDrawBuildError::ClipOutOfBounds,
-        _ => RenderPacketDrawBuildError::InvalidIndexCount,
+        PreparedBasicSceneError::Empty => RenderPacketBuildError::EmptyDrawList,
+        PreparedBasicSceneError::PreparationGraph => RenderPacketBuildError::PreparationGraph,
+        PreparedBasicSceneError::Draw { index, reason } => RenderPacketBuildError::Draw {
+            index,
+            reason: match reason {
+                PreparedBasicDrawError::InvalidIndexCount => {
+                    RenderPacketDrawBuildError::InvalidIndexCount
+                }
+                PreparedBasicDrawError::InvalidCameraMaterial => {
+                    RenderPacketDrawBuildError::InvalidCameraMaterial
+                }
+                PreparedBasicDrawError::ModelTransformProductNonFinite => {
+                    RenderPacketDrawBuildError::ModelTransformProductNonFinite
+                }
+                PreparedBasicDrawError::NonFinitePosition => {
+                    RenderPacketDrawBuildError::NonFinitePosition
+                }
+                PreparedBasicDrawError::NonFiniteClipPosition => {
+                    RenderPacketDrawBuildError::NonFiniteClipPosition
+                }
+                PreparedBasicDrawError::ClipWNonPositive => {
+                    RenderPacketDrawBuildError::ClipWNonPositive
+                }
+                PreparedBasicDrawError::ClipOutOfBounds => {
+                    RenderPacketDrawBuildError::ClipOutOfBounds
+                }
+            },
+        },
     }
 }

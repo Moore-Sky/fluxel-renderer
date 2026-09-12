@@ -372,6 +372,20 @@ never repairs a poisoned snapshot by guessing state.
 
 ## Validation and evidence
 
+Stage 2.1 extracts the legacy-unlit CPU work into `PreparedBasicScene`. A real
+`slot-graph` DAG fans one owned scene into per-draw validation/uniform work and
+then assembles results by insertion index. Native packet lowering reuses that
+result and only associates device-local snapshots; the WASM binding performs a
+field-preserving borrow into the RHI-owned WebGL fixed ABI. Neither path
+recomputes P*V*M, clip acceptance, material color, or ordering.
+
+The native and browser paths also call the same private fixed raster-pass
+declaration. The browser compiles it against an explicitly limited WebGL2
+capability set with imported buffers and one imported presentable resource;
+RHI validates that compiled topology before lowering the closed WebGL recipe.
+These experimental types prove one retained scene and are not a configurable
+pipeline, material, or browser host API.
+
 Portable unit tests cover domain validation, payload packing, publication,
 reservations, recipe mapping, graph declaration, and failure paths. They do
 not prove DX12/Vulkan correctness.

@@ -9,11 +9,10 @@ use core::fmt;
 use std::{collections::HashMap, sync::Arc};
 
 use fluxel_rendergraph::{
-    AttachmentOps, BindingResource, BufferBindingId, BufferRange, BufferRead, ColorAttachmentDesc,
-    DeviceCapabilities, ExportBufferContract, ExportBufferSlot, ExportTextureContract,
-    ExportTextureSlot, Extent3d, ExternalOwnership, ImportBufferContract, ImportBufferSlot,
-    IndexFormat, InitialContents, LoadOp, RenderGraph, ResourceAccessState, StoreOp, TextureDesc,
-    TextureDimension, TextureFormat, TextureRange, Viewport, WriteCoverage,
+    BufferBindingId, DeviceCapabilities, ExportBufferContract, ExportBufferSlot,
+    ExportTextureContract, ExportTextureSlot, Extent3d, ExternalOwnership, ImportBufferContract,
+    ImportBufferSlot, InitialContents, RenderGraph, ResourceAccessState, TextureDesc,
+    TextureDimension, TextureFormat,
 };
 #[cfg(windows)]
 use fluxel_rendergraph::{PresentContract, SurfaceTextureContract};
@@ -21,7 +20,7 @@ use fluxel_rendergraph::{PresentContract, SurfaceTextureContract};
 use crate::frame_uniform::FRAME_UNIFORM_BYTES;
 
 use super::{RenderPacket, ids::PacketIdIssuer};
-use crate::fixed_frame::{camera_bindings, camera_pipeline};
+use crate::fixed_frame::graph_shared::{FixedGraphDraw, declare_fixed_unlit_pass};
 
 /// A compiled graph plus its private frame-binding topology.
 #[derive(Clone)]
@@ -70,13 +69,6 @@ struct ImportedSnapshot {
     indices: fluxel_rendergraph::ImportedBuffer,
     position_binding: BufferBindingId,
     index_binding: BufferBindingId,
-}
-
-struct DeclaredDraw {
-    position: BufferRead,
-    index: BufferRead,
-    uniform: BufferRead,
-    index_count: u32,
 }
 
 /// Why a packet graph could not be declared before any GPU work was accepted.
@@ -214,73 +206,21 @@ fn build_packet_graph_for_target(
         }
     };
     let extent = packet.extent();
-    let pass = graph.add_raster_pass(
-        "packet-legacy-unlit-indexed",
-        |pass| {
-            let output = pass.color_attachment(
-                target,
-                ColorAttachmentDesc {
-                    index: 0,
-                    range: TextureRange::Whole,
-                    operations: AttachmentOps {
-                        load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
-                        store: StoreOp::Store,
-                        write_coverage: WriteCoverage::Full,
-                    },
-                },
-            );
-            let draws = packet
-                .draws()
-                .iter()
-                .enumerate()
-                .map(|(draw_index, draw)| {
-                    let snapshot = &snapshots[draw_snapshot_indices[draw_index]];
-                    DeclaredDraw {
-                        position: pass.read_buffer(
-                            &snapshot.positions.version,
-                            fluxel_rendergraph::BufferReadUse::Vertex,
-                            BufferRange::Whole,
-                        ),
-                        index: pass.read_buffer(
-                            &snapshot.indices.version,
-                            fluxel_rendergraph::BufferReadUse::Index,
-                            BufferRange::Whole,
-                        ),
-                        uniform: pass.read_buffer(
-                            &uniforms[draw_index].version,
-                            fluxel_rendergraph::BufferReadUse::Uniform,
-                            BufferRange::Whole,
-                        ),
-                        index_count: draw.snapshot().index_count(),
-                    }
-                })
-                .collect::<Vec<_>>();
-            (output, draws)
-        },
-        move |commands, resolver, draws, _| {
-            commands.set_pipeline(camera_pipeline())?;
-            commands.set_viewport(Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: extent[0] as f32,
-                height: extent[1] as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            })?;
-            for draw in draws {
-                let bindings = resolver.resolve_bindings(
-                    camera_bindings(),
-                    &[BindingResource::BufferRead(&draw.uniform)],
-                    &[],
-                )?;
-                commands.set_bindings(&bindings)?;
-                commands.set_vertex_buffer(0, &draw.position)?;
-                commands.set_index_buffer(&draw.index, IndexFormat::Uint32)?;
-                commands.draw_indexed(0..draw.index_count, 0, 0..1)?;
+    let graph_draws = packet
+        .draws()
+        .iter()
+        .enumerate()
+        .map(|(draw_index, draw)| {
+            let snapshot = &snapshots[draw_snapshot_indices[draw_index]];
+            FixedGraphDraw {
+                positions: &snapshot.positions.version,
+                indices: &snapshot.indices.version,
+                uniform: &uniforms[draw_index].version,
+                index_count: draw.snapshot().index_count(),
             }
-            Ok(())
-        },
-    );
+        })
+        .collect::<Vec<_>>();
+    let pass = declare_fixed_unlit_pass(&mut graph, target, &graph_draws, extent);
 
     let snapshots = snapshots
         .into_iter()

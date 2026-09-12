@@ -55,6 +55,8 @@ fn actual_raster_capabilities(device: &Device) -> DeviceCapabilities {
 
 /// Fixed-frame graph declarations and resource provider bindings.
 mod graph;
+/// Shared closed graph declaration used by native and browser execution.
+pub(crate) mod graph_shared;
 /// Fixed identifiers shared by closed recipes and graph declarations.
 mod ids;
 /// Owned multi-draw packets and their non-blocking submission lifecycle.
@@ -64,7 +66,7 @@ mod provider;
 /// Closed fixed raster-contract mappings.
 mod recipe;
 /// Fixed-frame renderer construction and draw-start validation.
-mod renderer;
+pub(crate) mod renderer;
 /// Fixed-frame two-phase submission completion lifecycle.
 mod submission;
 #[cfg(test)]

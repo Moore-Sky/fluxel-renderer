@@ -92,8 +92,9 @@ pub use error::{
 };
 #[cfg(test)]
 pub(in crate::fixed_frame) use validation::PairReservationError;
+pub(in crate::fixed_frame) use validation::reserve_pair;
+pub(crate) use validation::validate_clip;
 use validation::{
     map_pair_error, map_snapshot_use, rgba8_unorm_filterable, rgba8_unorm_srgb_filterable,
     validate_textured_clip,
 };
-pub(in crate::fixed_frame) use validation::{reserve_pair, validate_clip};
