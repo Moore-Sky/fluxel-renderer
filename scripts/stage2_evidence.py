@@ -556,7 +556,16 @@ def reject_diagnostics(cdp: Cdp, observation: dict[str, object]) -> None:
             entry = params.get("entry", {}) if isinstance(params, dict) else {}
             text = entry.get("text", "") if isinstance(entry, dict) else ""
             harness_readback_warning = (
-                isinstance(text, str) and "GPU stall due to ReadPixels" in text
+                isinstance(text, str)
+                and entry.get("source") == "rendering"
+                and entry.get("level") == "warning"
+                and text.startswith("[.WebGL-")
+                and "]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): "
+                "GPU stall due to ReadPixels" in text
+                and (
+                    text.endswith("GPU stall due to ReadPixels")
+                    or text.endswith("GPU stall due to ReadPixels (this message will no longer repeat)")
+                )
             )
             if (
                 isinstance(entry, dict)
