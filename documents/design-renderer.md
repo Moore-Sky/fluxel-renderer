@@ -52,7 +52,7 @@ barriers, submission, or readback implementation.
 RHI owns the native boundary: allocation, resource leases, native recording,
 one-queue submission, completion observation, and all HAL/unsafe code.
 Renderer code sees only safe opaque RHI types and the explicitly provisional
-`experimental::fixed_artifacts::RasterBackend`/`RasterKernel` contract.
+`adapter::fixed_artifacts::RasterBackend`/`RasterKernel` contract.
 
 Persistent asset identity, loading, cache eviction, and hot reload are outside
 the graph. An asset system may resolve a ready GPU generation before frame
@@ -386,7 +386,7 @@ and capability facts. WebGL2 uses the former; the WebGPU binding exhaustively
 maps the RHI-reported canvas format to one of the two. Both use imported buffers
 and one imported presentable resource; RHI validates the identical compiled
 topology before lowering its closed browser recipe.
-These experimental types prove one retained scene and are not a configurable
+These closed adapter types prove one retained scene and are not a configurable
 pipeline, material, or browser host API.
 
 Portable unit tests cover domain validation, payload packing, publication,

@@ -13,7 +13,7 @@ use std::{
 };
 
 use fluxel_rendergraph::ResourceAccessState;
-use fluxel_rhi::experimental::fixed_artifacts::RasterKernel;
+use fluxel_rhi::adapter::fixed_artifacts::RasterKernel;
 use fluxel_rhi::{
     Backend, Device, DeviceOptions, Validation, readback_exported_raster_texture_for_test,
     test_support,

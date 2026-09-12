@@ -9,10 +9,10 @@
 //! whole RGBA8 texture uploads retain staging and destination storage through
 //! completion.
 //!
-//! Fixed raster recipes are intentionally experimental:
+//! Fixed raster recipes are intentionally closed adapter contracts:
 //!
 //! ```
-//! use fluxel_rhi::experimental::fixed_artifacts::RasterKernel;
+//! use fluxel_rhi::adapter::fixed_artifacts::RasterKernel;
 //!
 //! let _identity = RasterKernel::Triangle.portable_identity();
 //! ```
@@ -36,7 +36,28 @@ mod execution;
 /// These artifacts are intentionally isolated from the RHI root because they
 /// encode the renderer's current fixed recipes rather than a general pipeline
 /// contract. They may change or be removed in a future minor release.
-pub mod experimental;
+mod experimental;
+
+/// Closed adapter-facing contracts used by Fluxel's retained rendering slice.
+///
+/// These APIs connect sibling workspace crates without exposing native GPU
+/// objects. They are a deliberately bounded pre-1.0 contract: minor releases
+/// may evolve it with their sibling consumers, but it is not a temporary
+/// documentation-hidden proof seam. It is intentionally narrower than the
+/// resource contract planned for the next stage and must not be expanded into
+/// a general pipeline facade.
+pub mod adapter {
+    /// Closed renderer-shaped raster recipes and execution objects.
+    pub use crate::experimental::fixed_artifacts;
+
+    /// Closed browser WebGL2 execution for the retained scene.
+    #[cfg(all(target_arch = "wasm32", feature = "webgl2"))]
+    pub use crate::experimental::webgl2;
+
+    /// Closed browser WebGPU execution for the retained scene.
+    #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+    pub use crate::experimental::webgpu;
+}
 /// Rendering-owned Windows presentation boundary for the current vertical slice.
 #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
 pub mod presentation;

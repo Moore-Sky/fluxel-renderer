@@ -15,7 +15,7 @@ use fluxel_rendergraph::{
 };
 #[cfg(windows)]
 use fluxel_rendergraph::{BoundSurfaceTexture, SurfaceBindingId, SurfaceBindingResult};
-use fluxel_rhi::experimental::fixed_artifacts::RasterBackend;
+use fluxel_rhi::adapter::fixed_artifacts::RasterBackend;
 use fluxel_rhi::{Buffer, ResourceLease, UploadedBuffer};
 #[cfg(windows)]
 use fluxel_rhi::{Texture, presentation::PresentationToken};

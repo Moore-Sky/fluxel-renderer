@@ -25,13 +25,13 @@ fn recovery_publication_requires_its_original_token_and_state() {
         token: 11,
         ..Shared::default()
     };
-    assert!(recovery_can_commit(&shared, 11));
+    assert!(recovery_attempt_current(shared.state, shared.token, 11));
 
     // `dispose` invalidates the token before it waits for the in-flight
     // recovery. The candidate must therefore never publish its facts.
     shared.token += 1;
     shared.state = WebGpuSessionState::Disposing;
-    assert!(!recovery_can_commit(&shared, 11));
+    assert!(!recovery_attempt_current(shared.state, shared.token, 11));
     assert_eq!(shared.generation, 7);
 }
 
@@ -42,5 +42,5 @@ fn recovery_candidate_is_not_committable_from_a_terminal_state() {
         token: 3,
         ..Shared::default()
     };
-    assert!(!recovery_can_commit(&shared, 3));
+    assert!(!recovery_attempt_current(shared.state, shared.token, 3));
 }

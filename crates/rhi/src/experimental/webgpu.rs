@@ -15,6 +15,10 @@ use wasm_bindgen_futures::{JsFuture, future_to_promise};
 use web_sys::HtmlCanvasElement;
 
 pub use super::webgpu_state::WebGpuSessionState;
+use super::webgpu_state::{
+    TerminalDisposalRoots, candidate_transaction_committable, recovery_attempt_current,
+    terminal_dispose_ready,
+};
 
 mod accessors;
 mod contract;
@@ -165,13 +169,6 @@ struct Shared {
     lost: bool,
     loss_reason: Option<WebGpuLossReason>,
 }
-/// The sole recovery publication guard. Candidate browser objects and facts
-/// may exist privately before this returns true, but never become session
-/// state after a dispose/recovery token invalidates the attempt.
-fn recovery_can_commit(shared: &Shared, token: u64) -> bool {
-    shared.token == token && shared.state == WebGpuSessionState::Recovering
-}
-
 #[derive(Clone, Copy)]
 struct InstallAttempt {
     format: WebGpuCanvasFormat,
@@ -213,6 +210,19 @@ struct Objects {
     lost_ok: Closure<dyn FnMut(JsValue)>,
     lost_err: Closure<dyn FnMut(JsValue)>,
     uncaptured: Closure<dyn FnMut(JsValue)>,
+}
+
+/// A short-lived clone of the browser handles needed to encode one frame.
+///
+/// This deliberately contains no callback roots.  Taking this snapshot drops
+/// the `objects` `RefCell` borrow before entering browser code, whose methods
+/// are allowed to synchronously re-enter wasm.
+struct RenderObjects {
+    device: JsValue,
+    queue: JsValue,
+    context: JsValue,
+    pipeline: JsValue,
+    layout: JsValue,
 }
 
 /// One owner-thread, canvas-bound WebGPU session.
@@ -362,8 +372,7 @@ impl WebGpuSession {
             return Ok(WebGpuRenderOutcome::Backpressure);
         }
         validate(graph, draws, self.format.get(), self.desired_extent.get())?;
-        let objects = self.objects.borrow();
-        let objects = objects.as_ref().expect("active has objects");
+        let objects = self.render_objects()?;
         let texture =
             call0(&objects.context, "getCurrentTexture").map_err(|e| self.fail("acquire", e))?;
         let view = call0(&texture, "createView").map_err(|e| self.fail("create-view", e))?;
@@ -510,7 +519,8 @@ impl WebGpuSession {
         self.detached
             .borrow_mut()
             .append(&mut self.tickets.borrow_mut());
-        destroy_frame_resources(std::mem::take(&mut *self.quarantined.borrow_mut()));
+        let quarantined = std::mem::take(&mut *self.quarantined.borrow_mut());
+        destroy_frame_resources(quarantined);
         if let Some(objects) = self.objects.borrow_mut().take() {
             unregister_uncaptured_error(&objects);
             self.retired_objects.borrow_mut().push(objects);
@@ -537,7 +547,7 @@ impl WebGpuSession {
                         return Err(to_js(error));
                     }
                 };
-            if !recovery_can_commit(&session.shared.borrow(), token) {
+            if !session.recovery_attempt_current(token) {
                 let _ = call0(&device, "destroy");
                 session.recovery_promise.borrow_mut().take();
                 return Ok(JsValue::UNDEFINED);
@@ -593,7 +603,7 @@ impl WebGpuSession {
             // `install` awaited validation before committing objects. A
             // concurrent dispose/recovery may have changed this state while
             // it was suspended, so do not configure or publish a stale device.
-            if !recovery_can_commit(&session.shared.borrow(), token) {
+            if !session.recovery_attempt_current(token) {
                 Self::destroy_objects(objects).await;
                 session.recovery_promise.borrow_mut().take();
                 return Ok(JsValue::UNDEFINED);
@@ -623,7 +633,7 @@ impl WebGpuSession {
             // `configure_candidate` is synchronous, but browser calls can be
             // re-entrant. Recheck immediately before this single publication
             // point; only this branch makes candidate facts observable.
-            if !recovery_can_commit(&session.shared.borrow(), token) {
+            if !session.candidate_transaction_committable(token, generation) {
                 Self::destroy_objects(objects).await;
                 session.recovery_promise.borrow_mut().take();
                 return Ok(JsValue::UNDEFINED);
@@ -654,11 +664,13 @@ impl WebGpuSession {
     /// Evidence-only controlled destruction seam; normal code must use dispose.
     #[doc(hidden)]
     pub fn controlled_destroy_for_evidence(&mut self) -> Result<(), WebGpuSessionError> {
-        let objects_ref = self.objects.borrow();
-        let objects = objects_ref
+        let device = self
+            .objects
+            .borrow()
             .as_ref()
+            .map(|objects| objects.device.clone())
             .ok_or(WebGpuSessionError::State(self.state()))?;
-        call0(&objects.device, "destroy").map_err(|e| self.fail("controlled-destroy", e))?;
+        call0(&device, "destroy").map_err(|e| self.fail("controlled-destroy", e))?;
         // `device.lost` is the authoritative state transition.
         Ok(())
     }
@@ -701,9 +713,14 @@ impl WebGpuSession {
                 unregister_uncaptured_error(&objects);
             }
             session.settle_all_tickets().await;
-            destroy_frame_resources(std::mem::take(&mut *session.quarantined.borrow_mut()));
-            let mut s = session.shared.borrow_mut();
-            s.state = WebGpuSessionState::Disposed;
+            let quarantined = std::mem::take(&mut *session.quarantined.borrow_mut());
+            destroy_frame_resources(quarantined);
+            if !session.terminal_dispose_ready() {
+                return Err(JsValue::from_str(
+                    "WebGPU disposal retained an asynchronous ownership root",
+                ));
+            }
+            session.shared.borrow_mut().state = WebGpuSessionState::Disposed;
             Ok(JsValue::UNDEFINED)
         });
         *self.dispose_promise.borrow_mut() = Some(promise.clone());
@@ -727,6 +744,45 @@ impl WebGpuSession {
             dispose_promise: Rc::clone(&self.dispose_promise),
             adapter_info: Rc::clone(&self.adapter_info),
         }
+    }
+
+    /// Reads the production recovery contract without retaining a `RefCell`
+    /// guard beyond the pure predicate.
+    fn recovery_attempt_current(&self, token: u64) -> bool {
+        let shared = self.shared.borrow();
+        recovery_attempt_current(shared.state, shared.token, token)
+    }
+
+    /// The only guard used at the candidate device transaction's publication
+    /// point. Its generation check prevents a partial/stale candidate commit.
+    fn candidate_transaction_committable(&self, token: u64, candidate_generation: u64) -> bool {
+        let shared = self.shared.borrow();
+        candidate_transaction_committable(
+            shared.state,
+            shared.token,
+            token,
+            shared.generation,
+            candidate_generation,
+        )
+    }
+
+    /// Consults the production terminal contract after the disposal future has
+    /// joined recovery, device observers, completion tickets and quarantine.
+    fn terminal_dispose_ready(&self) -> bool {
+        terminal_dispose_ready(
+            self.state(),
+            TerminalDisposalRoots {
+                recovery_pending: self.recovery_promise.borrow().is_some(),
+                live_objects: self.objects.borrow().is_some(),
+                retired_objects: !self.retired_objects.borrow().is_empty(),
+                active_tickets: !self.tickets.borrow().is_empty(),
+                detached_tickets: !self.detached.borrow().is_empty(),
+                quarantined_resources: !self.quarantined.borrow().is_empty(),
+                // `Objects` owns the only RHI listener/callback roots, which
+                // are already reflected by the two object predicates above.
+                callback_or_listener_producer: false,
+            },
+        )
     }
 
     async fn install(
@@ -881,14 +937,23 @@ impl WebGpuSession {
         objects: &Objects,
         format: WebGpuCanvasFormat,
     ) -> Result<(), WebGpuSessionError> {
+        self.configure_candidate_handles(&objects.device, &objects.context, format)
+    }
+    /// Configures from cloned browser handles, so an active-session configure
+    /// cannot keep an `objects` cell borrow alive across browser FFI.
+    fn configure_candidate_handles(
+        &self,
+        device: &JsValue,
+        context: &JsValue,
+        format: WebGpuCanvasFormat,
+    ) -> Result<(), WebGpuSessionError> {
         let config = Object::new();
-        set(&config, "device", &objects.device)
-            .map_err(|e| self.fail("configure-descriptor", e))?;
+        set(&config, "device", device).map_err(|e| self.fail("configure-descriptor", e))?;
         set(&config, "format", &format.as_str().into())
             .map_err(|e| self.fail("configure-descriptor", e))?;
         set(&config, "alphaMode", &"opaque".into())
             .map_err(|e| self.fail("configure-descriptor", e))?;
-        call1(&objects.context, "configure", &config).map_err(|e| self.fail("configure", e))?;
+        call1(context, "configure", &config).map_err(|e| self.fail("configure", e))?;
         Ok(())
     }
     fn configure(&mut self) -> Result<(), WebGpuSessionError> {
@@ -896,9 +961,13 @@ impl WebGpuSession {
             self.shared.borrow_mut().state = WebGpuSessionState::Suspended;
             return Ok(());
         }
-        let objects = self.objects.borrow();
-        let o = objects.as_ref().ok_or(WebGpuSessionError::Unavailable)?;
-        self.configure_candidate(o, self.format.get())?;
+        let (device, context) = self
+            .objects
+            .borrow()
+            .as_ref()
+            .map(|objects| (objects.device.clone(), objects.context.clone()))
+            .ok_or(WebGpuSessionError::Unavailable)?;
+        self.configure_candidate_handles(&device, &context, self.format.get())?;
         self.canvas_epoch.set(self.canvas_epoch.get() + 1);
         self.shared.borrow_mut().state = WebGpuSessionState::Active;
         Ok(())
@@ -926,6 +995,22 @@ impl WebGpuSession {
             promise,
             resources,
         });
+    }
+    /// Snapshots just the frame encoding handles. No `RefCell` guard escapes
+    /// this function: all following WebGPU calls operate on owned `JsValue`
+    /// clones and may therefore re-enter browser/wasm code safely.
+    fn render_objects(&self) -> Result<RenderObjects, WebGpuSessionError> {
+        self.objects
+            .borrow()
+            .as_ref()
+            .map(|objects| RenderObjects {
+                device: objects.device.clone(),
+                queue: objects.queue.clone(),
+                context: objects.context.clone(),
+                pipeline: objects.pipeline.clone(),
+                layout: objects.layout.clone(),
+            })
+            .ok_or(WebGpuSessionError::Unavailable)
     }
     fn collect(&self) {
         self.collect_retired_objects();

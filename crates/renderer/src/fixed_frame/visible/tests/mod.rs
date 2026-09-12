@@ -2,7 +2,7 @@
 
 use super::OneShotSurface;
 use crate::fixed_frame::{RasterRecipe, visible::visible_camera_recipe};
-use fluxel_rhi::experimental::fixed_artifacts::RasterKernel;
+use fluxel_rhi::adapter::fixed_artifacts::RasterKernel;
 
 #[test]
 fn acquired_permission_is_consumed_once() {

@@ -12,7 +12,7 @@ ownership, reflection, layout, and portability requirements.
 
 Represent each proven native combination as a closed RHI artifact and binding
 recipe. Renderer-shaped Raster artifacts are exposed only under
-`fluxel_rhi::experimental::fixed_artifacts`; keep shaders, descriptors,
+`fluxel_rhi::adapter::fixed_artifacts`; keep shaders, descriptors,
 samplers, and native objects opaque. Add a new closed recipe only for a
 separately planned vertical slice.
 
@@ -25,7 +25,7 @@ separately planned vertical slice.
 
 The stable RHI surface does not imply that fixed renderer recipes are a lasting
 general contract. General shader/material/pipeline policy waits for real
-renderer requirements; experimental recipe changes may evolve with the current
+renderer requirements; closed adapter recipe changes may evolve with the current
 vertical slice.
 
 ## Evidence

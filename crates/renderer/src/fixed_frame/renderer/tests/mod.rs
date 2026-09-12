@@ -4,7 +4,7 @@ use std::error::Error as _;
 
 use fluxel_rendergraph::{CompileError, CompileErrorKind, DiagnosticContext};
 use fluxel_rhi::{
-    BufferUploadError, NativeExecutionError, experimental::fixed_artifacts::RasterCreateError,
+    BufferUploadError, NativeExecutionError, adapter::fixed_artifacts::RasterCreateError,
 };
 
 use super::{

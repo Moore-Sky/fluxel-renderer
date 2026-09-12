@@ -10,9 +10,9 @@ mod webgpu;
 
 pub use webgpu::WebGpuSession;
 
-use fluxel_renderer::experimental::{PreparedBasicGraph, PreparedBasicScene};
+use fluxel_renderer::adapter::{PreparedBasicGraph, PreparedBasicScene};
 use fluxel_renderer::{BasicMaterial, Camera, DrawList, Geometry, Mesh, ModelTransform};
-use fluxel_rhi::experimental::webgl2::{
+use fluxel_rhi::adapter::webgl2::{
     FixedUnlitDraw, FixedUnlitGraph, WebGl2Session as RhiSession, WebGl2SessionError,
 };
 use js_sys::{Array, Object, Reflect};
@@ -63,7 +63,7 @@ impl WebGl2Session {
     /// Renders once. The caller, not this session, owns RAF scheduling.
     pub fn render_once(&mut self) -> Result<JsValue, JsValue> {
         let started = js_sys::Date::now();
-        if self.inner.state() != fluxel_rhi::experimental::webgl2::WebGl2SessionState::Active {
+        if self.inner.state() != fluxel_rhi::adapter::webgl2::WebGl2SessionState::Active {
             return Err(structured_error(
                 "invalid-state",
                 "render",
@@ -171,7 +171,7 @@ fn frame_report(
     frame_marker: Option<u64>,
     generation: u64,
     cpu_submission_ms: f64,
-    state: fluxel_rhi::experimental::webgl2::WebGl2SessionState,
+    state: fluxel_rhi::adapter::webgl2::WebGl2SessionState,
 ) -> JsValue {
     let report = Object::new();
     let _ = Reflect::set(&report, &"outcome".into(), &outcome.into());
@@ -198,7 +198,7 @@ fn frame_report(
 }
 
 pub(crate) fn retained_scene()
--> Result<PreparedBasicScene, fluxel_renderer::experimental::PreparedBasicSceneError> {
+-> Result<PreparedBasicScene, fluxel_renderer::adapter::PreparedBasicSceneError> {
     let triangle = |color| {
         Mesh::new(
             Geometry::from_positions(vec![
@@ -250,7 +250,7 @@ impl IntoBrowserError for WebGl2SessionError {
     }
 }
 
-impl IntoBrowserError for fluxel_renderer::experimental::PreparedBasicSceneError {
+impl IntoBrowserError for fluxel_renderer::adapter::PreparedBasicSceneError {
     fn into_browser_error(self) -> JsValue {
         structured_error(
             "scene-preparation-failed",
@@ -261,7 +261,7 @@ impl IntoBrowserError for fluxel_renderer::experimental::PreparedBasicSceneError
     }
 }
 
-impl IntoBrowserError for fluxel_renderer::experimental::PreparedBasicGraphError {
+impl IntoBrowserError for fluxel_renderer::adapter::PreparedBasicGraphError {
     fn into_browser_error(self) -> JsValue {
         structured_error(
             "graph-compile-failed",

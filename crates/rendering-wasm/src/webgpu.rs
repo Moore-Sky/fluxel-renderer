@@ -4,10 +4,10 @@
 //! renderer's closed prepared scene into the RHI-owned WebGPU generation; it
 //! never exposes adapter, device, queue, context, texture, or Promise internals.
 
-use fluxel_renderer::experimental::{
+use fluxel_renderer::adapter::{
     PreparedBasicGraph, PreparedBasicScene, PresentableFormat, PresentationProfile,
 };
-use fluxel_rhi::experimental::webgpu::{
+use fluxel_rhi::adapter::webgpu::{
     FixedUnlitDraw, FixedUnlitGraph, WebGpuCanvasFormat, WebGpuLossReason, WebGpuRenderOutcome,
     WebGpuSession as RhiSession, WebGpuSessionError, WebGpuSessionState,
 };

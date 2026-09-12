@@ -33,7 +33,7 @@ frame scheduling remain above it. See [ADR-0001](adr/0001-assets-outside-renderg
 driver facts, owned resources, execution backends, the narrow presentation
 facade, and structured errors.
 Renderer-shaped closed raster artifacts are isolated under the explicitly
-provisional `experimental::fixed_artifacts` path. It never exports `wgpu-hal`, native pointers, queues,
+closed `adapter::fixed_artifacts` path. It never exports `wgpu-hal`, native pointers, queues,
 command allocators, image views, or host mapping.
 
 ```text
@@ -185,7 +185,7 @@ the affected generation when its terminal state is unknown. See
 ## Closed artifacts and bindings
 
 The native API supports evidence-backed *closed* compute and raster recipes.
-`ComputeKernel` and the experimental fixed-artifact `RasterKernel`, identities, pipeline values, and binding
+`ComputeKernel` and the closed adapter-facing `RasterKernel`, identities, pipeline values, and binding
 constructors represent exactly the combinations implemented by this crate; they
 are not pipeline builders.
 
@@ -297,7 +297,7 @@ rule in [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
 
 ## Readback, diagnostics, and evidence
 
-The Stage 2.1 browser executor is a separate `wasm32 + webgl2` experimental
+The Stage 2.1 browser executor is a separate closed `wasm32 + webgl2` adapter
 implementation. It owns the explicit canvas context, fixed shader/program,
 vertex array, reusable position/index buffers, and generation-tagged sync
 objects. Before issuing WebGL calls it validates the shared compiled plan as
@@ -313,7 +313,7 @@ reused—while submitted fences remain live. Context loss invalidates the whole
 old browser generation; restore rebuilds objects for the same canvas. Normal
 dispose uses `finish` before deleting live sync and resource objects.
 
-The Stage 2.2 executor is a separate `wasm32 + webgpu` experimental
+The Stage 2.2 executor is a separate closed `wasm32 + webgpu` adapter
 implementation. It validates that same compiled graph and physical draw ABI,
 then owns the adapter, device, queue, configured canvas context, pipeline,
 buffers, current texture/view, error observers, and Promise continuations.

@@ -9,9 +9,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use fluxel_rendergraph::{CompletionStatus, ExecutionError, FrameInputs};
-use fluxel_rhi::experimental::fixed_artifacts::{
-    RasterBackend, RasterKernel, RasterObjectProvider,
-};
+use fluxel_rhi::adapter::fixed_artifacts::{RasterBackend, RasterKernel, RasterObjectProvider};
 use fluxel_rhi::{
     BufferDescriptor, MemoryPolicy, NativeExecutionError, PendingBufferUpload, UploadedBuffer,
 };

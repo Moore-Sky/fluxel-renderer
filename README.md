@@ -47,12 +47,12 @@ The workspace releases its three publishable crates together. Git consumers must
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.1" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.1" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.10.1" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.0" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.0" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.0" }
 ```
 
-`v0.10.1` and each publishable package's `0.10.1` version identify the same workspace
+`v0.11.0` and each publishable package's `0.11.0` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation

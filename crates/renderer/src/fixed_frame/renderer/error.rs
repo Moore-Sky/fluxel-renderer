@@ -42,7 +42,7 @@ pub enum DrawStartError {
     /// Graph compilation rejected the fixed declaration.
     Graph(fluxel_rendergraph::CompileError),
     /// The device could not create the closed raster artifact.
-    Pipeline(fluxel_rhi::experimental::fixed_artifacts::RasterCreateError),
+    Pipeline(fluxel_rhi::adapter::fixed_artifacts::RasterCreateError),
     /// The native object provider rejected the closed recipe.
     Provider(fluxel_rhi::NativeExecutionError),
 }

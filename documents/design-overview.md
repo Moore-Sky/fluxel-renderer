@@ -277,7 +277,7 @@ policy; RHI only guards native image availability and completion-driven teardown
 Non-Windows native requests fail explicitly rather than silently emulating a
 backend. Lost native surface/device recovery and a general cross-platform
 surface API remain absent. The Stage 2.1 WebGL2 and Stage 2.2 WebGPU paths are
-wasm-private fixed-scene proofs, not a general web renderer; DOM lifecycle and
+closed fixed-scene adapters, not a general web renderer; DOM lifecycle and
 RAF ownership remain in `fluxel-jsbridge`. WebGPU separately owns a private
 device-generation/canvas-epoch state machine with asynchronous recovery and
 terminal disposal; that browser-only contract does not broaden native Surface.

@@ -7,7 +7,7 @@
 use core::fmt;
 
 use fluxel_rendergraph::{CompletionFailure, DeviceIdentity};
-use fluxel_rhi::experimental::fixed_artifacts::RasterCreateError;
+use fluxel_rhi::adapter::fixed_artifacts::RasterCreateError;
 use fluxel_rhi::{BufferUploadError, NativeExecutionError};
 
 use crate::{Camera, IndexedMeshSnapshot, frame_uniform::FrameUniform};

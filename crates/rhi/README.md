@@ -6,8 +6,8 @@ Its fixed-artifact Raster, Compute, and Copy backend executes the same compiled
 RenderGraph plan on both APIs, including semantic transition lowering, one
 queue submission, completion, and retirement.
 
-Renderer-shaped raster artifacts are deliberately experimental and live under
-`fluxel_rhi::experimental::fixed_artifacts`. They are closed validation recipes,
+Renderer-shaped raster artifacts are deliberately closed and live under
+`fluxel_rhi::adapter::fixed_artifacts`. They are closed integration recipes,
 not the stable RHI facade or a general pipeline API.
 
 It is deliberately a narrow native boundary, not a general graphics API.
@@ -37,7 +37,7 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.10.1"
+tag = "v0.11.0"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -47,7 +47,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.10.1"
+tag = "v0.11.0"
 default-features = false
 features = ["dx12"]
 ```

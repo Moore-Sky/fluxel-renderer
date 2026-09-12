@@ -19,6 +19,59 @@ pub enum WebGpuSessionState {
     Poisoned,
 }
 
+/// Whether an asynchronous recovery attempt still owns the session state it
+/// started from. Browser callbacks must check this before becoming producers.
+pub(crate) fn recovery_attempt_current(
+    state: WebGpuSessionState,
+    current_token: u64,
+    attempt_token: u64,
+) -> bool {
+    state == WebGpuSessionState::Recovering && current_token == attempt_token
+}
+
+/// Whether the full candidate device transaction may publish. In addition to
+/// the recovery token, the replacement generation must be exactly the next
+/// committed generation; device, queue, format and adapter facts publish only
+/// from this one point.
+pub(crate) fn candidate_transaction_committable(
+    state: WebGpuSessionState,
+    current_token: u64,
+    attempt_token: u64,
+    committed_generation: u64,
+    candidate_generation: u64,
+) -> bool {
+    recovery_attempt_current(state, current_token, attempt_token)
+        && committed_generation.checked_add(1) == Some(candidate_generation)
+}
+
+/// Terminal state is truthful only once every async producer and every GPU
+/// ownership root has gone. This is deliberately separate from the state enum:
+/// `Disposing` remains observable while these roots settle.
+#[derive(Clone, Copy)]
+pub(crate) struct TerminalDisposalRoots {
+    pub(crate) recovery_pending: bool,
+    pub(crate) live_objects: bool,
+    pub(crate) retired_objects: bool,
+    pub(crate) active_tickets: bool,
+    pub(crate) detached_tickets: bool,
+    pub(crate) quarantined_resources: bool,
+    pub(crate) callback_or_listener_producer: bool,
+}
+
+pub(crate) fn terminal_dispose_ready(
+    state: WebGpuSessionState,
+    roots: TerminalDisposalRoots,
+) -> bool {
+    state == WebGpuSessionState::Disposing
+        && !roots.recovery_pending
+        && !roots.live_objects
+        && !roots.retired_objects
+        && !roots.active_tickets
+        && !roots.detached_tickets
+        && !roots.quarantined_resources
+        && !roots.callback_or_listener_producer
+}
+
 /// Minimal no-GPU reducer used to test lifecycle distinctions on every host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg(test)]
@@ -94,6 +147,116 @@ struct Accounting {
     detached_tickets: u8,
     active_observers: u8,
     retired_observers: u8,
+}
+
+/// Pure, deferred-Promise model for the browser executor's async publication
+/// contract.  It deliberately models only ownership and commit ordering, not
+/// WebGPU: host tests can therefore exercise adversarial interleavings without
+/// claiming that a mock browser proves rendering correctness.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Interleaving {
+    state: WebGpuSessionState,
+    generation: u64,
+    format_generation: u64,
+    metadata_generation: u64,
+    token: u64,
+    recovery_in_flight: bool,
+    active_submission: bool,
+    detached_completion: bool,
+    callback_producer: bool,
+    raf_or_listener: bool,
+}
+
+#[cfg(test)]
+impl Interleaving {
+    const fn active() -> Self {
+        Self {
+            state: WebGpuSessionState::Active,
+            generation: 1,
+            format_generation: 1,
+            metadata_generation: 1,
+            token: 0,
+            recovery_in_flight: false,
+            active_submission: false,
+            detached_completion: false,
+            callback_producer: true,
+            raf_or_listener: true,
+        }
+    }
+    fn begin_recovery(&mut self) -> u64 {
+        self.state = WebGpuSessionState::Recovering;
+        self.token += 1;
+        self.recovery_in_flight = true;
+        self.callback_producer = false;
+        self.active_submission = false;
+        self.detached_completion = true;
+        self.token
+    }
+    /// The single publication point for candidate device + queue + format +
+    /// adapter facts + generation. A failed candidate is terminal only while
+    /// its original recovery still owns the session.
+    fn settle_candidate(&mut self, token: u64, install_ok: bool, drawable: bool) -> bool {
+        self.recovery_in_flight = false;
+        let Some(candidate_generation) = self.generation.checked_add(1) else {
+            self.state = WebGpuSessionState::Poisoned;
+            return false;
+        };
+        if !candidate_transaction_committable(
+            self.state,
+            self.token,
+            token,
+            self.generation,
+            candidate_generation,
+        ) {
+            return false;
+        }
+        if !install_ok {
+            self.state = WebGpuSessionState::Poisoned;
+            return false;
+        }
+        self.generation = candidate_generation;
+        self.format_generation = candidate_generation;
+        self.metadata_generation = candidate_generation;
+        self.callback_producer = true;
+        self.state = if drawable {
+            WebGpuSessionState::Active
+        } else {
+            WebGpuSessionState::Suspended
+        };
+        true
+    }
+    /// Starts terminal cleanup. It invalidates every candidate before waiting;
+    /// terminal completion remains forbidden until all asynchronous roots have
+    /// settled or been removed.
+    fn begin_dispose(&mut self) {
+        self.state = WebGpuSessionState::Disposing;
+        self.token += 1;
+        self.callback_producer = false;
+        self.raf_or_listener = false;
+    }
+    fn settle_completion(&mut self) {
+        self.active_submission = false;
+        self.detached_completion = false;
+    }
+    fn finish_dispose(&mut self) -> bool {
+        if !terminal_dispose_ready(
+            self.state,
+            TerminalDisposalRoots {
+                recovery_pending: self.recovery_in_flight,
+                live_objects: self.callback_producer,
+                retired_objects: false,
+                active_tickets: self.active_submission,
+                detached_tickets: self.detached_completion,
+                quarantined_resources: false,
+                callback_or_listener_producer: self.raf_or_listener,
+            },
+        ) {
+            return false;
+        }
+        self.state = WebGpuSessionState::Disposed;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +384,133 @@ mod tests {
         accounting.dispose_after_settlement();
         assert_ne!(pending_token, accounting.token);
         assert!(accounting.stale_callback_is_ignored(1, pending_token));
+    }
+
+    #[test]
+    fn candidate_device_facts_publish_as_one_logical_transaction() {
+        let mut model = Interleaving::active();
+        let token = model.begin_recovery();
+        // Awaiting validation has not made any candidate fact observable.
+        assert_eq!(
+            (
+                model.generation,
+                model.format_generation,
+                model.metadata_generation
+            ),
+            (1, 1, 1)
+        );
+        assert!(model.settle_candidate(token, true, true));
+        assert_eq!(
+            (
+                model.generation,
+                model.format_generation,
+                model.metadata_generation
+            ),
+            (2, 2, 2)
+        );
+        assert_eq!(model.state, WebGpuSessionState::Active);
+    }
+
+    #[test]
+    fn stale_candidate_and_callback_cannot_mutate_terminal_disposal() {
+        let mut model = Interleaving::active();
+        let token = model.begin_recovery();
+        model.begin_dispose();
+        // A late request/device/validation completion is not a producer.
+        assert!(!model.settle_candidate(token, true, true));
+        assert_eq!(
+            (
+                model.generation,
+                model.format_generation,
+                model.metadata_generation
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(model.state, WebGpuSessionState::Disposing);
+        model.settle_completion();
+        assert!(model.finish_dispose());
+        assert_eq!(model.state, WebGpuSessionState::Disposed);
+    }
+
+    #[test]
+    fn candidate_failure_is_terminal_only_for_its_live_recovery() {
+        let mut model = Interleaving::active();
+        let token = model.begin_recovery();
+        assert!(!model.settle_candidate(token, false, true));
+        assert_eq!(model.state, WebGpuSessionState::Poisoned);
+        assert_eq!(
+            (
+                model.generation,
+                model.format_generation,
+                model.metadata_generation
+            ),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn dispose_requires_join_of_recovery_completion_and_producers() {
+        let mut model = Interleaving::active();
+        model.active_submission = true;
+        let token = model.begin_recovery();
+        model.begin_dispose();
+        assert!(!model.finish_dispose());
+        // The old completion settles first, while the stale recovery is still
+        // pending. `Disposed` would be a lie at this point.
+        model.settle_completion();
+        assert!(!model.finish_dispose());
+        assert!(!model.settle_candidate(token, true, false));
+        assert!(model.finish_dispose());
+    }
+
+    #[test]
+    fn every_terminal_disposal_root_independently_blocks_disposed() {
+        let clear = TerminalDisposalRoots {
+            recovery_pending: false,
+            live_objects: false,
+            retired_objects: false,
+            active_tickets: false,
+            detached_tickets: false,
+            quarantined_resources: false,
+            callback_or_listener_producer: false,
+        };
+        assert!(terminal_dispose_ready(WebGpuSessionState::Disposing, clear));
+        assert!(!terminal_dispose_ready(WebGpuSessionState::Active, clear));
+
+        for blocked in [
+            TerminalDisposalRoots {
+                recovery_pending: true,
+                ..clear
+            },
+            TerminalDisposalRoots {
+                live_objects: true,
+                ..clear
+            },
+            TerminalDisposalRoots {
+                retired_objects: true,
+                ..clear
+            },
+            TerminalDisposalRoots {
+                active_tickets: true,
+                ..clear
+            },
+            TerminalDisposalRoots {
+                detached_tickets: true,
+                ..clear
+            },
+            TerminalDisposalRoots {
+                quarantined_resources: true,
+                ..clear
+            },
+            TerminalDisposalRoots {
+                callback_or_listener_producer: true,
+                ..clear
+            },
+        ] {
+            assert!(!terminal_dispose_ready(
+                WebGpuSessionState::Disposing,
+                blocked
+            ));
+        }
     }
 }

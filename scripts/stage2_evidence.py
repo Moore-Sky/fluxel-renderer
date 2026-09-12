@@ -39,7 +39,7 @@ import http.client
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import queue
 import secrets
 import shutil
@@ -211,22 +211,48 @@ def git_repository_info(path: Path) -> dict[str, object]:
 
 
 def chrome_default() -> Path | None:
+    """Find a locally installed Chrome-family binary without assuming Windows."""
     candidates = [
         Path(os.environ.get("PROGRAMFILES", r"C:\\Program Files"))
         / "Google/Chrome/Application/chrome.exe",
         Path(os.environ.get("PROGRAMFILES(X86)", r"C:\\Program Files (x86)"))
         / "Google/Chrome/Application/chrome.exe",
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     ]
+    for program in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        located = shutil.which(program)
+        if located:
+            candidates.append(Path(located))
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 def chrome_version(chrome: Path) -> str:
-    """Read Chrome's side-by-side version directory without launching its GUI."""
-    versions = [
-        child.name for child in chrome.parent.iterdir()
-        if child.is_dir() and all(part.isdigit() for part in child.name.split("."))
-    ]
-    return max(versions, key=lambda value: tuple(map(int, value.split("."))), default="unavailable")
+    """Ask the selected browser for its version without opening a page."""
+    try:
+        completed = subprocess.run(
+            [str(chrome), "--version"], capture_output=True, text=True, check=False,
+            encoding="utf-8", errors="replace", timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"unavailable: {error}"
+    version = (completed.stdout or completed.stderr).strip()
+    return version or "unavailable"
+
+
+def entry_path(value: str) -> PurePosixPath:
+    """Accept one relative URL path and reject host-platform path spellings.
+
+    The entry becomes both a URL and a filesystem path below ``--site-root``.
+    Rejecting backslashes and traversal keeps those two interpretations identical
+    on Windows, macOS, and Linux.
+    """
+    if not value or "\\" in value:
+        raise EvidenceError("--entry must be a non-empty relative URL path using '/' only")
+    path = PurePosixPath(value)
+    raw_parts = value.split("/")
+    if path.is_absolute() or any(part in ("", ".", "..") for part in raw_parts):
+        raise EvidenceError("--entry must stay below --site-root without '.' or '..' segments")
+    return path
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -756,8 +782,7 @@ def validate_staged_wasm(stage: Path) -> dict[str, object]:
 
 
 def maybe_bindgen(args: argparse.Namespace, site_root: Path, command_log: list[list[str]]) -> dict[str, object]:
-    entry = args.entry.lstrip("/")
-    stage = (site_root / entry).parent / "wasm"
+    stage = (site_root.joinpath(*entry_path(args.entry).parts)).parent / "wasm"
     if not args.wasm:
         return validate_staged_wasm(stage)
     wasm = Path(args.wasm).resolve()
@@ -784,7 +809,7 @@ def maybe_bindgen(args: argparse.Namespace, site_root: Path, command_log: list[l
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--site-root", required=True, help="Static jsbridge demo root served over localhost.")
-    parser.add_argument("--entry", default="index.html", help="Entry path below --site-root (default: index.html).")
+    parser.add_argument("--entry", default="index.html", help="Relative URL path below --site-root, using '/' (default: index.html).")
     parser.add_argument("--backend", choices=("webgl2", "webgpu"), default="webgl2",
                         help="Browser GPU lifecycle under test (default: webgl2).")
     parser.add_argument("--chrome", help="Exact chrome.exe path; defaults to installed Google Chrome.")
@@ -796,6 +821,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=30, help="Chrome/protocol timeout seconds.")
     parser.add_argument("--width", type=int, default=800)
     parser.add_argument("--height", type=int, default=600)
+    parser.add_argument("--headless", action="store_true", help="Run Chrome headlessly (for CI smoke only).")
     return parser.parse_args()
 
 
@@ -807,8 +833,9 @@ def main() -> int:
     site_root = Path(args.site_root).resolve()
     if not site_root.is_dir():
         raise EvidenceError(f"--site-root is not a directory: {site_root}")
-    entry = args.entry.lstrip("/")
-    if not (site_root / entry).is_file():
+    entry = entry_path(args.entry)
+    entry_file = site_root.joinpath(*entry.parts)
+    if not entry_file.is_file():
         raise EvidenceError(f"entry does not exist below --site-root: {entry}")
     chrome = Path(args.chrome).resolve() if args.chrome else chrome_default()
     if not chrome or not chrome.is_file():
@@ -833,12 +860,14 @@ def main() -> int:
         "--no-first-run", "--no-default-browser-check", "--enable-logging=stderr",
         f"--window-size={args.width},{args.height}", "about:blank",
     ]
+    if args.headless:
+        chrome_command.insert(-1, "--headless=new")
     command_log.append(chrome_command)
     process: subprocess.Popen[str] | None = None
     cdp: Cdp | None = None
     manifest: dict[str, object] = {"schema": 1, "started_at": utc_now(), "repo_sha": sha,
         "repositories": {"rendering": git_repository_info(repo), "site": git_repository_info(site_root)},
-        "site_root": str(site_root), "entry": entry, "backend": args.backend, "commands": command_log,
+        "site_root": str(site_root), "entry": entry.as_posix(), "backend": args.backend, "commands": command_log,
         "chrome": {"path": str(chrome), "version": chrome_version(chrome)},
         "os": {"name": os.name, "platform": sys.platform}, "wasm_bindgen_staging": staged_wasm,
         "states": {}}
@@ -852,7 +881,7 @@ def main() -> int:
                 raise EvidenceError("Chrome /json/new did not provide a page CDP URL")
             cdp = Cdp(websocket)
             cdp.enable_diagnostics()
-            url = f"{server.origin}/{quote(entry)}"
+            url = f"{server.origin}/{quote(entry.as_posix())}"
             ready_started = time.monotonic()
             cdp.call("Page.navigate", {"url": url})
             deadline = time.monotonic() + args.timeout

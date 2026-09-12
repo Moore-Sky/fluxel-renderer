@@ -82,9 +82,11 @@ pub use upload::{
     VertexColorMaterial, VertexColorMaterialError,
 };
 #[cfg(feature = "gpu-upload")]
-#[doc(hidden)]
-/// Deliberately closed preparation output shared by retained renderer paths.
-pub mod experimental {
+/// Closed adapter-facing preparation contract for retained renderer paths.
+///
+/// This surface exists for sibling native/browser execution adapters. It is
+/// not a general scene, resource, pipeline, or backend extension API.
+pub mod adapter {
     pub use crate::prepared_scene::{
         PreparedBasicDraw, PreparedBasicGraph, PreparedBasicGraphError, PreparedBasicScene,
         PreparedBasicSceneError, PresentableFormat, PresentationProfile,

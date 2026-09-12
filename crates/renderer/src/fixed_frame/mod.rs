@@ -21,9 +21,7 @@ use fluxel_rendergraph::{
     SurfaceTextureContract, TextureBindingId, TextureDesc, TextureDimension, TextureFormat,
     TextureRange, TextureReadUse, Viewport, WriteCoverage,
 };
-use fluxel_rhi::experimental::fixed_artifacts::{
-    RasterBackend, RasterKernel, RasterObjectProvider,
-};
+use fluxel_rhi::adapter::fixed_artifacts::{RasterBackend, RasterKernel, RasterObjectProvider};
 use fluxel_rhi::{
     Buffer, BufferDescriptor, BufferUploadError, Device, MemoryPolicy, PendingBufferUpload,
     ResourceLease, Texture, UploadedBuffer,
